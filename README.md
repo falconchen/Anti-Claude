@@ -4,6 +4,8 @@
 
 它不只是一套界面样式——除了对齐 `Claude.app` 的视觉与高频控件，还同时改写了 Agent 的输出习惯与前端渲染逻辑：把原生「闷头调工具、跑完折叠成黑盒」改成「边做边汇报 + 流内实时进度卡片」。全程通过本地 CDP 注入与用户目录配置实现，不改 `Antigravity.app` 安装包，不破签名。
 
+![Anti-Claude 效果预览](assets/preview.png)
+
 ## 安装
 
 需要 macOS 与 Node.js `>= 22`。
