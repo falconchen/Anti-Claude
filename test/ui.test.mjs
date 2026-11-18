@@ -171,6 +171,7 @@ function modelTrigger(h) {
       modelOptions: [
         { label: 'Gemini 4 Carbon (Medium)', value: 'c-m' },
         { label: 'Gemini 4 Carbon (High)', value: 'c-h' },
+        { label: 'Gemini 4 Carbon (XHigh)', value: 'c-xh' },
         { label: 'Gemini 3.8 Flash', value: 'f' }
       ],
       get selectedModel() {
@@ -187,12 +188,29 @@ function modelTrigger(h) {
 
 test('keyboard activation (click detail=0) opens the custom menu', { skip }, () => {
   const h = mount('');
-  const { btn } = modelTrigger(h);
+  const { btn, selected } = modelTrigger(h);
   btn.dispatchEvent(new h.window.MouseEvent('click', { bubbles: true, cancelable: true, detail: 0 }));
   const pop = h.doc.getElementById('ag-claude-model-popover');
   assert.ok(pop);
   assert.equal(pop.getAttribute('data-open'), 'true');
   assert.equal(pop.getAttribute('role'), 'menu');
+
+  /* Effort flyout displays XHigh as "Extra" while still selecting the underlying XHigh option */
+  const effortTrigger = pop.querySelector('[data-ag-cm-subtrigger="effort"]');
+  effortTrigger.click();
+  const subPop = h.doc.getElementById('ag-claude-model-subpop');
+  assert.equal(subPop.getAttribute('data-open'), 'true');
+  const xhRow = subPop.querySelector('[data-ag-cm-effort="XHigh"]');
+  assert.ok(xhRow, 'XHigh option row exists');
+  assert.equal(xhRow.textContent.includes('Extra'), true, 'displays Extra label');
+  assert.equal(xhRow.textContent.includes('XHigh'), false, 'hides raw XHigh text');
+  xhRow.click();
+  assert.equal(selected().value, 'c-xh', 'selecting Extra commits underlying XHigh option');
+
+  /* Re-opening reflects Extra on the main effort row too */
+  btn.dispatchEvent(new h.window.Event('pointerdown', { bubbles: true, cancelable: true }));
+  assert.match(pop.querySelector('[data-ag-cm-subtrigger="effort"]').textContent, /Extra/);
+  assert.equal(h.doc.querySelectorAll('#ag-claude-model-popover').length, 1);
   h.close();
 });
 
@@ -688,13 +706,19 @@ test('sidebar folder status badges & top Recents: aggregates collapsed folders, 
     ['conv-pending', 'conv-running', 'conv-idle-unread'],
     'sorted by pending > running > recent and excludes hidden workflow & already-pinned sessions'
   );
-  assert.equal(h.doc.querySelector('#ag-claude-recent-section .ag-recent-row:nth-child(3) .ag-recent-title').textContent, '恢复谷歌浏览器 Gemini 侧边栏');
-  assert.equal(h.doc.querySelector('[data-testid="conversation-row-sidebar"] span.truncate').textContent, '恢复谷歌浏览器 Gemini 侧边栏');
+  assert.equal(h.doc.documentElement.getAttribute('lang'), 'zh-CN', 'sets zh-CN root locale for CJK shaping & line-break rules');
+  assert.equal(
+    h.doc.querySelector('#ag-claude-recent-section .ag-recent-row:nth-child(3) .ag-recent-title').textContent,
+    '恢复谷歌浏览器Gemini侧边栏',
+    'keeps raw title untouched so native CSS text-autospace provides uniform 1/8em spacing'
+  );
+  assert.equal(h.doc.querySelector('[data-testid="conversation-row-sidebar"] span.truncate').textContent, '恢复谷歌浏览器Gemini侧边栏');
   assert.equal(h.doc.querySelectorAll('#ag-claude-recent-section .ag-recent-proj').length, 0, 'Variant A uses pure single-line rows');
   assert.match(recentRows[1].getAttribute('title') || '', /所属项目：项目B/, 'hover title exposes project name');
   recentRows[1].click();
   assert.deepEqual(JSON.parse(JSON.stringify(navigatedTo)), { to: '/c/$cascadeId', params: { cascadeId: 'conv-running' } });
   h.cleanups.forEach((fn) => fn());
+  assert.equal(h.doc.documentElement.hasAttribute('lang'), false, 'dispose restores original html lang state');
   h.close();
 });
 

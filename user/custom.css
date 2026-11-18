@@ -10,8 +10,43 @@
  * ============================================================================ */
 
 /* ============================================================================
- * 0. Global Typography & Spacing (100% Sans-Serif, 14px / 1.65)
+ * 0. Global Typography & Spacing (Apple-Grade CJK–Latin Optical Balance, 14px)
+ *    - Local PingFang SC CJK subset at 95.5% size-adjust to align cap-height with SF Pro
+ *    - Native 1/8em `text-autospace: normal` + consecutive punctuation trim `text-spacing-trim: normal`
+ *    - `text-wrap: pretty` orphan elimination on prose + `balance` on headings + `text-box-trim` on pills
  * ============================================================================ */
+@font-face {
+  font-family: 'AG PingFang Tuned';
+  src: local('PingFangSC-Light'), local('PingFang SC Light'), local('PingFangSC-Regular');
+  font-weight: 300;
+  size-adjust: 95.5%;
+  unicode-range: U+2E80-9FFF, U+F900-FAFF, U+3000-303F, U+FF01-FF60;
+}
+
+@font-face {
+  font-family: 'AG PingFang Tuned';
+  src: local('PingFangSC-Regular'), local('PingFang SC Regular'), local('PingFang SC');
+  font-weight: 400;
+  size-adjust: 95.5%;
+  unicode-range: U+2E80-9FFF, U+F900-FAFF, U+3000-303F, U+FF01-FF60;
+}
+
+@font-face {
+  font-family: 'AG PingFang Tuned';
+  src: local('PingFangSC-Medium'), local('PingFang SC Medium'), local('PingFang SC');
+  font-weight: 500;
+  size-adjust: 95.5%;
+  unicode-range: U+2E80-9FFF, U+F900-FAFF, U+3000-303F, U+FF01-FF60;
+}
+
+@font-face {
+  font-family: 'AG PingFang Tuned';
+  src: local('PingFangSC-Semibold'), local('PingFang SC Semibold'), local('PingFang SC');
+  font-weight: 600 700;
+  size-adjust: 95.5%;
+  unicode-range: U+2E80-9FFF, U+F900-FAFF, U+3000-303F, U+FF01-FF60;
+}
+
 :root,
 html,
 body,
@@ -22,9 +57,9 @@ body[data-agy-font="google-sans"],
 body[data-agy-font="inter"],
 body[data-agy-font] :where(.font-sans),
 .pdf-sdk-root {
-  --vscode-font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Segoe UI', Roboto, sans-serif !important;
+  --vscode-font-family: 'AG PingFang Tuned', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Segoe UI', Roboto, sans-serif !important;
   --editor-font-family: 'SF Mono', 'Anthropic Mono', 'Anthropic Mono Web', Menlo, Consolas, 'PingFang SC', 'Microsoft YaHei UI', ui-monospace, monospace !important;
-  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Segoe UI', Roboto, sans-serif !important;
+  --font-sans: 'AG PingFang Tuned', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Segoe UI', Roboto, sans-serif !important;
   --font-mono: 'SF Mono', 'Anthropic Mono', 'Anthropic Mono Web', Menlo, Consolas, 'PingFang SC', 'Microsoft YaHei UI', ui-monospace, monospace !important;
   --default-font-family: var(--font-sans) !important;
   --default-mono-font-family: var(--font-mono) !important;
@@ -34,21 +69,26 @@ body[data-agy-font] :where(.font-sans),
   --sdk-comment-font-family: var(--font-sans) !important;
   --ag-chat-font-size: 14px;
   text-autospace: normal !important;
+  text-spacing-trim: normal !important;
 }
 
-/* AI response prose & lists: unified sans-serif 14px / 1.65 with comfortable list spacing */
+/* AI response prose & lists: unified sans-serif 14px / 1.65 with orphan prevention & strict CJK line-break rules */
 :is([data-testid="planner-response-text"], [data-markdown-root], .select-text, .prose, .markdown, article),
 :is([data-testid="planner-response-text"], [data-markdown-root], .select-text, .prose, .markdown, article) :is(p, li, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, td, th) {
   font-family: var(--font-sans) !important;
   font-variant-numeric: normal;
   letter-spacing: 0 !important;
   text-shadow: none !important;
+  text-autospace: normal !important;
+  text-spacing-trim: normal !important;
 }
 
 :is([data-testid="planner-response-text"], [data-markdown-root], .prose, .markdown) :is(p, li, blockquote) {
   font-size: 14px !important;
   line-height: 1.65 !important;
   color: var(--foreground) !important;
+  text-wrap: pretty !important;
+  line-break: strict !important;
 }
 
 :is([data-testid="planner-response-text"], [data-markdown-root], .prose, .markdown) :is(ul, ol) {
@@ -65,6 +105,7 @@ body[data-agy-font] :where(.font-sans),
   line-height: 1.45 !important;
   margin-top: 1.05em !important;
   margin-bottom: 0.45em !important;
+  text-wrap: balance !important;
 }
 
 :is([data-testid="planner-response-text"], [data-markdown-root], .prose, .markdown) h3 {
@@ -105,10 +146,37 @@ div[contenteditable="true"] :is(p, span, div),
   color: var(--placeholder, #8E8D88) !important;
 }
 
-/* Code blocks & inline code */
+/* Rendered user bubbles: prevent single-character trailing orphans & enforce strict CJK punctuation breaks */
+:is([data-testid="user-message-content"], .agy-user-bubble) {
+  text-wrap: pretty !important;
+  line-break: strict !important;
+  text-autospace: normal !important;
+  text-spacing-trim: normal !important;
+}
+
+/* Code blocks & inline code: preserve exact monospace metrics without CJK autospace injection */
 :is([data-testid="planner-response-text"], [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .select-text, .prose, .markdown, article) :is(code, pre, pre *, kbd, samp, .font-mono, [class*="language-"]) {
   font-family: var(--font-mono) !important;
   font-size: 12.8px !important;
+  text-autospace: no-autospace !important;
+  text-spacing-trim: space-all !important;
+}
+
+/* Compact pills, badges & capsule buttons: trim leading/trailing font metrics for true optical centering */
+@supports (text-box-trim: trim-both) {
+  :is(
+    #ag-claude-quota-popover .ag-qp-compact-btn > span,
+    #ag-claude-quota-popover .ag-qp-tab,
+    .ag-claude-todo-badge,
+    .ag-ux-tt-badge,
+    .ag-claude-folder-badge,
+    .ag-claude-inline-file-chip,
+    .ag-claude-inline-btn,
+    [data-uri^="slashCommand:"]
+  ) {
+    text-box-trim: trim-both !important;
+    text-box-edge: cap alphabetic !important;
+  }
 }
 
 /* ============================================================================

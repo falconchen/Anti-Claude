@@ -53,6 +53,14 @@
     } catch {}
   }
 
+  /* Set root locale to zh-CN so Chromium/HarfBuzz selects Simplified Chinese `locl` glyphs and strict CJK line-break rules */
+  const docRoot = document.documentElement;
+  const origDocLang = docRoot ? docRoot.getAttribute('lang') : null;
+  const hadDocLang = docRoot ? docRoot.hasAttribute('lang') : false;
+  if (docRoot && origDocLang !== 'zh-CN') {
+    docRoot.setAttribute('lang', 'zh-CN');
+  }
+
   const userToggled = new WeakSet();
   const autoExpandCount = new WeakMap();
   const openSnapshots = new WeakMap();
@@ -2277,8 +2285,9 @@
    *    - Bottom: unified `思考强度 >` flyout (`Low/Medium/High/XHigh`) & `更多模型 >` flyout
    *    - Calls Antigravity's native React Fiber `setSelectedModel(option)` directly
    * ========================================================================== */
-  const EFFORT_LABEL_RE = /^(.*?)\s*\((Low|Medium|High|XHigh|Max)\)\s*$/i;
-  const EFFORT_NORM = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'XHigh', max: 'Max' };
+  const EFFORT_LABEL_RE = /^(.*?)\s*\((Low|Medium|High|XHigh|Extra|Max)\)\s*$/i;
+  const EFFORT_NORM = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'XHigh', extra: 'XHigh', max: 'Max' };
+  const EFFORT_DISPLAY = { XHigh: 'Extra' };
   const EFFORT_RANK = { Low: 0, Medium: 1, High: 2, XHigh: 3, Max: 4 };
   const EFFORT_DESC = {
     Low: '最快响应，轻量日常问答',
@@ -2287,6 +2296,9 @@
     XHigh: '极限长链深度推理',
     Max: '最高推理强度'
   };
+  function displayEffortLabel(effort) {
+    return (effort && EFFORT_DISPLAY[effort]) || effort;
+  }
   const SVG_CM_CHECK =
     '<svg class="ag-cm-check" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.2 8.4L6.5 11.7L13 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   const SVG_CM_CHEVRON =
@@ -2558,9 +2570,9 @@
     const hasAdjustableEffort = multiEfforts.length > 1;
     const curEffortText =
       cat.activeVariant && cat.activeVariant.effort
-        ? cat.activeVariant.effort
+        ? displayEffortLabel(cat.activeVariant.effort)
         : hasAdjustableEffort
-          ? lastPreferredEffort
+          ? displayEffortLabel(lastPreferredEffort)
           : '固定';
 
     const activeInMore = cat.moreFamilies.some((x) => cat.activeFamily && x.fam.baseName === cat.activeFamily.baseName);
@@ -2618,9 +2630,10 @@
           .map((v) => {
             const on = Boolean(cat.activeVariant && v.effort === cat.activeVariant.effort);
             const desc = EFFORT_DESC[v.effort] || '';
+            const label = displayEffortLabel(v.effort);
             return `<button type="button" class="ag-cm-row" data-ag-cm-effort="${escapeHtml(v.effort)}">
               <span>
-                <span style="display:block;line-height:1.25;">${escapeHtml(v.effort)}</span>
+                <span style="display:block;line-height:1.25;">${escapeHtml(label)}</span>
                 ${desc ? `<span class="ag-cm-sub-desc" style="display:block;">${escapeHtml(desc)}</span>` : ''}
               </span>
               ${on ? SVG_CM_CHECK : ''}
@@ -3440,26 +3453,16 @@
     return false;
   }
 
-  function formatCjkSpacing(text) {
-    if (typeof text !== 'string' || !text) return '';
-    return text
-      .replace(/([\u4e00-\u9fff])([A-Za-z0-9])/g, '$1 $2')
-      .replace(/([A-Za-z0-9])([\u4e00-\u9fff])/g, '$1 $2');
-  }
-
-  function syncSidebarCjkSpacing() {
-    const spans = document.querySelectorAll(
-      '[data-testid="conversation-row-sidebar"] span.truncate, .agy-sidebar-row span.truncate'
-    );
-    for (const span of spans) {
-      if (span.childNodes.length !== 1 || !span.firstChild || span.firstChild.nodeType !== 3) continue;
-      const cur = span.firstChild.nodeValue || '';
-      const next = formatCjkSpacing(cur);
-      if (next !== cur) {
-        if (!span.hasAttribute('data-ag-orig-cjk')) span.setAttribute('data-ag-orig-cjk', cur);
-        span.firstChild.nodeValue = next;
+  /* Left sidebar & Recents rely on native CSS `text-autospace: normal` (1/8em optical boundary, matching right-pane prose
+   * without mutating DOM text nodes or polluting copied conversation titles with extra ASCII spaces). */
+  function restoreLegacySidebarCjkNodes() {
+    document.querySelectorAll('[data-ag-orig-cjk]').forEach((el) => {
+      const orig = el.getAttribute('data-ag-orig-cjk');
+      el.removeAttribute('data-ag-orig-cjk');
+      if (orig !== null && el.childNodes.length === 1 && el.firstChild && el.firstChild.nodeType === 3) {
+        el.firstChild.nodeValue = orig;
       }
-    }
+    });
   }
 
   function classifySidebarConversation(id, summary, state, activeId, hasFocus) {
@@ -3484,7 +3487,7 @@
         }
       }
     }
-    const title = formatCjkSpacing((summary.annotations && summary.annotations.title) || summary.summary || id);
+    const title = String((summary.annotations && summary.annotations.title) || summary.summary || id);
     if (waitingStep) {
       return { kind: 'pending', subkind: pendingSubkindOf(waitingStep), title };
     }
@@ -3770,7 +3773,7 @@
       if (isSummaryPinned(id, summary, state)) continue;
       const rawTitle = (summary.annotations && summary.annotations.title) || summary.summary;
       if (!rawTitle) continue;
-      const title = formatCjkSpacing(rawTitle);
+      const title = String(rawTitle);
       const updatedAt = Math.max(protoSeconds(summary.lastModifiedTime), protoSeconds(summary.createdTime));
       const status = classifySidebarConversation(id, summary, state, activeId, hasFocus);
       const priority = status && status.kind === 'pending' ? 3 : status && status.kind === 'running' ? 2 : 1;
@@ -3871,7 +3874,7 @@
 
   function syncSidebarEnhancements() {
     if (disposed) return;
-    syncSidebarCjkSpacing();
+    restoreLegacySidebarCjkNodes();
     if (!FEAT.folderStatus && !FEAT.recentSection) {
       if (sidebarStoreUnsub) {
         sidebarStoreUnsub();
@@ -4273,13 +4276,11 @@
         el.removeAttribute('data-ag-model-open');
         el.removeAttribute('data-ag-inline-stream');
       });
-    document.querySelectorAll('[data-ag-orig-cjk]').forEach((el) => {
-      const orig = el.getAttribute('data-ag-orig-cjk');
-      el.removeAttribute('data-ag-orig-cjk');
-      if (orig !== null && el.childNodes.length === 1 && el.firstChild && el.firstChild.nodeType === 3) {
-        el.firstChild.nodeValue = orig;
-      }
-    });
+    restoreLegacySidebarCjkNodes();
+    if (docRoot && docRoot.getAttribute('lang') === 'zh-CN') {
+      if (hadDocLang && origDocLang !== null) docRoot.setAttribute('lang', origDocLang);
+      else docRoot.removeAttribute('lang');
+    }
     if (window.__agClaudeUxDispose === dispose) window.__agClaudeUxDispose = null;
   }
 
