@@ -3017,6 +3017,28 @@
     return false;
   }
 
+  function formatCjkSpacing(text) {
+    if (typeof text !== 'string' || !text) return '';
+    return text
+      .replace(/([\u4e00-\u9fff])([A-Za-z0-9])/g, '$1 $2')
+      .replace(/([A-Za-z0-9])([\u4e00-\u9fff])/g, '$1 $2');
+  }
+
+  function syncSidebarCjkSpacing() {
+    const spans = document.querySelectorAll(
+      '[data-testid="conversation-row-sidebar"] span.truncate, .agy-sidebar-row span.truncate'
+    );
+    for (const span of spans) {
+      if (span.childNodes.length !== 1 || !span.firstChild || span.firstChild.nodeType !== 3) continue;
+      const cur = span.firstChild.nodeValue || '';
+      const next = formatCjkSpacing(cur);
+      if (next !== cur) {
+        if (!span.hasAttribute('data-ag-orig-cjk')) span.setAttribute('data-ag-orig-cjk', cur);
+        span.firstChild.nodeValue = next;
+      }
+    }
+  }
+
   function classifySidebarConversation(id, summary, state, activeId, hasFocus) {
     if (!isSidebarVisibleSummary(id, summary, state)) return null;
 
@@ -3039,7 +3061,7 @@
         }
       }
     }
-    const title = (summary.annotations && summary.annotations.title) || summary.summary || id;
+    const title = formatCjkSpacing((summary.annotations && summary.annotations.title) || summary.summary || id);
     if (waitingStep) {
       return { kind: 'pending', subkind: pendingSubkindOf(waitingStep), title };
     }
@@ -3323,8 +3345,9 @@
     for (const [id, summary] of Object.entries(summaries)) {
       if (!isSidebarVisibleSummary(id, summary, state)) continue;
       if (isSummaryPinned(id, summary, state)) continue;
-      const title = (summary.annotations && summary.annotations.title) || summary.summary;
-      if (!title) continue;
+      const rawTitle = (summary.annotations && summary.annotations.title) || summary.summary;
+      if (!rawTitle) continue;
+      const title = formatCjkSpacing(rawTitle);
       const updatedAt = Math.max(protoSeconds(summary.lastModifiedTime), protoSeconds(summary.createdTime));
       const status = classifySidebarConversation(id, summary, state, activeId, hasFocus);
       const priority = status && status.kind === 'pending' ? 3 : status && status.kind === 'running' ? 2 : 1;
@@ -3425,6 +3448,7 @@
 
   function syncSidebarEnhancements() {
     if (disposed) return;
+    syncSidebarCjkSpacing();
     if (!FEAT.folderStatus && !FEAT.recentSection) {
       if (sidebarStoreUnsub) {
         sidebarStoreUnsub();
@@ -3822,6 +3846,13 @@
         el.removeAttribute('data-ag-model-open');
         el.removeAttribute('data-ag-inline-stream');
       });
+    document.querySelectorAll('[data-ag-orig-cjk]').forEach((el) => {
+      const orig = el.getAttribute('data-ag-orig-cjk');
+      el.removeAttribute('data-ag-orig-cjk');
+      if (orig !== null && el.childNodes.length === 1 && el.firstChild && el.firstChild.nodeType === 3) {
+        el.firstChild.nodeValue = orig;
+      }
+    });
     if (window.__agClaudeUxDispose === dispose) window.__agClaudeUxDispose = null;
   }
 

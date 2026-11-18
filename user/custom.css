@@ -16,14 +16,15 @@
 html,
 body,
 body[data-agy-theme],
+body[data-agy-theme] :where(.font-sans),
 body[data-agy-font],
 body[data-agy-font="google-sans"],
 body[data-agy-font="inter"],
 body[data-agy-font] :where(.font-sans),
 .pdf-sdk-root {
-  --vscode-font-family: 'Anthropic Sans', 'Anthropic Sans Web', -apple-system, 'PingFang SC', BlinkMacSystemFont, 'Hiragino Sans GB', 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif !important;
+  --vscode-font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Segoe UI', Roboto, sans-serif !important;
   --editor-font-family: 'SF Mono', 'Anthropic Mono', 'Anthropic Mono Web', Menlo, Consolas, 'PingFang SC', 'Microsoft YaHei UI', ui-monospace, monospace !important;
-  --font-sans: 'Anthropic Sans', 'Anthropic Sans Web', -apple-system, 'PingFang SC', BlinkMacSystemFont, 'Hiragino Sans GB', 'Segoe UI', 'Microsoft YaHei UI', system-ui, sans-serif !important;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei UI', 'Segoe UI', Roboto, sans-serif !important;
   --font-mono: 'SF Mono', 'Anthropic Mono', 'Anthropic Mono Web', Menlo, Consolas, 'PingFang SC', 'Microsoft YaHei UI', ui-monospace, monospace !important;
   --default-font-family: var(--font-sans) !important;
   --default-mono-font-family: var(--font-mono) !important;
@@ -32,6 +33,7 @@ body[data-agy-font] :where(.font-sans),
   --sdk-font-family-mono: var(--font-mono) !important;
   --sdk-comment-font-family: var(--font-sans) !important;
   --ag-chat-font-size: 14px;
+  text-autospace: normal !important;
 }
 
 /* AI response prose & lists: unified sans-serif 14px / 1.65 with comfortable list spacing */
@@ -174,12 +176,12 @@ html:not([data-ag-theme-mode="dark"])[data-ag-preset] body:not(.dark) {
   --ag-send-btn-border: #191918;
   --ag-send-btn-shadow: none;
 
-  --ag-sidebar-fg: #3D3D3A;
-  --ag-sidebar-row-fg: #3D3D3A;
-  --ag-sidebar-header-fg: #52524E;
+  --ag-sidebar-fg: #191918;
+  --ag-sidebar-row-fg: #191918;
+  --ag-sidebar-header-fg: #191918;
   --ag-sidebar-header-title-fg: #191918;
   --ag-sidebar-selected-fg: #191918;
-  --ag-sidebar-muted-fg: #8A8985;
+  --ag-sidebar-muted-fg: #8E8D88;
   --ag-menu-item-fg: #191918;
   --ag-menu-header-fg: #787774;
   --ag-dialog-title-fg: #191918;
@@ -252,6 +254,12 @@ html[data-ag-preset] body[data-agy-theme].dark {
   --ag-send-btn-hover-bg: #FFFFFF;
   --ag-send-btn-border: #ECECEA;
   --ag-send-btn-shadow: none !important;
+  --ag-sidebar-fg: #ECECEA;
+  --ag-sidebar-row-fg: #ECECEA;
+  --ag-sidebar-header-fg: #ECECEA;
+  --ag-sidebar-header-title-fg: #ECECEA;
+  --ag-sidebar-selected-fg: #ECECEA;
+  --ag-sidebar-muted-fg: #8E8D88;
 }
 
 /* 夜间侧栏选中胶囊：抹除底层冷蓝立体高光，对齐 Claude 扁平暖炭灰 */
@@ -259,6 +267,38 @@ html[data-ag-preset] body[data-agy-theme].dark {
   background-color: #2F2F2D !important;
   --row-bg: #2F2F2D !important;
   box-shadow: none !important;
+}
+
+/* 2.1 左栏与右栏正文排版 1:1 统一（14px / 400 / 0 字距，选中态仅靠胶囊底色区分、不加粗） */
+html body .bg-sidebar :is([data-testid="sidebar-navigation-items"] a, [data-testid="sidebar-navigation-items"] button, [data-testid="settings-button"], [data-testid="conversation-row-sidebar"], .agy-sidebar-row, button[data-testid="project-header"], button[data-project-card="true"]),
+html body .bg-sidebar :is([data-testid="sidebar-navigation-items"] a, [data-testid="sidebar-navigation-items"] button, [data-testid="settings-button"], button[data-testid="project-header"], button[data-project-card="true"]) span.truncate,
+html body .bg-sidebar :is([data-testid="conversation-row-sidebar"], .agy-sidebar-row):is([data-selected="true"], :not([data-selected="true"])) :is(span.truncate, [class*="truncate"]),
+html body aside :is([data-testid="conversation-row-sidebar"], .agy-sidebar-row) :is(span.truncate, [class*="truncate"]),
+html body .bg-sidebar [data-testid="conversation-row-sidebar"][data-selected="true"],
+html body .bg-sidebar :is([data-active="true"], [data-active=""]),
+html body .bg-sidebar :is([data-active="true"], [data-active=""]) span.truncate {
+  font-family: var(--font-sans) !important;
+  font-size: 14px !important;
+  font-weight: 400 !important;
+  line-height: 20px !important;
+  letter-spacing: 0 !important;
+  text-shadow: none !important;
+  color: var(--ag-sidebar-fg, #191918) !important;
+  -webkit-font-smoothing: antialiased !important;
+}
+
+html body .bg-sidebar .group\/section-header :is(h2, button, span.truncate),
+html body .bg-sidebar :is([class*="text-muted"], [class*="text-[11px]"], [class*="uppercase"], [class*="text-xs"]),
+html body .bg-sidebar :is([data-testid="conversation-row-sidebar"], .agy-sidebar-row) :is(span.text-sm.opacity-60, [class*="opacity-60"], [class*="text-xs"]) {
+  font-family: var(--font-sans) !important;
+  font-size: 12px !important;
+  font-weight: 400 !important;
+  line-height: 16px !important;
+  letter-spacing: 0 !important;
+  text-shadow: none !important;
+  opacity: 1 !important;
+  color: var(--ag-sidebar-muted-fg, #8E8D88) !important;
+  -webkit-font-smoothing: subpixel-antialiased !important;
 }
 
 /* ============================================================================
@@ -728,6 +768,22 @@ div[data-ag-inline-stream="true"] > button[data-testid="worked-for-collapsible"]
 [data-testid="tool-group-collapsible"]:hover {
   color: var(--foreground, #191918) !important;
   background-color: rgba(0, 0, 0, 0.03) !important;
+}
+
+/* 思考过程展开区：保持与正文一致的 14px 无衬线排版，但保留次级灰字层次 */
+[data-testid="thinking-collapsible-trigger"] + div :is([data-markdown-root], p, li, blockquote) {
+  font-family: var(--font-sans) !important;
+  font-size: 14px !important;
+  font-weight: 400 !important;
+  letter-spacing: 0 !important;
+}
+
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="thinking-collapsible-trigger"] + div :is([data-markdown-root], p, li, blockquote, strong, b, h1, h2, h3, h4) {
+  color: #6B6A66 !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [data-testid="thinking-collapsible-trigger"] + div :is([data-markdown-root], p, li, blockquote, strong, b, h1, h2, h3, h4) {
+  color: #9E9D98 !important;
 }
 
 @keyframes agStepExpandIn {
@@ -2279,29 +2335,30 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-recent-section 
   font-size: 14px !important;
   line-height: 20px !important;
   font-weight: 400 !important;
-  letter-spacing: -0.005em !important;
+  letter-spacing: 0 !important;
   text-shadow: none !important;
+  -webkit-font-smoothing: antialiased !important;
   white-space: nowrap !important;
   overflow: hidden !important;
   text-overflow: ellipsis !important;
 }
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-recent-section .ag-recent-title {
-  color: var(--ag-sidebar-row-fg, #262422) !important;
+  color: #191918 !important;
 }
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-recent-section .ag-recent-row[data-active="true"] .ag-recent-title {
   color: #191918 !important;
-  font-weight: 500 !important;
+  font-weight: 400 !important;
 }
 
 :is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-recent-section .ag-recent-title {
-  color: #D4D3CE !important;
+  color: #ECECEA !important;
 }
 
 :is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-recent-section .ag-recent-row[data-active="true"] .ag-recent-title {
-  color: #FFFFFF !important;
-  font-weight: 500 !important;
+  color: #ECECEA !important;
+  font-weight: 400 !important;
 }
 
 #ag-claude-recent-section .ag-recent-side,

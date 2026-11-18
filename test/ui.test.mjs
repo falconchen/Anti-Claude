@@ -595,6 +595,7 @@ test('sidebar folder status badges & top Recents: aggregates collapsed folders, 
           <div>
             <div data-sidebar-section-drop-id="proj-a">
               <div class="group/header"><button type="button" data-testid="project-header" data-project-label="项目A" aria-expanded="false">项目A</button></div>
+              <div data-testid="conversation-row-sidebar" class="agy-sidebar-row"><span class="truncate">恢复谷歌浏览器Gemini侧边栏</span></div>
             </div>
             <div data-sidebar-section-drop-id="proj-b">
               <div class="group/header"><button type="button" data-testid="project-header" data-project-label="项目B" aria-expanded="true">项目B</button></div>
@@ -610,7 +611,7 @@ test('sidebar folder status badges & top Recents: aggregates collapsed folders, 
     trajectorySummaries: {
       summaries: {
         'conv-idle-unread': {
-          annotations: { title: '已完成未读任务', lastUserViewTime: { seconds: nowSec - 600 } },
+          annotations: { title: '恢复谷歌浏览器Gemini侧边栏', lastUserViewTime: { seconds: nowSec - 600 } },
           lastModifiedTime: { seconds: nowSec - 60 },
           trajectoryMetadata: { projectId: 'proj-a' },
           status: 1
@@ -684,6 +685,8 @@ test('sidebar folder status badges & top Recents: aggregates collapsed folders, 
     ['conv-pending', 'conv-running', 'conv-idle-unread'],
     'sorted by pending > running > recent and excludes hidden workflow & already-pinned sessions'
   );
+  assert.equal(h.doc.querySelector('#ag-claude-recent-section .ag-recent-row:nth-child(3) .ag-recent-title').textContent, '恢复谷歌浏览器 Gemini 侧边栏');
+  assert.equal(h.doc.querySelector('[data-testid="conversation-row-sidebar"] span.truncate').textContent, '恢复谷歌浏览器 Gemini 侧边栏');
   assert.equal(h.doc.querySelectorAll('#ag-claude-recent-section .ag-recent-proj').length, 0, 'Variant A uses pure single-line rows');
   assert.match(recentRows[1].getAttribute('title') || '', /所属项目：项目B/, 'hover title exposes project name');
   recentRows[1].click();
