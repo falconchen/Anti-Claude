@@ -100,11 +100,11 @@
   }
 
   const SVG_PENDING =
-    '<svg class="ag-todo-ico ag-todo-pending" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.6" stroke="currentColor" stroke-width="1.4"/></svg>';
+    '<svg class="ag-todo-ico ag-todo-pending" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.3" stroke="currentColor" stroke-width="1.35"/></svg>';
   const SVG_ACTIVE =
-    '<svg class="ag-todo-ico ag-todo-active" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.6" stroke="currentColor" stroke-opacity="0.22" stroke-width="1.5"/><path d="M8 1.4a6.6 6.6 0 0 1 6.6 6.6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+    '<svg class="ag-todo-ico ag-todo-active" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="6.3" stroke="currentColor" stroke-opacity="0.32" stroke-width="1.4"/><path d="M8 1.7a6.3 6.3 0 0 1 6.3 6.3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
   const SVG_DONE =
-    '<svg class="ag-todo-ico ag-todo-done" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="7.2" fill="currentColor"/><path class="ag-todo-done-check" d="M5.1 8.15l1.95 1.95 3.95-4.1" stroke="#FFFFFF" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    '<svg class="ag-todo-ico ag-todo-done" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="7.1" fill="currentColor"/><path class="ag-todo-done-check" d="M5.05 8.15l1.95 1.95 3.95-4.1" stroke="#FFFFFF" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
   const PAST_LABEL_RE = /^(?:Explored|Ran\b|Edited\b|Done\b|已探索|已运行|已编辑|已完成)/i;
 
@@ -1039,7 +1039,7 @@
         const ps = collectPanes();
         syncTodoCards(ps);
         syncRunningToolIndicators(ps);
-      }, 1000);
+      }, 450);
     } else if (!keepPolling && timerIntervalId) {
       clearInterval(timerIntervalId);
       timerIntervalId = null;
@@ -1068,7 +1068,9 @@
         '.prose :is(:not(pre) > code, bdi.context-scope-mention)'
     );
     for (const pill of pills) {
-      if (pill.closest('[contenteditable="true"], [data-lexical-editor="true"], pre')) continue;
+      if (pill.closest('[contenteditable="true"], [data-lexical-editor="true"], pre, ul.contains-task-list, .ag-claude-todo-card')) {
+        continue;
+      }
 
       const prev = pill.previousSibling;
       if (prev && prev.nodeType === 3) {
@@ -1177,6 +1179,7 @@
   let latestCtxState = { pct: 0, ratioText: '', outText: '', hasData: false, cascadeId: '' };
   let manualCompactPending = { cascadeId: '', startedAt: 0 };
   let compactedStaleSigByCid = new Map();
+  let compactedMetaByCid = new Map();
   let lastObservedCompactKey = '';
   let compactPollTimerId = null;
 
@@ -1268,6 +1271,37 @@
     return `${latestCtxState.ratioText}|${latestCtxState.outText}|${latestCtxState.pct}`;
   }
 
+  function parseTokenLabelToCount(label) {
+    const m = String(label || '').trim().match(/^([\d.]+)\s*([kKmM])?$/);
+    if (!m) return 0;
+    const num = Number(m[1]);
+    if (!Number.isFinite(num) || num <= 0) return 0;
+    const unit = (m[2] || '').toLowerCase();
+    if (unit === 'm') return Math.round(num * 1000000);
+    if (unit === 'k') return Math.round(num * 1000);
+    return Math.round(num);
+  }
+
+  function extractCheckpointUsage(stepObj) {
+    const meta = stepObj && stepObj.metadata;
+    const usage =
+      (meta && meta.modelUsage) ||
+      (meta && Array.isArray(meta.retryInfos) && meta.retryInfos[0] && meta.retryInfos[0].usage) ||
+      null;
+    if (!usage) return { preTokens: 0, summaryTokens: 0 };
+    const toTok = (v) => {
+      const n = typeof v === 'bigint' ? Number(v) : Number(v || 0);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    };
+    const preTokens = toTok(usage.inputTokens) + toTok(usage.cacheReadTokens);
+    const respTok = toTok(usage.responseOutputTokens);
+    const outTok = toTok(usage.outputTokens);
+    return {
+      preTokens,
+      summaryTokens: respTok > 0 ? respTok : outTok
+    };
+  }
+
   /* Real-time /compact detector:
    * `daemon.mjs` reads `gen_metadata` (whose last row right after `/compact` is the summarization call itself, e.g. 483k/94%),
    * and `CHECKPOINT` (`step_type = 23`) writes no post-compact `gen_metadata` row until the user sends a new message.
@@ -1321,12 +1355,20 @@
           );
           if (cpFailed) {
             compactedStaleSigByCid.delete(cidKey);
+            compactedMetaByCid.delete(cidKey);
             return 'idle';
           }
           if (running || (typeof cpStatus === 'number' && cpStatus > 0 && cpStatus < 3)) {
+            if (lastCheckpointStep) {
+              const cpUsage = extractCheckpointUsage(lastCheckpointStep);
+              if (cpUsage.preTokens > 0 || cpUsage.summaryTokens > 0) {
+                compactedMetaByCid.set(cidKey, cpUsage);
+              }
+            }
             return 'compacting';
           }
           if (curSig) compactedStaleSigByCid.set(cidKey, curSig);
+          compactedMetaByCid.set(cidKey, extractCheckpointUsage(lastCheckpointStep));
           return 'compacted';
         }
 
@@ -1338,6 +1380,7 @@
           if (staleSig && curSig && staleSig !== curSig) {
             compactedStaleSigByCid.delete(cidKey);
           }
+          compactedMetaByCid.delete(cidKey);
         }
 
         if (
@@ -1376,7 +1419,10 @@
     const staleSig = compactedStaleSigByCid.get(cidKey);
     if (staleSig && curSig) {
       if (staleSig === curSig && running) return 'compacted';
-      if (staleSig !== curSig) compactedStaleSigByCid.delete(cidKey);
+      if (staleSig !== curSig) {
+        compactedStaleSigByCid.delete(cidKey);
+        compactedMetaByCid.delete(cidKey);
+      }
     }
 
     if (
@@ -1388,15 +1434,24 @@
     return 'idle';
   }
 
-  function extractCompactLabels(ctxState) {
+  function extractCompactLabels(ctxState, curCidArg) {
+    const curCid = curCidArg !== undefined ? curCidArg : getActiveCascadeId();
+    const cidKey = curCid || '__active__';
     const rawRatio = String((ctxState && ctxState.ratioText) || '');
     const parts = rawRatio.split('/');
-    const preUsed = (parts[0] || '').trim();
+    const preUsedFromRatio = (parts[0] || '').trim();
     const limitLabel = (parts[1] || '').trim();
-    const sumOut = String((ctxState && ctxState.outText) || '')
-      .replace(/^Out\s+/i, '')
-      .trim();
-    return { preUsed, limitLabel, sumOut };
+    const limitTokens = parseTokenLabelToCount(limitLabel);
+    const cpMeta = compactedMetaByCid.get(cidKey) || null;
+    const preUsed =
+      (cpMeta && cpMeta.preTokens > 0 ? fmtCompactTokens(cpMeta.preTokens) : '') || preUsedFromRatio;
+    const summaryLabel =
+      cpMeta && cpMeta.summaryTokens > 0 ? fmtCompactTokens(cpMeta.summaryTokens) : '';
+    const summaryPct =
+      cpMeta && cpMeta.summaryTokens > 0 && limitTokens > 0
+        ? Math.max(1, Math.min(100, Math.round((cpMeta.summaryTokens / limitTokens) * 100)))
+        : 0;
+    return { preUsed, limitLabel, summaryLabel, summaryPct };
   }
 
   function ensureCompactPollTimer() {
@@ -1414,6 +1469,9 @@
         compactPollTimerId = null;
       }
     }, 500);
+    if (compactPollTimerId && typeof compactPollTimerId.unref === 'function') {
+      compactPollTimerId.unref();
+    }
   }
 
   function syncCompactVisualState(forceRender) {
@@ -1421,7 +1479,8 @@
     const curCid = getActiveCascadeId();
     const st = detectCompactStatus(curCid);
     const running = isPaneCurrentlyRunning();
-    const key = `${curCid}|${st}|${running ? '1' : '0'}`;
+    const { summaryLabel } = extractCompactLabels(latestCtxState, curCid);
+    const key = `${curCid}|${st}|${running ? '1' : '0'}|${summaryLabel}`;
     if (!forceRender && key === lastObservedCompactKey) return;
     lastObservedCompactKey = key;
 
@@ -1673,12 +1732,18 @@
 
     const ctxRatio = d.ctxRatio || ctxFallback.ratioText || '';
     const ctxPct = d.ctxPct || (ctxFallback.hasData ? `${ctxFallback.pct}%` : '');
-    const { preUsed } = extractCompactLabels({ ratioText: ctxRatio, outText: ctxFallback.outText });
+    const { preUsed, limitLabel, summaryLabel } = extractCompactLabels(
+      { ratioText: ctxRatio },
+      ctxFallback && ctxFallback.cascadeId
+    );
     let ctxHtml = '—';
     if (compactStatus === 'compacting') {
       ctxHtml = `压缩中…${preUsed ? `<span class="ag-ux-tt-sub">原 ${esc(preUsed)}</span>` : ''}`;
     } else if (compactStatus === 'compacted') {
-      ctxHtml = `已压缩${preUsed ? `<span class="ag-ux-tt-sub">原 ${esc(preUsed)}</span>` : ''}`;
+      ctxHtml =
+        summaryLabel && limitLabel
+          ? `${esc(summaryLabel)} / ${esc(limitLabel)}<span class="ag-ux-tt-sub">已压缩${preUsed ? ` · 原 ${esc(preUsed)}` : ''}</span>`
+          : `已压缩${preUsed ? `<span class="ag-ux-tt-sub">原 ${esc(preUsed)}</span>` : ''}`;
     } else if (ctxRatio) {
       ctxHtml = `${esc(ctxRatio)}${ctxPct ? `<span class="ag-ux-tt-sub">${esc(ctxPct)}</span>` : ''}`;
     }
@@ -1813,11 +1878,16 @@
 
   function positionMetricsTooltip(pill, tt) {
     if (!pill || !tt || !tt.querySelector('.ag-ux-tt')) return;
-    const r = pill.getBoundingClientRect();
+    const textEl = pill.querySelector('#ag-live-metrics-text');
+    const anchor = textEl && textEl.offsetWidth > 0 ? textEl : pill;
+    const r = anchor.getBoundingClientRect();
+    const pillRect = pill.getBoundingClientRect();
     const ttWidth = 272;
-    const left = Math.round(Math.max(12, Math.min(r.left, window.innerWidth - ttWidth - 16)));
+    const isBottomRow = pill.getAttribute('data-ag-row-mode') === 'bottom';
+    const idealLeft = isBottomRow ? r.left + r.width / 2 - ttWidth / 2 : r.left;
+    const left = Math.round(Math.max(12, Math.min(idealLeft, window.innerWidth - ttWidth - 16)));
     const bottomPx = Math.round(
-      Math.max(8, Math.min(window.innerHeight - r.top + 8, window.innerHeight - (tt.offsetHeight || 220) - 12))
+      Math.max(8, Math.min(window.innerHeight - pillRect.top + 8, window.innerHeight - (tt.offsetHeight || 220) - 12))
     );
     tt.style.left = `${left}px`;
     tt.style.bottom = `${bottomPx}px`;
@@ -1827,8 +1897,12 @@
     if (disposed || !FEAT.contextRing) return;
     const pill = e.target && e.target.closest && e.target.closest('#ag-live-metrics-pill');
     if (!pill) return;
-    const tt = document.getElementById('ag-live-metrics-tooltip');
-    if (tt) positionMetricsTooltip(pill, tt);
+    const syncPos = () => {
+      const tt = document.getElementById('ag-live-metrics-tooltip');
+      if (tt) positionMetricsTooltip(pill, tt);
+    };
+    syncPos();
+    queueMicrotask(syncPos);
   };
 
   const onMetricsPillMouseLeave = (e) => {
@@ -2104,7 +2178,7 @@
     const hasCtx = Boolean((!curCid || latestCtxState.cascadeId === curCid) && latestCtxState.hasData);
     const compactStatus = detectCompactStatus(curCid);
     const paneRunning = isPaneCurrentlyRunning();
-    const { preUsed, sumOut } = extractCompactLabels(latestCtxState);
+    const { preUsed, limitLabel, summaryLabel, summaryPct } = extractCompactLabels(latestCtxState, curCid);
 
     let ctxPct = hasCtx ? latestCtxState.pct : 0;
     let ctxPctLabel = `${ctxPct}%`;
@@ -2123,11 +2197,21 @@
       fillCompactingAttr = ' data-compacting="true"';
       compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="compacting" disabled title="正在总结历史并压缩上下文…">${SVG_COMPACT_ICON}<span>压缩中…</span></button>`;
     } else if (compactStatus === 'compacted') {
-      ctxPct = hasCtx ? 5 : 0;
-      ctxPctLabel = hasCtx ? '~5%' : '0%';
-      ctxSub = preUsed && sumOut ? `${preUsed} → 摘要 ${sumOut}` : '已完成压缩 · 下轮刷新';
+      if (summaryLabel && limitLabel) {
+        ctxPct = Math.max(2, summaryPct);
+        ctxPctLabel = `${summaryPct}%`;
+        ctxSub = `${summaryLabel} / ${limitLabel}`;
+      } else {
+        ctxPct = hasCtx ? 2 : 0;
+        ctxPctLabel = '—';
+        ctxSub = '已完成压缩 · 下轮刷新';
+      }
       ctxColor = 'var(--primary, #2F75C3)';
-      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="compacted" disabled title="当前对话历史已完成压缩，发下一条消息即按新上下文计费">${SVG_COMPACT_DONE}<span>已压缩</span></button>`;
+      const doneTitle =
+        preUsed && summaryLabel
+          ? `已将 ${preUsed} 上下文压缩为 ${summaryLabel} 摘要，发下一条消息即按新上下文计费`
+          : '当前对话历史已完成压缩，发下一条消息即按新上下文计费';
+      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="compacted" disabled title="${escapeHtml(doneTitle)}">${SVG_COMPACT_DONE}<span>已压缩</span></button>`;
     } else if (!hasCtx) {
       compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="empty" disabled title="当前会话暂无可压缩上下文">${SVG_COMPACT_ICON}<span>压缩</span></button>`;
     } else if (paneRunning) {
@@ -2259,7 +2343,7 @@
     const curCid = getActiveCascadeId();
     const hasCtx = Boolean((!curCid || latestCtxState.cascadeId === curCid) && latestCtxState.hasData);
     const compactStatus = detectCompactStatus(curCid);
-    const { preUsed, sumOut } = extractCompactLabels(latestCtxState);
+    const { preUsed, limitLabel, summaryLabel, summaryPct } = extractCompactLabels(latestCtxState, curCid);
     const arc = ring.querySelector('.ag-ctx-ring-arc');
 
     if (compactStatus === 'compacting') {
@@ -2277,7 +2361,7 @@
     }
 
     if (compactStatus === 'compacted') {
-      const pct = hasCtx ? 5 : 0;
+      const pct = summaryPct > 0 ? Math.max(2, summaryPct) : hasCtx ? 2 : 0;
       if (arc) {
         arc.style.strokeDashoffset = (RING_CIRC * (1 - pct / 100)).toFixed(2);
         arc.style.strokeOpacity = pct <= 0 ? '0' : '1';
@@ -2285,8 +2369,8 @@
       ring.setAttribute('data-level', 'normal');
       ring.setAttribute('data-compact-state', 'compacted');
       ring.title =
-        preUsed && sumOut
-          ? `当前上下文已压缩 (${preUsed} → 摘要 ${sumOut}) · 点击查看套餐限额`
+        summaryLabel && limitLabel
+          ? `当前上下文 ${summaryLabel} / ${limitLabel} (${summaryPct}%${preUsed ? ` · 原 ${preUsed} 已压缩` : ''}) · 点击查看套餐限额`
           : '当前上下文已压缩 · 点击查看套餐限额';
       return;
     }
@@ -4317,6 +4401,8 @@
       clearInterval(compactPollTimerId);
       compactPollTimerId = null;
     }
+    compactedMetaByCid.clear();
+    compactedStaleSigByCid.clear();
     document.removeEventListener('click', onDocClick, true);
     document.removeEventListener('pointerdown', onOutsidePopoverPointerDown, true);
     document.removeEventListener('keydown', onPopoverKeyDown, true);

@@ -967,7 +967,7 @@ test('context ring & quota popover: adds inline compact button and immediately c
   assert.equal(pop.querySelector('[data-ag-qp-compact]').getAttribute('data-state'), 'compacting');
   assert.match(pop.textContent, /压缩中…/);
 
-  /* 3. /compact finishes (CHECKPOINT step_type=23 in trajectorySlice), while daemon still pushes 483k/94% */
+  /* 3a. /compact finishes (checkpoint without hydrated metadata.modelUsage), while daemon still pushes 481k/94% + Out 574 */
   const vp = h.doc.getElementById('vp');
   simRunning = false;
   vp.__reactFiber$t = {
@@ -983,7 +983,7 @@ test('context ring & quota popover: adds inline compact button and immediately c
       }
     }
   };
-  h.window.__ag_render_metrics(mkHighPayload('483k', 94, '1.9k'));
+  h.window.__ag_render_metrics(mkHighPayload('481k', 94, '574'));
   await settle(h);
 
   assert.equal(h.window.__t.detectCompactStatus('abcd-1234'), 'compacted');
@@ -991,9 +991,51 @@ test('context ring & quota popover: adds inline compact button and immediately c
   assert.equal(ring.getAttribute('data-compact-state'), 'compacted');
   assert.equal(pop.querySelector('[data-ag-qp-compact]').getAttribute('data-state'), 'compacted');
   assert.match(pop.textContent, /已压缩/);
-  assert.match(pop.textContent, /483k → 摘要 1\.9k/);
-  assert.match(h.window.__ag_last_metrics.tooltipHtml, /已压缩/);
+  assert.equal(pop.textContent.includes('574'), false, 'must never misread prior Out 574 as compact summary');
+  assert.equal(pop.textContent.includes('→ 摘要'), false);
+  assert.match(pop.textContent, /已完成压缩 · 下轮刷新/);
+
+  /* 3b. checkpoint hydrates metadata.modelUsage -> displays real 5.2k / 512k (1%) */
+  vp.__reactFiber$t.memoizedProps.trajectorySlice.stepsInSlice[3].metadata = {
+    modelUsage: {
+      inputTokens: '3531',
+      cacheReadTokens: '478996',
+      outputTokens: '5443',
+      responseOutputTokens: '5178'
+    }
+  };
+  h.window.__ag_render_metrics(mkHighPayload('481k', 94, '574'));
+  await settle(h);
+
+  assert.match(pop.textContent, /5\.2k \/ 512k/);
+  assert.match(pop.textContent, /1%/);
+  assert.equal(pop.textContent.includes('574'), false);
+  assert.equal(pop.textContent.includes('~5%'), false);
+  assert.match(h.window.__ag_last_metrics.tooltipHtml, /5\.2k \/ 512k/);
+  assert.match(h.window.__ag_last_metrics.tooltipHtml, /原 483k/);
   assert.equal(h.window.__ag_last_metrics.tooltipHtml.includes('94%'), false);
+
+  /* 3c. Bottom metrics pill CSS centering & centered tooltip positioning in narrow window mode */
+  const customCss = fs.readFileSync(path.join(REPO, 'user', 'custom.css'), 'utf8');
+  assert.match(
+    customCss,
+    /#ag-live-metrics-pill\[data-ag-row-mode="bottom"\][\s\S]*?justify-content:\s*center\s*!important/,
+    'custom.css centers bottom-row metrics pill'
+  );
+  const pillEl = h.doc.getElementById('ag-live-metrics-pill');
+  pillEl.setAttribute('data-ag-row-mode', 'bottom');
+  const textEl = h.doc.createElement('span');
+  textEl.id = 'ag-live-metrics-text';
+  textEl.textContent = '110 tok/s · TTFT 10.9s';
+  Object.defineProperty(textEl, 'offsetWidth', { value: 120, configurable: true });
+  pillEl.getBoundingClientRect = () => ({ left: 40, top: 500, width: 420, height: 22, right: 460, bottom: 522 });
+  textEl.getBoundingClientRect = () => ({ left: 190, top: 502, width: 120, height: 18, right: 310, bottom: 520 });
+  pillEl.appendChild(textEl);
+  const ttEl = h.doc.getElementById('ag-live-metrics-tooltip');
+  ttEl.innerHTML = h.window.__ag_last_metrics.tooltipHtml;
+  pillEl.dispatchEvent(new h.window.MouseEvent('mouseenter', { bubbles: true }));
+  await h.microtasks();
+  assert.equal(ttEl.style.left, '114px', 'tooltip centers horizontally over centered bottom text instead of flush-left pill edge');
 
   /* 4. Next user turn completes with fresh 35k (7%) metrics -> returns to live idle state & re-enables button */
   vp.__reactFiber$t.memoizedProps.trajectorySlice.stepsInSlice.push(
