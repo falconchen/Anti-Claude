@@ -1012,3 +1012,83 @@ test('context ring & quota popover: adds inline compact button and immediately c
   h.cleanups.forEach((fn) => fn());
   h.close();
 });
+
+test('inline pill CJK hygiene, slice marker TodoWrite recovery & fractional sub-1 tok/s metrics formatting', { skip }, async () => {
+  const html = `
+    <section>
+      <div data-testid="autoscroll-viewport" id="vp">
+        <div data-testid="agent-response">
+          <div data-testid="planner-response-text" class="select-text">
+            <p id="p1">第 24、25 张截图（ <bdi class="context-scope-mention"><button class="inline-pill">a.png</button></bdi> 、 <bdi class="context-scope-mention"><button class="inline-pill">b.png</button></bdi> ）：改成 <code>Extra</code> ，发布 <code>v2.3.4</code> 。</p>
+            ${ul(li('改成 Extra', 'completed'), li('跑全量单测', 'completed'), li('推送 GitHub', 'completed'))}
+          </div>
+        </div>
+        <div data-testid="agent-response">
+          <div data-testid="planner-response-text">
+            ${ul(li('普通完成一', 'completed'), li('普通完成二', 'completed'), li('普通完成三', 'completed'))}
+          </div>
+        </div>
+      </div>
+      <div id="antigravity.agentSidePanelInputBox"></div>
+    </section>
+  `;
+  const h = mount(html);
+  const vp = h.doc.getElementById('vp');
+  vp.__reactFiber$t = {
+    memoizedProps: {
+      trajectorySlice: {
+        stepsInSlice: [
+          { step: { case: 'plannerResponse', value: { response: '推进第二步。<!-- todo:2/3 -->' } } },
+          { step: { case: 'plannerResponse', value: { response: '推进第三步。<!-- todo:3/3 -->' } } },
+          {
+            step: {
+              case: 'plannerResponse',
+              value: { response: '- [x] 改成 Extra\n- [x] 跑全量单测\n- [x] 推送 GitHub' }
+            }
+          }
+        ]
+      }
+    }
+  };
+  h.window.__t.syncStepStream();
+  await settle(h);
+
+  /* 1. Inline code & file pill boundary spaces stripped + U+2060 Word Joiner attached to CJK punctuation */
+  const p1 = h.doc.getElementById('p1');
+  const bdis = p1.querySelectorAll('bdi.context-scope-mention');
+  const codes = p1.querySelectorAll('code');
+  assert.equal(bdis[0].previousSibling.nodeValue, '第 24、25 张截图（\u2060');
+  assert.equal(bdis[0].nextSibling.nodeValue, '\u2060、');
+  assert.equal(bdis[1].nextSibling.nodeValue, '\u2060）：改成');
+  assert.equal(codes[0].nextSibling.nodeValue, '\u2060，发布');
+  assert.equal(codes[1].nextSibling.nodeValue, '\u2060。');
+
+  /* 2. Slice <!-- todo:N/M --> + all-[x] list recovers bordered TodoWrite card once without matching unrelated next list */
+  const cards = h.doc.querySelectorAll('.ag-claude-todo-card');
+  assert.equal(cards.length, 1, 'recovers bordered card for the marker-backed completed list only');
+
+  /* 3. Fractional 0.3 tok/s + Hold >= 60s formatted cleanly instead of "0 tok/s · Hold 264.5s" */
+  const slim = h.window.__t.parseAndSlimMetricsPayload({
+    cascadeId: 'abcd-1234',
+    hasData: true,
+    inlineHtml:
+      '<span>0 tok/s</span><span class="ag-sep">·</span><span>Hold 264.5s</span>' +
+      '<span class="ag-sep">·</span><span>Ctx 225k/512k <span>(44%)</span></span><span class="ag-sep">·</span><span>Out 75</span>',
+    tooltipHtml:
+      '<div class="ag-tt-hdr">本轮最新调用 (Gen #40)</div>' +
+      '<div class="ag-tt-row"><span class="ag-tt-lbl">生成速度</span><span class="ag-tt-val">端到端（含等待） 0.3 tok/s</span></div>' +
+      '<div class="ag-tt-row"><span class="ag-tt-lbl">响应耗时</span><span class="ag-tt-val">等待 264.51s | 刷出 0.41s | 总计 264.91s</span></div>' +
+      '<div class="ag-tt-row"><span class="ag-tt-lbl">压缩水位线</span><span class="ag-tt-val">225k / 512k (44%) · 距压缩余 287k</span></div>'
+  });
+  assert.match(slim.inlineHtml, /0\.3 tok\/s/);
+  assert.match(slim.inlineHtml, /Hold 4m 25s/);
+  assert.equal(slim.inlineHtml.includes('>0 tok/s<'), false);
+  assert.match(slim.tooltipHtml, /0\.3 tok\/s/);
+
+  /* 4. dispose() restores exact original text nodes */
+  h.cleanups.forEach((fn) => fn());
+  assert.equal(bdis[0].previousSibling.nodeValue, '第 24、25 张截图（ ');
+  assert.equal(bdis[0].nextSibling.nodeValue, ' 、 ');
+  assert.equal(codes[0].nextSibling.nodeValue, ' ，发布 ');
+  h.close();
+});

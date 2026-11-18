@@ -609,8 +609,8 @@
     return todoProgress(next) > todoProgress(items) ? next : items;
   }
 
-  const sliceStepSeen = new WeakSet();
   const paneSliceActiveOrigins = new WeakMap();
+  const paneSliceLastLen = new WeakMap();
 
   function sliceStepsFromBranch(f) {
     const ts = f && f.memoizedProps && f.memoizedProps.trajectorySlice;
@@ -634,21 +634,36 @@
       }
     }
     if (!sliceSteps) return;
+    if (paneSliceLastLen.get(pane.root) === sliceSteps.length && paneSliceActiveOrigins.has(pane.root)) return;
+    paneSliceLastLen.set(pane.root, sliceSteps.length);
+
     let origins = paneSliceActiveOrigins.get(pane.root);
     if (!origins) {
       origins = new Map();
       paneSliceActiveOrigins.set(pane.root, origins);
     }
+    const openMarkerTotals = new Set();
     for (let i = 0; i < sliceSteps.length; i++) {
       const s = sliceSteps[i];
       const v = s && s.step && s.step.case === 'plannerResponse' ? s.step.value : null;
-      if (!v || typeof v !== 'object' || sliceStepSeen.has(v)) continue;
+      if (!v || typeof v !== 'object') continue;
       const text = v.modifiedResponse || v.response || '';
       if (!text) continue;
-      sliceStepSeen.add(v);
+
+      const cleanText = stripAllCode(text);
+      PROGRESS_RE.lastIndex = 0;
+      let m;
+      while ((m = PROGRESS_RE.exec(cleanText))) {
+        const total = Number(m[2] || m[4] || m[6]);
+        if (total >= 2) openMarkerTotals.add(total);
+      }
+
       for (const items of extractTaskLists(text)) {
         if (hasActiveTodo(items)) {
           origins.set(todoSignature(items), items);
+        } else if (isAllTodoCompleted(items) && openMarkerTotals.has(items.length)) {
+          origins.set(todoSignature(items), items);
+          openMarkerTotals.delete(items.length);
         }
       }
     }
@@ -1031,6 +1046,71 @@
     }
   }
 
+  /* Inline code & file-mention pill CJK boundary hygiene:
+   * 1. Strips redundant ASCII spaces (`" "`) between boxed pills (`:not(pre) > code`, `bdi.context-scope-mention`)
+   *    and adjacent CJK characters / fullwidth punctuation so pills don't push `，。；：（）` away with double gaps.
+   * 2. Attaches U+2060 WORD JOINER between atomic inline pills (`inline-flex` file mentions) and adjacent CJK
+   *    closing/middle punctuation (`、，。！？；：）》」』】`) or opening brackets (`（《「『【`) so punctuation never wraps to line start.
+   * Mutates `Text.nodeValue` only (zero childList mutations, zero React Fiber interference) and restores on `dispose()`. */
+  const pillSiblingOrig = new WeakMap();
+  const WORD_JOINER = '\u2060';
+  const CJK_OR_FULL_PUNCT_END_SPACE_RE = /([\u4e00-\u9fff\u3000-\u303f\uff01-\uff60“‘])[ \t]+$/;
+  const CJK_OR_FULL_PUNCT_LEAD_SPACE_RE = /^[ \t]+([\u4e00-\u9fff\u3000-\u303f\uff01-\uff60”’])/;
+  const CJK_OPEN_PUNCT_END_RE = /[（《「『【〈“‘]$/;
+  const CJK_CLOSE_OR_MID_PUNCT_START_RE = /^[、，。！？；：）》」』】〉”’—…]/;
+
+  function syncInlinePillBoundaries() {
+    if (disposed) return;
+    const pills = document.querySelectorAll(
+      '[data-testid="planner-response-text"] :is(:not(pre) > code, bdi.context-scope-mention), ' +
+        '[data-markdown-root] :is(:not(pre) > code, bdi.context-scope-mention), ' +
+        '.select-text :is(:not(pre) > code, bdi.context-scope-mention), ' +
+        '.prose :is(:not(pre) > code, bdi.context-scope-mention)'
+    );
+    for (const pill of pills) {
+      if (pill.closest('[contenteditable="true"], [data-lexical-editor="true"], pre')) continue;
+
+      const prev = pill.previousSibling;
+      if (prev && prev.nodeType === 3) {
+        const cur = prev.nodeValue || '';
+        let next = cur.replace(CJK_OR_FULL_PUNCT_END_SPACE_RE, '$1');
+        if (CJK_OPEN_PUNCT_END_RE.test(next) && !next.endsWith(WORD_JOINER)) {
+          next += WORD_JOINER;
+        }
+        if (next !== cur) {
+          if (!pillSiblingOrig.has(prev)) pillSiblingOrig.set(prev, cur);
+          prev.nodeValue = next;
+        }
+      }
+
+      const fol = pill.nextSibling;
+      if (fol && fol.nodeType === 3) {
+        const cur = fol.nodeValue || '';
+        const withoutWj = cur.startsWith(WORD_JOINER) ? cur.slice(1) : cur;
+        let next = withoutWj.replace(CJK_OR_FULL_PUNCT_LEAD_SPACE_RE, '$1');
+        if (CJK_CLOSE_OR_MID_PUNCT_START_RE.test(next)) {
+          next = WORD_JOINER + next;
+        }
+        if (next !== cur) {
+          if (!pillSiblingOrig.has(fol)) pillSiblingOrig.set(fol, cur);
+          fol.nodeValue = next;
+        }
+      }
+    }
+  }
+
+  function restoreInlinePillBoundaries() {
+    const pills = document.querySelectorAll(':not(pre) > code, bdi.context-scope-mention');
+    for (const pill of pills) {
+      for (const node of [pill.previousSibling, pill.nextSibling]) {
+        if (node && node.nodeType === 3 && pillSiblingOrig.has(node)) {
+          node.nodeValue = pillSiblingOrig.get(node);
+          pillSiblingOrig.delete(node);
+        }
+      }
+    }
+  }
+
   let lastSyncTs = 0;
   function syncStepStream() {
     rafPending = false;
@@ -1057,6 +1137,7 @@
     const panes = collectPanes();
     syncTodoCards(panes);
     syncRunningToolIndicators(panes);
+    syncInlinePillBoundaries();
     if (FEAT.contextRing) {
       ensureMetricsWrapped();
       ensureComposerContextRing();
@@ -1577,8 +1658,14 @@
     const steps = d.turnSteps > 1 ? d.turnSteps : 1;
     const durVal = Number.isFinite(d.turnDur) ? d.turnDur : d.stepDur;
     const outVal = Number.isFinite(d.turnOut) ? d.turnOut : d.stepOut;
-    const speedHtml = Number.isFinite(d.streamTps)
-      ? `${Math.round(d.streamTps)} tok/s${d.isBuffered ? '<span class="ag-ux-tt-sub">缓冲</span>' : ''}`
+    const tpsText =
+      Number.isFinite(d.streamTps) && d.streamTps > 0
+        ? d.streamTps < 1
+          ? d.streamTps.toFixed(1)
+          : String(Math.round(d.streamTps))
+        : '';
+    const speedHtml = tpsText
+      ? `${tpsText} tok/s${d.isBuffered ? '<span class="ag-ux-tt-sub">缓冲</span>' : ''}`
       : '—';
     const ttftHtml = Number.isFinite(d.ttftSec) ? fmtDurationSec(d.ttftSec) : '';
     const durHtml = fmtDurationSec(durVal) || '—';
@@ -1656,7 +1743,24 @@
       for (let i = 0; i < kids.length; i++) {
         const el = kids[i];
         const txt = (el.textContent || '').trim();
-        if (/^Ctx\b/i.test(txt)) {
+        if (/^0(?:\.0+)?\s*tok\/s$/i.test(txt)) {
+          if (parsedTt && Number.isFinite(parsedTt.streamTps) && parsedTt.streamTps > 0 && parsedTt.streamTps < 1) {
+            el.textContent = `${parsedTt.streamTps.toFixed(1)} tok/s`;
+          } else {
+            const next = el.nextElementSibling;
+            if (next && next.classList.contains('ag-sep')) next.remove();
+            else if (el.previousElementSibling && el.previousElementSibling.classList.contains('ag-sep')) {
+              el.previousElementSibling.remove();
+            }
+            el.remove();
+          }
+        } else if (/^(TTFT|Hold)\s+([\d.]+)s$/i.test(txt)) {
+          const dm = txt.match(/^(TTFT|Hold)\s+([\d.]+)s$/i);
+          const sec = dm ? Number(dm[2]) : NaN;
+          if (Number.isFinite(sec) && sec >= 60) {
+            el.textContent = `${dm[1]} ${fmtDurationSec(sec)}`;
+          }
+        } else if (/^Ctx\b/i.test(txt)) {
           const m = txt.match(/Ctx\s+([^\s(]+)\s*(?:\((\d+)%\))?/i);
           if (m) {
             ratioText = m[1].replace('/', ' / ');
@@ -4276,6 +4380,7 @@
         el.removeAttribute('data-ag-model-open');
         el.removeAttribute('data-ag-inline-stream');
       });
+    restoreInlinePillBoundaries();
     restoreLegacySidebarCjkNodes();
     if (docRoot && docRoot.getAttribute('lang') === 'zh-CN') {
       if (hadDocLang && origDocLang !== null) docRoot.setAttribute('lang', origDocLang);

@@ -330,11 +330,20 @@ html[data-ag-preset] body[data-agy-theme].dark {
   --ag-sidebar-muted-fg: #8E8D88;
 }
 
+/* 白天侧栏选中胶囊：清除原生 1px 内阴影描边，与「最近对话」1:1 统一为纯平 #EFEFED 胶囊 */
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) :is(.agy-sidebar-row[data-selected="true"], [data-testid="conversation-row-sidebar"][data-selected="true"]) {
+  background-color: #EFEFED !important;
+  --row-bg: #EFEFED !important;
+  box-shadow: none !important;
+  border-color: transparent !important;
+}
+
 /* 夜间侧栏选中胶囊：抹除底层冷蓝立体高光，对齐 Claude 扁平暖炭灰 */
-:is(html[data-ag-theme-mode="dark"] body, body.dark, body[data-agy-theme].dark) .agy-sidebar-row[data-selected="true"] {
+:is(html[data-ag-theme-mode="dark"] body, body.dark, body[data-agy-theme].dark) :is(.agy-sidebar-row[data-selected="true"], [data-testid="conversation-row-sidebar"][data-selected="true"]) {
   background-color: #2F2F2D !important;
   --row-bg: #2F2F2D !important;
   box-shadow: none !important;
+  border-color: transparent !important;
 }
 
 /* 2.1 左栏与右栏正文排版 1:1 统一（14px / 400 / 0 字距，选中态仅靠胶囊底色区分、不加粗） */
@@ -775,12 +784,20 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #antigravity\.agentSidePan
   padding: 6px 12px !important;
 }
 
-/* 3.5 Clean neutral inline code */
+/* 3.5 Clean neutral inline code & file mention pills (compact 1.5px outer breathing room) */
+:is([data-testid="planner-response-text"], [data-markdown-root], .select-text, .prose, .markdown) :is(:not(pre) > code, bdi.context-scope-mention) {
+  margin-inline: 1.5px;
+}
+
+:is([data-testid="planner-response-text"], [data-markdown-root], .select-text, .prose, .markdown) :is(:not(pre) > code, bdi.context-scope-mention):first-child {
+  margin-inline-start: 0;
+}
+
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) :is([data-testid="planner-response-text"], [data-markdown-root], .select-text, .prose, .markdown) :not(pre) > code {
   background-color: #F3F3F1 !important;
   border: 1px solid rgba(0, 0, 0, 0.06) !important;
   border-radius: 5px;
-  padding: 0.1em 0.36em;
+  padding: 0.08em 0.34em;
   color: #1F1E1D !important;
 }
 
@@ -2530,7 +2547,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-recent-section 
 }
 
 :is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-recent-section .ag-recent-row[data-active="true"] {
-  background-color: #30302E !important;
+  background-color: #2F2F2D !important;
 }
 
 #ag-claude-recent-section .ag-recent-main {
