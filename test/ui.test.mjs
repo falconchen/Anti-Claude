@@ -19,7 +19,10 @@ const skip = JSDOM ? false : 'jsdom not installed';
 
 const SRC = fs
   .readFileSync(path.join(REPO, 'user', 'custom.js'), 'utf8')
-  .replace(/\}\)\(\);\s*$/, 'window.__t = { scheduleSync, syncStepStream, dispose, parseAndSlimMetricsPayload, cacheTierForRate }; })();');
+  .replace(
+    /\}\)\(\);\s*$/,
+    'window.__t = { scheduleSync, syncStepStream, dispose, parseAndSlimMetricsPayload, cacheTierForRate, detectCompactStatus, triggerConversationCompact }; })();'
+  );
 
 function mount(html, { modules = {} } = {}) {
   const dom = new JSDOM(`<!doctype html><body>${html}</body>`, {
@@ -841,6 +844,147 @@ test('historical incomplete or split-turn checklist never resurrects into an unr
   const statuses = Array.from(card.querySelectorAll('.ag-claude-todo-row')).map((r) => r.getAttribute('data-status'));
   assert.deepEqual(statuses, ['completed', 'completed', 'completed', 'completed'], 'upgrades historical card via forward step scan');
   assert.equal(card.hasAttribute('data-ag-todo-paused'), false);
+  h.cleanups.forEach((fn) => fn());
+  h.close();
+});
+
+test('context ring & quota popover: adds inline compact button and immediately clears post-/compact 94% red state', { skip }, async () => {
+  const html = `
+    <section>
+      <div data-testid="autoscroll-viewport" id="vp">
+        <div data-testid="user-input-step"><div data-testid="user-message-content">帮我分析代码</div></div>
+        <div data-testid="agent-response"><p>分析完毕。</p></div>
+      </div>
+      <div id="antigravity.agentSidePanelInputBox">
+        <div class="flex min-w-0 flex-1 items-center">
+          <div><button type="button" data-testid="model-selector-trigger">Gemini 4 Carbon High</button></div>
+          <div id="ag-live-metrics-pill"></div>
+        </div>
+      </div>
+      <div id="ag-live-metrics-tooltip"></div>
+    </section>
+  `;
+  const h = mount(html);
+  let submittedArgs = null;
+  let simRunning = false;
+  const ib = h.doc.getElementById('antigravity.agentSidePanelInputBox');
+  ib.__reactFiber$t = {
+    memoizedProps: {
+      get isRunning() {
+        return simRunning;
+      },
+      slashCommandItems: [
+        {
+          title: 'compact',
+          info: {
+            $typeName: 'exa.codeium_common_pb.SlashCommandInfo',
+            name: 'compact',
+            modelFacingText: '',
+            type: 1,
+            icon: 'collapse_all',
+            displayName: '',
+            logo: ''
+          }
+        }
+      ],
+      handleSubmit: async (items, media, clearEditor) => {
+        submittedArgs = { items, media, clearEditor };
+        simRunning = true;
+      }
+    }
+  };
+
+  h.window.__ag_render_metrics = function (payload) {
+    h.window.__ag_last_metrics = payload;
+  };
+  h.window.__t.syncStepStream();
+  await settle(h);
+
+  const mkHighPayload = (ctxShort, pct, outShort) => ({
+    cascadeId: 'abcd-1234',
+    hasData: true,
+    inlineHtml:
+      `<span>49 tok/s</span><span class="ag-sep">·</span><span>TTFT 29.6s</span>` +
+      `<span class="ag-sep">·</span><span>Ctx ${ctxShort}/512k <span class="ag-ctx-crit">(${pct}%)</span></span>` +
+      `<span class="ag-sep">·</span><span>Out ${outShort}</span>`,
+    tooltipHtml:
+      `<div class="ag-tt-hdr">本轮最新调用 (Gen #804)</div>` +
+      `<div class="ag-tt-row"><span class="ag-tt-lbl">生成速度</span><span class="ag-tt-val">流式 48.7 tok/s | 端到端（含等待） 27.9 tok/s</span></div>` +
+      `<div class="ag-tt-row"><span class="ag-tt-lbl">响应耗时</span><span class="ag-tt-val">TTFT 29.59s | 流式 39.61s | 总计 69.20s</span></div>` +
+      `<div class="ag-tt-row"><span class="ag-tt-lbl">当前上下文</span><span class="ag-tt-val">482,947 (新增 482,947 + 缓存 0, 0.0%)</span></div>` +
+      `<div class="ag-tt-row"><span class="ag-tt-lbl">本步输出量</span><span class="ag-tt-val">1,931 (思考链 1,074 + 正文/工具 857)</span></div>` +
+      `<div class="ag-tt-hdr ag-tt-sec">当前会话累计 (28 轮提问 / 804 次有效调用)</div>` +
+      `<div class="ag-tt-row"><span class="ag-tt-lbl">压缩水位线</span><span class="ag-tt-val">${ctxShort} / 512k (${pct}%) · 距压缩余 29k</span></div>`
+  });
+
+  /* 1. High context before compact -> ring is red (crit), popover shows urgent ready compact button */
+  h.window.__ag_render_metrics(mkHighPayload('483k', 94, '1.9k'));
+  const ring = h.doc.getElementById('ag-claude-ctx-ring');
+  assert.ok(ring, 'context ring mounted');
+  assert.equal(ring.getAttribute('data-level'), 'crit');
+
+  ring.click();
+  const pop = h.doc.getElementById('ag-claude-quota-popover');
+  assert.equal(pop.getAttribute('data-open'), 'true');
+  const compactBtn = pop.querySelector('[data-ag-qp-compact]');
+  assert.ok(compactBtn, 'compact button rendered next to 当前上下文');
+  assert.equal(compactBtn.getAttribute('data-state'), 'ready');
+  assert.equal(compactBtn.getAttribute('data-urgent'), 'crit');
+  assert.equal(compactBtn.textContent.trim(), '压缩');
+
+  /* 2. Clicking compact dispatches native slashCommand:compact without clearing draft & enters compacting state */
+  compactBtn.click();
+  await h.microtasks();
+  assert.ok(submittedArgs, 'invoked native handleSubmit');
+  assert.equal(submittedArgs.items[0].chunk.value.scopeItem.case, 'slashCommand');
+  assert.equal(submittedArgs.items[0].chunk.value.scopeItem.value.info.name, 'compact');
+  assert.equal(ring.getAttribute('data-level'), 'normal', 'ring leaves red crit immediately on compacting');
+  assert.equal(ring.getAttribute('data-compact-state'), 'compacting');
+  assert.equal(pop.querySelector('[data-ag-qp-compact]').getAttribute('data-state'), 'compacting');
+  assert.match(pop.textContent, /压缩中…/);
+
+  /* 3. /compact finishes (CHECKPOINT step_type=23 in trajectorySlice), while daemon still pushes 483k/94% */
+  const vp = h.doc.getElementById('vp');
+  simRunning = false;
+  vp.__reactFiber$t = {
+    memoizedProps: {
+      trajectorySlice: {
+        conversationId: 'abcd-1234',
+        stepsInSlice: [
+          { type: 14, status: 3, step: { case: 'userInput', value: { userResponse: '帮我分析代码' } } },
+          { type: 15, status: 3, step: { case: 'plannerResponse', value: { response: '分析完毕。' } } },
+          { type: 14, status: 3, step: { case: 'userInput', value: { userResponse: '/compact ' } } },
+          { type: 23, status: 3, step: { case: 'checkpoint', value: { modelSummarizationFailed: false } } }
+        ]
+      }
+    }
+  };
+  h.window.__ag_render_metrics(mkHighPayload('483k', 94, '1.9k'));
+  await settle(h);
+
+  assert.equal(h.window.__t.detectCompactStatus('abcd-1234'), 'compacted');
+  assert.equal(ring.getAttribute('data-level'), 'normal', 'ring stays normal instead of stale 94% red');
+  assert.equal(ring.getAttribute('data-compact-state'), 'compacted');
+  assert.equal(pop.querySelector('[data-ag-qp-compact]').getAttribute('data-state'), 'compacted');
+  assert.match(pop.textContent, /已压缩/);
+  assert.match(pop.textContent, /483k → 摘要 1\.9k/);
+  assert.match(h.window.__ag_last_metrics.tooltipHtml, /已压缩/);
+  assert.equal(h.window.__ag_last_metrics.tooltipHtml.includes('94%'), false);
+
+  /* 4. Next user turn completes with fresh 35k (7%) metrics -> returns to live idle state & re-enables button */
+  vp.__reactFiber$t.memoizedProps.trajectorySlice.stepsInSlice.push(
+    { type: 14, status: 3, step: { case: 'userInput', value: { userResponse: '继续下一步' } } },
+    { type: 15, status: 3, step: { case: 'plannerResponse', value: { response: '好的。' } } }
+  );
+  h.window.__ag_render_metrics(mkHighPayload('35k', 7, '1k'));
+  await settle(h);
+
+  assert.equal(h.window.__t.detectCompactStatus('abcd-1234'), 'idle');
+  assert.equal(ring.hasAttribute('data-compact-state'), false);
+  assert.equal(ring.getAttribute('data-level'), 'normal');
+  assert.equal(pop.querySelector('[data-ag-qp-compact]').getAttribute('data-state'), 'ready');
+  assert.match(pop.textContent, /35k \/ 512k · Out 1k/);
+
   h.cleanups.forEach((fn) => fn());
   h.close();
 });

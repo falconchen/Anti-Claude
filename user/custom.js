@@ -1052,6 +1052,7 @@
     if (FEAT.contextRing) {
       ensureMetricsWrapped();
       ensureComposerContextRing();
+      syncCompactVisualState(false);
     } else {
       const oldRing = document.getElementById('ag-claude-ctx-ring');
       if (oldRing) oldRing.remove();
@@ -1069,6 +1070,14 @@
    *    - Clicking opens real-time Usage Popover (`retrieveUserQuotaSummary` 5h & weekly buckets)
    * ========================================================================== */
   const RING_CIRC = 2 * Math.PI * 7;
+  const SVG_COMPACT_ICON =
+    '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
+    '<path d="M4.5 2.75L8 6.25L11.5 2.75M4.5 13.25L8 9.75L11.5 13.25" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '</svg>';
+  const SVG_COMPACT_DONE =
+    '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
+    '<path d="M3.5 8.3L6.6 11.4L12.6 4.8" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '</svg>';
   let cachedQuotaSvc = null;
   let cachedUserTierName = '';
   let cachedQuotaGroups = null;
@@ -1077,10 +1086,343 @@
   let quotaPopoverOpen = false;
   let selectedQuotaGroupIdx = -1;
   let latestCtxState = { pct: 0, ratioText: '', outText: '', hasData: false, cascadeId: '' };
+  let manualCompactPending = { cascadeId: '', startedAt: 0 };
+  let compactedStaleSigByCid = new Map();
+  let lastObservedCompactKey = '';
+  let compactPollTimerId = null;
 
   function getActiveCascadeId() {
-    const m = (window.location.pathname || '').match(/^\/c\/([0-9a-f-]+)/i);
-    return m ? m[1] : '';
+    const m = (window.location.pathname || '').match(/\/c\/([0-9a-f-]+)/i);
+    if (m) return m[1];
+    if (window.__ag_watched_cascade_id) return String(window.__ag_watched_cascade_id);
+    const sel = document.querySelector('[data-testid="conversation-row-sidebar"][data-selected="true"]');
+    return (sel && sel.getAttribute('data-cascade-id')) || '';
+  }
+
+  function discoverAgentInputProps() {
+    const inputBox = document.getElementById('antigravity.agentSidePanelInputBox');
+    if (!inputBox) return null;
+    const fk = Object.keys(inputBox).find((k) => k.startsWith('__reactFiber$'));
+    let f = fk ? inputBox[fk] : null;
+    for (let i = 0; i < 45 && f; i++, f = f.return) {
+      const pr = f.memoizedProps;
+      if (pr && typeof pr.handleSubmit === 'function') return pr;
+    }
+    return null;
+  }
+
+  function discoverComposerContextFromInputBox() {
+    const inputBox = document.getElementById('antigravity.agentSidePanelInputBox');
+    if (!inputBox) return null;
+    const fk = Object.keys(inputBox).find((k) => k.startsWith('__reactFiber$'));
+    let f = fk ? inputBox[fk] : null;
+    for (let i = 0; i < 45 && f; i++, f = f.return) {
+      const pr = f.memoizedProps;
+      if (pr && pr.value && pr.value.inputBoxRef) return pr.value;
+      let dep = f.dependencies ? f.dependencies.firstContext : null;
+      while (dep) {
+        const v = dep.memoizedValue;
+        if (v && typeof v === 'object' && v.inputBoxRef) return v;
+        dep = dep.next;
+      }
+    }
+    return null;
+  }
+
+  function isPaneCurrentlyRunning(agentPropsArg) {
+    const pr = agentPropsArg !== undefined ? agentPropsArg : discoverAgentInputProps();
+    if (pr && typeof pr.isRunning === 'boolean') return pr.isRunning;
+    return Boolean(document.querySelector('button[data-testid="input-cancel-button"]'));
+  }
+
+  function isCompactUserStepObj(s) {
+    if (!s || (s.type !== 14 && (!s.step || s.step.case !== 'userInput'))) return false;
+    const val = s.step && s.step.value;
+    if (!val) return false;
+    if (/^\s*\/compact\b/i.test(String(val.userResponse || ''))) return true;
+    if (Array.isArray(val.items)) {
+      return val.items.some(
+        (it) =>
+          it &&
+          it.chunk &&
+          it.chunk.case === 'item' &&
+          it.chunk.value &&
+          it.chunk.value.scopeItem &&
+          it.chunk.value.scopeItem.case === 'slashCommand' &&
+          it.chunk.value.scopeItem.value &&
+          it.chunk.value.scopeItem.value.info &&
+          it.chunk.value.scopeItem.value.info.name === 'compact'
+      );
+    }
+    return false;
+  }
+
+  function isDomCompactUserStep(stepEl) {
+    if (!stepEl) return false;
+    if (stepEl.querySelector('[data-uri="slashCommand:compact"]')) return true;
+    const contentEl = stepEl.querySelector('[data-testid="user-message-content"]');
+    const raw = ((contentEl || stepEl).textContent || '').trim();
+    return /^\/?compact$/i.test(raw);
+  }
+
+  function domTurnHasAssistantContent(turnEl) {
+    if (!turnEl) return false;
+    return Boolean(
+      turnEl.querySelector(
+        'button[data-testid="worked-for-collapsible"], [data-testid="thinking-collapsible-trigger"], button[data-testid="tool-group-collapsible"], [data-testid="ephemeral-tool-status"], .prose, p, pre, ul, ol'
+      )
+    );
+  }
+
+  function currentCtxStaleSig() {
+    if (!latestCtxState.hasData) return '';
+    return `${latestCtxState.ratioText}|${latestCtxState.outText}|${latestCtxState.pct}`;
+  }
+
+  /* Real-time /compact detector:
+   * `daemon.mjs` reads `gen_metadata` (whose last row right after `/compact` is the summarization call itself, e.g. 483k/94%),
+   * and `CHECKPOINT` (`step_type = 23`) writes no post-compact `gen_metadata` row until the user sends a new message.
+   * Inspecting live `trajectorySlice` (with DOM fallback) lets the ring, popover & tooltip reflect `compacting` / `compacted` immediately. */
+  function detectCompactStatus(curCidArg) {
+    const curCid = curCidArg !== undefined ? curCidArg : getActiveCascadeId();
+    const agentProps = discoverAgentInputProps();
+    const running = isPaneCurrentlyRunning(agentProps);
+    const cidKey = curCid || '__active__';
+    const curSig = currentCtxStaleSig();
+
+    const viewports = document.querySelectorAll('[data-testid="autoscroll-viewport"], .overflow-y-auto');
+    for (const vp of viewports) {
+      const fk = Object.keys(vp).find((k) => k.startsWith('__reactFiber$'));
+      let f = fk ? vp[fk] : null;
+      for (let i = 0; i < 35 && f; i++, f = f.return) {
+        const p = f.memoizedProps;
+        const slice = p && p.trajectorySlice;
+        if (!slice || !Array.isArray(slice.stepsInSlice)) continue;
+        if (curCid && slice.conversationId && slice.conversationId !== curCid) break;
+
+        const arr = slice.stepsInSlice;
+        let lastCompactUserIdx = -1;
+        let lastCheckpointIdx = -1;
+        let lastCheckpointStep = null;
+        let lastRegularUserIdx = -1;
+        let lastPlannerIdx = -1;
+
+        for (let idx = 0; idx < arr.length; idx++) {
+          const s = arr[idx];
+          if (!s) continue;
+          const sc = (s.step && s.step.case) || '';
+          if (sc === 'checkpoint' || s.type === 23) {
+            lastCheckpointIdx = idx;
+            lastCheckpointStep = s;
+          } else if (sc === 'userInput' || s.type === 14) {
+            if (isCompactUserStepObj(s)) lastCompactUserIdx = idx;
+            else lastRegularUserIdx = idx;
+          } else if (sc === 'plannerResponse' || s.type === 15) {
+            lastPlannerIdx = idx;
+          }
+        }
+
+        const anchorIdx = Math.max(lastCompactUserIdx, lastCheckpointIdx);
+        if (anchorIdx >= 0 && lastRegularUserIdx < anchorIdx && lastPlannerIdx < anchorIdx) {
+          manualCompactPending = { cascadeId: '', startedAt: 0 };
+          const cpStatus = lastCheckpointStep ? lastCheckpointStep.status : undefined;
+          const cpFailed = Boolean(
+            (lastCheckpointStep && lastCheckpointStep.step && lastCheckpointStep.step.value && lastCheckpointStep.step.value.modelSummarizationFailed) ||
+              (typeof cpStatus === 'number' && cpStatus > 3)
+          );
+          if (cpFailed) {
+            compactedStaleSigByCid.delete(cidKey);
+            return 'idle';
+          }
+          if (running || (typeof cpStatus === 'number' && cpStatus > 0 && cpStatus < 3)) {
+            return 'compacting';
+          }
+          if (curSig) compactedStaleSigByCid.set(cidKey, curSig);
+          return 'compacted';
+        }
+
+        if (anchorIdx >= 0 && lastRegularUserIdx > anchorIdx) {
+          const staleSig = compactedStaleSigByCid.get(cidKey);
+          if (staleSig && curSig && staleSig === curSig && running) {
+            return 'compacted';
+          }
+          if (staleSig && curSig && staleSig !== curSig) {
+            compactedStaleSigByCid.delete(cidKey);
+          }
+        }
+
+        if (
+          manualCompactPending.cascadeId === cidKey &&
+          Date.now() - manualCompactPending.startedAt < 15000
+        ) {
+          return 'compacting';
+        }
+        return 'idle';
+      }
+    }
+
+    /* DOM fallback (covers jsdom unit tests & early mounts before trajectorySlice attaches) */
+    const flowNodes = Array.from(
+      document.querySelectorAll('[data-testid="user-input-step"], [data-testid="agent-response"]')
+    );
+    let lastUserFlowIdx = -1;
+    for (let i = flowNodes.length - 1; i >= 0; i--) {
+      if (flowNodes[i].getAttribute('data-testid') === 'user-input-step') {
+        lastUserFlowIdx = i;
+        break;
+      }
+    }
+    if (lastUserFlowIdx >= 0 && isDomCompactUserStep(flowNodes[lastUserFlowIdx])) {
+      const hasReplyAfter = flowNodes
+        .slice(lastUserFlowIdx + 1)
+        .some((el) => el.getAttribute('data-testid') === 'agent-response' && domTurnHasAssistantContent(el));
+      if (!hasReplyAfter) {
+        manualCompactPending = { cascadeId: '', startedAt: 0 };
+        if (running) return 'compacting';
+        if (curSig) compactedStaleSigByCid.set(cidKey, curSig);
+        return 'compacted';
+      }
+    }
+
+    const staleSig = compactedStaleSigByCid.get(cidKey);
+    if (staleSig && curSig) {
+      if (staleSig === curSig && running) return 'compacted';
+      if (staleSig !== curSig) compactedStaleSigByCid.delete(cidKey);
+    }
+
+    if (
+      manualCompactPending.cascadeId === cidKey &&
+      Date.now() - manualCompactPending.startedAt < 15000
+    ) {
+      return 'compacting';
+    }
+    return 'idle';
+  }
+
+  function extractCompactLabels(ctxState) {
+    const rawRatio = String((ctxState && ctxState.ratioText) || '');
+    const parts = rawRatio.split('/');
+    const preUsed = (parts[0] || '').trim();
+    const limitLabel = (parts[1] || '').trim();
+    const sumOut = String((ctxState && ctxState.outText) || '')
+      .replace(/^Out\s+/i, '')
+      .trim();
+    return { preUsed, limitLabel, sumOut };
+  }
+
+  function ensureCompactPollTimer() {
+    if (compactPollTimerId || disposed) return;
+    compactPollTimerId = setInterval(() => {
+      if (disposed) {
+        clearInterval(compactPollTimerId);
+        compactPollTimerId = null;
+        return;
+      }
+      const st = detectCompactStatus();
+      syncCompactVisualState(false);
+      if (st !== 'compacting' && !quotaPopoverOpen) {
+        clearInterval(compactPollTimerId);
+        compactPollTimerId = null;
+      }
+    }, 500);
+  }
+
+  function syncCompactVisualState(forceRender) {
+    if (disposed || !FEAT.contextRing) return;
+    const curCid = getActiveCascadeId();
+    const st = detectCompactStatus(curCid);
+    const running = isPaneCurrentlyRunning();
+    const key = `${curCid}|${st}|${running ? '1' : '0'}`;
+    if (!forceRender && key === lastObservedCompactKey) return;
+    lastObservedCompactKey = key;
+
+    if (st === 'compacting') ensureCompactPollTimer();
+
+    if (window.__ag_last_metrics && typeof window.__ag_render_metrics === 'function') {
+      try {
+        window.__ag_render_metrics(window.__ag_last_metrics);
+        return;
+      } catch {}
+    }
+    updateComposerRingVisuals();
+    if (quotaPopoverOpen) renderQuotaPopoverBody();
+  }
+
+  async function triggerConversationCompact() {
+    if (disposed) return false;
+    const curCid = getActiveCascadeId();
+    const cidKey = curCid || '__active__';
+    const curStatus = detectCompactStatus(curCid);
+    if (curStatus === 'compacting' || curStatus === 'compacted') return false;
+
+    const agentProps = discoverAgentInputProps();
+    if (isPaneCurrentlyRunning(agentProps)) return false;
+
+    manualCompactPending = { cascadeId: cidKey, startedAt: Date.now() };
+    syncCompactVisualState(true);
+    ensureCompactPollTimer();
+
+    try {
+      if (agentProps && typeof agentProps.handleSubmit === 'function') {
+        const slashItems = Array.isArray(agentProps.slashCommandItems) ? agentProps.slashCommandItems : [];
+        const compactDef = slashItems.find(
+          (x) => x && (x.title === 'compact' || (x.info && x.info.name === 'compact'))
+        );
+        const slashInfo = (compactDef && compactDef.info) || {
+          $typeName: 'exa.codeium_common_pb.SlashCommandInfo',
+          name: 'compact',
+          modelFacingText: '',
+          type: 1,
+          icon: 'collapse_all',
+          displayName: '',
+          logo: ''
+        };
+        const submitItems = [
+          {
+            $typeName: 'exa.codeium_common_pb.TextOrScopeItem',
+            chunk: {
+              case: 'item',
+              value: {
+                $typeName: 'exa.codeium_common_pb.ContextScopeItem',
+                scopeItem: {
+                  case: 'slashCommand',
+                  value: {
+                    $typeName: 'exa.codeium_common_pb.SlashCommandScopeItem',
+                    argumentValues: {},
+                    info: slashInfo
+                  }
+                }
+              }
+            }
+          },
+          {
+            $typeName: 'exa.codeium_common_pb.TextOrScopeItem',
+            chunk: {
+              case: 'text',
+              value: ' '
+            }
+          }
+        ];
+        await agentProps.handleSubmit(submitItems, [], () => {});
+        syncCompactVisualState(true);
+        return true;
+      }
+
+      const compCtx = discoverComposerContextFromInputBox();
+      if (compCtx && !composerHasExistingDraft(compCtx)) {
+        setComposerText(compCtx, '/compact ');
+        const ref = compCtx.inputBoxRef && compCtx.inputBoxRef.current;
+        if (ref && typeof ref.submit === 'function') {
+          ref.submit();
+          syncCompactVisualState(true);
+          return true;
+        }
+      }
+    } catch {}
+
+    manualCompactPending = { cascadeId: '', startedAt: 0 };
+    syncCompactVisualState(true);
+    return false;
   }
 
   function fmtCompactTokens(n) {
@@ -1215,7 +1557,7 @@
     return data;
   }
 
-  function buildSlimMetricsTooltipHtml(d, ctxFallback) {
+  function buildSlimMetricsTooltipHtml(d, ctxFallback, compactStatus) {
     const esc = (s) =>
       String(s || '')
         .replace(/&/g, '&amp;')
@@ -1236,9 +1578,15 @@
 
     const ctxRatio = d.ctxRatio || ctxFallback.ratioText || '';
     const ctxPct = d.ctxPct || (ctxFallback.hasData ? `${ctxFallback.pct}%` : '');
-    const ctxHtml = ctxRatio
-      ? `${esc(ctxRatio)}${ctxPct ? `<span class="ag-ux-tt-sub">${esc(ctxPct)}</span>` : ''}`
-      : '—';
+    const { preUsed } = extractCompactLabels({ ratioText: ctxRatio, outText: ctxFallback.outText });
+    let ctxHtml = '—';
+    if (compactStatus === 'compacting') {
+      ctxHtml = `压缩中…${preUsed ? `<span class="ag-ux-tt-sub">原 ${esc(preUsed)}</span>` : ''}`;
+    } else if (compactStatus === 'compacted') {
+      ctxHtml = `已压缩${preUsed ? `<span class="ag-ux-tt-sub">原 ${esc(preUsed)}</span>` : ''}`;
+    } else if (ctxRatio) {
+      ctxHtml = `${esc(ctxRatio)}${ctxPct ? `<span class="ag-ux-tt-sub">${esc(ctxPct)}</span>` : ''}`;
+    }
 
     const lastCache = Number.isFinite(d.lastCacheRate) ? `${Math.round(d.lastCacheRate)}%` : '';
     const lastTier = cacheTierForRate(d.lastCacheRate);
@@ -1332,7 +1680,10 @@
         cascadeId: payload.cascadeId || curCid
       };
 
-      const nextTooltipHtml = parsedTt ? buildSlimMetricsTooltipHtml(parsedTt, latestCtxState) : rawTooltip;
+      const compactStatus = detectCompactStatus(curCid);
+      const nextTooltipHtml = parsedTt
+        ? buildSlimMetricsTooltipHtml(parsedTt, latestCtxState, compactStatus)
+        : rawTooltip;
       const slimmed = Object.assign({}, payload, {
         __agOrigInlineHtml: rawInline,
         __agOrigTooltipHtml: rawTooltip,
@@ -1585,6 +1936,13 @@
     pop.setAttribute('data-ag-i18n-ignore', '1');
     pop.setAttribute('data-open', 'false');
     pop.addEventListener('click', (e) => {
+      const compactBtn = e.target.closest('[data-ag-qp-compact]');
+      if (compactBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (!compactBtn.disabled) triggerConversationCompact();
+        return;
+      }
       const tabBtn = e.target.closest('[data-ag-quota-tab]');
       if (tabBtn) {
         e.stopPropagation();
@@ -1631,11 +1989,41 @@
   function renderQuotaPopoverBody() {
     const pop = ensureQuotaPopover();
     const curCid = getActiveCascadeId();
-    const hasCtx = Boolean(curCid && latestCtxState.hasData && latestCtxState.cascadeId === curCid);
-    const ctxPct = hasCtx ? latestCtxState.pct : 0;
-    const ctxSub = hasCtx
+    const hasCtx = Boolean((!curCid || latestCtxState.cascadeId === curCid) && latestCtxState.hasData);
+    const compactStatus = detectCompactStatus(curCid);
+    const paneRunning = isPaneCurrentlyRunning();
+    const { preUsed, sumOut } = extractCompactLabels(latestCtxState);
+
+    let ctxPct = hasCtx ? latestCtxState.pct : 0;
+    let ctxPctLabel = `${ctxPct}%`;
+    let ctxSub = hasCtx
       ? `${latestCtxState.ratioText}${latestCtxState.outText ? ` · ${latestCtxState.outText}` : ''}`
       : '当前会话暂无消耗';
+    let ctxColor = barColorForPct(ctxPct, 70, 85);
+    let fillCompactingAttr = '';
+    let compactBtnHtml = '';
+
+    if (compactStatus === 'compacting') {
+      ctxPct = 14;
+      ctxPctLabel = '…';
+      ctxSub = preUsed ? `正在压缩 ${preUsed}…` : '正在生成压缩摘要…';
+      ctxColor = 'var(--primary, #2F75C3)';
+      fillCompactingAttr = ' data-compacting="true"';
+      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="compacting" disabled title="正在总结历史并压缩上下文…">${SVG_COMPACT_ICON}<span>压缩中…</span></button>`;
+    } else if (compactStatus === 'compacted') {
+      ctxPct = hasCtx ? 5 : 0;
+      ctxPctLabel = hasCtx ? '~5%' : '0%';
+      ctxSub = preUsed && sumOut ? `${preUsed} → 摘要 ${sumOut}` : '已完成压缩 · 下轮刷新';
+      ctxColor = 'var(--primary, #2F75C3)';
+      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="compacted" disabled title="当前对话历史已完成压缩，发下一条消息即按新上下文计费">${SVG_COMPACT_DONE}<span>已压缩</span></button>`;
+    } else if (!hasCtx) {
+      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="empty" disabled title="当前会话暂无可压缩上下文">${SVG_COMPACT_ICON}<span>压缩</span></button>`;
+    } else if (paneRunning) {
+      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="busy" disabled title="请等待当前回复结束后再压缩上下文">${SVG_COMPACT_ICON}<span>压缩</span></button>`;
+    } else {
+      const urgentAttr = ctxPct >= 85 ? ' data-urgent="crit"' : ctxPct >= 70 ? ' data-urgent="warn"' : '';
+      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="ready"${urgentAttr} title="立即执行 /compact 压缩当前对话上下文">${SVG_COMPACT_ICON}<span>压缩</span></button>`;
+    }
 
     discoverQuotaService();
     const tierShort = cachedUserTierName
@@ -1703,7 +2091,6 @@
         .join('');
     }
 
-    const ctxColor = barColorForPct(ctxPct, 70, 85);
     pop.innerHTML = `
       <div class="ag-qp-hdr">
         <span class="ag-qp-tier">套餐使用限额 · ${escapeHtml(tierShort)}</span>
@@ -1714,10 +2101,13 @@
       </div>
       <div class="ag-qp-item">
         <div class="ag-qp-row">
-          <span class="ag-qp-title">当前上下文</span>
-          <span class="ag-qp-meta"><span class="ag-qp-reset">${escapeHtml(ctxSub)}</span><span class="ag-qp-pct">${ctxPct}%</span></span>
+          <span class="ag-qp-title-group">
+            <span class="ag-qp-title">当前上下文</span>
+            ${compactBtnHtml}
+          </span>
+          <span class="ag-qp-meta"><span class="ag-qp-reset">${escapeHtml(ctxSub)}</span><span class="ag-qp-pct">${escapeHtml(ctxPctLabel)}</span></span>
         </div>
-        <div class="ag-qp-track"><div class="ag-qp-fill" style="width:${ctxPct}%;background:${ctxColor}"></div></div>
+        <div class="ag-qp-track"><div class="ag-qp-fill"${fillCompactingAttr} style="width:${ctxPct}%;background:${ctxColor}"></div></div>
       </div>
       <div class="ag-qp-divider"></div>
       ${tabsHtml}
@@ -1755,9 +2145,42 @@
     const ring = document.getElementById('ag-claude-ctx-ring');
     if (!ring) return;
     const curCid = getActiveCascadeId();
-    const hasCtx = Boolean(curCid && latestCtxState.hasData && latestCtxState.cascadeId === curCid);
-    const pct = hasCtx ? latestCtxState.pct : 0;
+    const hasCtx = Boolean((!curCid || latestCtxState.cascadeId === curCid) && latestCtxState.hasData);
+    const compactStatus = detectCompactStatus(curCid);
+    const { preUsed, sumOut } = extractCompactLabels(latestCtxState);
     const arc = ring.querySelector('.ag-ctx-ring-arc');
+
+    if (compactStatus === 'compacting') {
+      const pct = 18;
+      if (arc) {
+        arc.style.strokeDashoffset = (RING_CIRC * (1 - pct / 100)).toFixed(2);
+        arc.style.strokeOpacity = '1';
+      }
+      ring.setAttribute('data-level', 'normal');
+      ring.setAttribute('data-compact-state', 'compacting');
+      ring.title = preUsed
+        ? `正在压缩上下文 (原 ${preUsed})… · 点击查看状态`
+        : '正在压缩上下文… · 点击查看状态';
+      return;
+    }
+
+    if (compactStatus === 'compacted') {
+      const pct = hasCtx ? 5 : 0;
+      if (arc) {
+        arc.style.strokeDashoffset = (RING_CIRC * (1 - pct / 100)).toFixed(2);
+        arc.style.strokeOpacity = pct <= 0 ? '0' : '1';
+      }
+      ring.setAttribute('data-level', 'normal');
+      ring.setAttribute('data-compact-state', 'compacted');
+      ring.title =
+        preUsed && sumOut
+          ? `当前上下文已压缩 (${preUsed} → 摘要 ${sumOut}) · 点击查看套餐限额`
+          : '当前上下文已压缩 · 点击查看套餐限额';
+      return;
+    }
+
+    ring.removeAttribute('data-compact-state');
+    const pct = hasCtx ? latestCtxState.pct : 0;
     if (arc) {
       const offset = RING_CIRC * (1 - pct / 100);
       arc.style.strokeDashoffset = offset.toFixed(2);
@@ -3782,6 +4205,10 @@
     if (timerIntervalId) {
       clearInterval(timerIntervalId);
       timerIntervalId = null;
+    }
+    if (compactPollTimerId) {
+      clearInterval(compactPollTimerId);
+      compactPollTimerId = null;
     }
     document.removeEventListener('click', onDocClick, true);
     document.removeEventListener('pointerdown', onOutsidePopoverPointerDown, true);

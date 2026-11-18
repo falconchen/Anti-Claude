@@ -1613,6 +1613,16 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #antigravity\.agentSidePan
   stroke: #DC2626 !important;
 }
 
+@keyframes agCtxCompactingPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.42; }
+}
+
+#antigravity\.agentSidePanelInputBox #ag-claude-ctx-ring[data-compact-state="compacting"] .ag-ctx-ring-arc {
+  stroke: #2F75C3 !important;
+  animation: agCtxCompactingPulse 1.2s ease-in-out infinite !important;
+}
+
 /* 上弹套餐使用限额浮层（1:1 复刻 Claude Desktop 浮层质感，全局锁死同一字体与黑度） */
 #ag-claude-quota-popover,
 #ag-claude-quota-popover :is(div, span, button) {
@@ -1778,9 +1788,137 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-quota-popover .
 
 #ag-claude-quota-popover .ag-qp-row {
   display: flex !important;
-  align-items: baseline !important;
+  align-items: center !important;
   justify-content: space-between !important;
   gap: 8px !important;
+}
+
+#ag-claude-quota-popover .ag-qp-title-group {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 7px !important;
+  min-width: 0 !important;
+}
+
+#ag-claude-quota-popover .ag-qp-compact-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 3.5px !important;
+  height: 20px !important;
+  padding: 0 7px 0 5.5px !important;
+  border-radius: 6px !important;
+  font-size: 11.5px !important;
+  font-weight: 400 !important;
+  line-height: 1 !important;
+  white-space: nowrap !important;
+  cursor: pointer !important;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, opacity 120ms ease !important;
+}
+
+#ag-claude-quota-popover .ag-qp-compact-btn > svg {
+  width: 11px !important;
+  height: 11px !important;
+  flex-shrink: 0 !important;
+}
+
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-quota-popover .ag-qp-compact-btn[data-state="ready"] {
+  background-color: #F4F3F0 !important;
+  border: 1px solid #E2E1DD !important;
+  color: #3D3D3A !important;
+}
+
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-quota-popover .ag-qp-compact-btn[data-state="ready"]:hover:not(:disabled) {
+  background-color: #EAE9E4 !important;
+  border-color: #D2D1CC !important;
+  color: #191918 !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-quota-popover .ag-qp-compact-btn[data-state="ready"] {
+  background-color: rgba(255, 255, 255, 0.07) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  color: #D8D7D2 !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-quota-popover .ag-qp-compact-btn[data-state="ready"]:hover:not(:disabled) {
+  background-color: rgba(255, 255, 255, 0.13) !important;
+  border-color: rgba(255, 255, 255, 0.18) !important;
+  color: #FFFFFF !important;
+}
+
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-quota-popover .ag-qp-compact-btn[data-state="ready"][data-urgent="warn"] {
+  background-color: #FEF7E6 !important;
+  border-color: #F5D487 !important;
+  color: #B45309 !important;
+}
+
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-quota-popover .ag-qp-compact-btn[data-state="ready"][data-urgent="warn"]:hover:not(:disabled) {
+  background-color: #FDECC8 !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-quota-popover .ag-qp-compact-btn[data-state="ready"][data-urgent="warn"] {
+  background-color: rgba(217, 119, 6, 0.16) !important;
+  border-color: rgba(245, 158, 11, 0.34) !important;
+  color: #FBBF24 !important;
+}
+
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-quota-popover .ag-qp-compact-btn[data-state="ready"][data-urgent="crit"] {
+  background-color: #FEF2F2 !important;
+  border-color: #FECACA !important;
+  color: #DC2626 !important;
+}
+
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-quota-popover .ag-qp-compact-btn[data-state="ready"][data-urgent="crit"]:hover:not(:disabled) {
+  background-color: #FEE2E2 !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-quota-popover .ag-qp-compact-btn[data-state="ready"][data-urgent="crit"] {
+  background-color: rgba(220, 38, 38, 0.18) !important;
+  border-color: rgba(248, 113, 113, 0.36) !important;
+  color: #F87171 !important;
+}
+
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-quota-popover .ag-qp-compact-btn[data-state="compacting"] {
+  background-color: rgba(47, 117, 195, 0.09) !important;
+  border: 1px solid rgba(47, 117, 195, 0.24) !important;
+  color: #2F75C3 !important;
+  cursor: default !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-quota-popover .ag-qp-compact-btn[data-state="compacting"] {
+  background-color: rgba(96, 165, 250, 0.14) !important;
+  border: 1px solid rgba(96, 165, 250, 0.28) !important;
+  color: #7CB4F5 !important;
+  cursor: default !important;
+}
+
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-quota-popover .ag-qp-compact-btn[data-state="compacted"] {
+  background-color: rgba(22, 163, 74, 0.08) !important;
+  border: 1px solid rgba(22, 163, 74, 0.22) !important;
+  color: #15803D !important;
+  cursor: default !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-quota-popover .ag-qp-compact-btn[data-state="compacted"] {
+  background-color: rgba(74, 222, 128, 0.12) !important;
+  border: 1px solid rgba(74, 222, 128, 0.26) !important;
+  color: #4ADE80 !important;
+  cursor: default !important;
+}
+
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-quota-popover .ag-qp-compact-btn:is([data-state="empty"], [data-state="busy"]) {
+  background-color: #F6F6F4 !important;
+  border: 1px solid #EAEAE6 !important;
+  color: #9A9994 !important;
+  cursor: not-allowed !important;
+  opacity: 0.72 !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-quota-popover .ag-qp-compact-btn:is([data-state="empty"], [data-state="busy"]) {
+  background-color: rgba(255, 255, 255, 0.04) !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  color: #787774 !important;
+  cursor: not-allowed !important;
+  opacity: 0.72 !important;
 }
 
 #ag-claude-quota-popover .ag-qp-title {
@@ -1840,6 +1978,10 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-quota-popover .
   height: 100% !important;
   border-radius: 999px !important;
   transition: width 220ms cubic-bezier(0.16, 1, 0.3, 1), background-color 180ms ease !important;
+}
+
+#ag-claude-quota-popover .ag-qp-fill[data-compacting="true"] {
+  animation: agCtxCompactingPulse 1.2s ease-in-out infinite !important;
 }
 
 #ag-claude-quota-popover .ag-qp-empty {
