@@ -27,6 +27,71 @@ export function stripAnsi(str) {
   return String(str || '').replace(/\x1b\[[0-9;]*m/g, '');
 }
 
+function codePointDisplayWidth(cp) {
+  if (cp === undefined || cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) return 0;
+  /* Zero-width / combining / variation selector code points */
+  if (
+    (cp >= 0x0300 && cp <= 0x036f) ||
+    (cp >= 0x1ab0 && cp <= 0x1aff) ||
+    (cp >= 0x1dc0 && cp <= 0x1dff) ||
+    (cp >= 0x200b && cp <= 0x200f) ||
+    (cp >= 0x20d0 && cp <= 0x20ff) ||
+    (cp >= 0xfe00 && cp <= 0xfe0f) ||
+    (cp >= 0xfe20 && cp <= 0xfe2f) ||
+    (cp >= 0xe0100 && cp <= 0xe01ef)
+  ) {
+    return 0;
+  }
+  /* East Asian Wide / Fullwidth & Astral Emoji / CJK Ideographs */
+  if (
+    cp >= 0x1100 &&
+    (cp <= 0x115f ||
+      cp === 0x2329 ||
+      cp === 0x232a ||
+      (cp >= 0x2e80 && cp <= 0x3247 && cp !== 0x303f) ||
+      (cp >= 0x3250 && cp <= 0x4dbf) ||
+      (cp >= 0x4e00 && cp <= 0xa4c6) ||
+      (cp >= 0xa960 && cp <= 0xa97c) ||
+      (cp >= 0xac00 && cp <= 0xd7a3) ||
+      (cp >= 0xf900 && cp <= 0xfaff) ||
+      (cp >= 0xfe10 && cp <= 0xfe19) ||
+      (cp >= 0xfe30 && cp <= 0xfe6b) ||
+      (cp >= 0xff01 && cp <= 0xff60) ||
+      (cp >= 0xffe0 && cp <= 0xffe6) ||
+      (cp >= 0x1f300 && cp <= 0x1faff) ||
+      (cp >= 0x20000 && cp <= 0x3fffd))
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+export function stringDisplayWidth(str) {
+  const plain = stripAnsi(str);
+  let width = 0;
+  for (const ch of plain) {
+    width += codePointDisplayWidth(ch.codePointAt(0));
+  }
+  return width;
+}
+
+export function truncateToDisplayWidth(str, maxCols) {
+  const plain = stripAnsi(str);
+  if (maxCols <= 0) return '';
+  if (stringDisplayWidth(plain) <= maxCols) return plain;
+  if (maxCols === 1) return '…';
+  const targetCols = maxCols - 1;
+  let used = 0;
+  let out = '';
+  for (const ch of plain) {
+    const w = codePointDisplayWidth(ch.codePointAt(0));
+    if (used + w > targetCols) break;
+    out += ch;
+    used += w;
+  }
+  return `${out}…`;
+}
+
 function paint(text, code, noColor) {
   if (!text) return '';
   if (noColor || !code) return text;
@@ -124,7 +189,7 @@ export function formatStatusLine(payload, options = {}) {
     return parts.join(sep);
   };
 
-  const budget = Math.max(20, maxCols - 2);
+  const budget = Math.max(4, maxCols - 2);
   const levels = [
     { includeWorkspace: true, includeVcs: true, includeBar: true, includeState: true },
     { includeWorkspace: false, includeVcs: true, includeBar: true, includeState: true },
@@ -136,12 +201,13 @@ export function formatStatusLine(payload, options = {}) {
   for (const cfg of levels) {
     const line = buildSegments(cfg);
     if (!line) return '';
-    if (stripAnsi(line).length <= budget) return line;
+    if (stringDisplayWidth(line) <= budget) return line;
   }
 
   const fallback = buildSegments(levels[levels.length - 1]);
-  const plain = stripAnsi(fallback);
-  return plain.length > budget ? `${plain.slice(0, Math.max(1, budget - 1))}…` : fallback;
+  if (stringDisplayWidth(fallback) <= budget) return fallback;
+  const truncatedPlain = truncateToDisplayWidth(fallback, budget);
+  return model ? paint(truncatedPlain, ANSI.bold, noColor) : truncatedPlain;
 }
 
 async function readStdinText() {

@@ -49,6 +49,7 @@ const STATE_DIR = path.join(AGY_DIR, 'anti-claude');
 const USER_DIR = path.join(STATE_DIR, 'user');
 const STATE_FILE = path.join(STATE_DIR, 'install-state.json');
 const PID_FILE = path.join(STATE_DIR, 'daemon.pid');
+const PROJECTS_REGISTRY_FILE = path.join(STATE_DIR, 'projects-registry.json');
 const BACKUP_DIR = path.join(STATE_DIR, 'backup');
 const BASE_DIR = path.join(STATE_DIR, 'base');
 const INCOMING_DIR = path.join(STATE_DIR, 'incoming');
@@ -57,6 +58,9 @@ const SYNC_LOG_FILE = path.join(STATE_DIR, 'auto-sync.log');
 const LAUNCHD_LOG_FILE = path.join(STATE_DIR, 'launchd.log');
 const DAEMON_LOG_FILE = path.join(STATE_DIR, 'daemon.log');
 const CORE_DAEMON_SCRIPT = path.join(__dirname, 'core', 'daemon.mjs');
+const SIDECARS_DIR = path.join(GEMINI_DIR, 'config', 'sidecars');
+const PROJECT_RULE_BEGIN = '<!-- BEGIN anti-claude-project -->';
+const PROJECT_RULE_END = '<!-- END anti-claude-project -->';
 
 /* Own LaunchAgent / background service identifiers */
 const DAEMON_LABEL = 'com.antigravity.anti-claude.daemon';
@@ -113,8 +117,49 @@ function readJsonSafe(p, fallback = null) {
   try {
     return JSON.parse(fs.readFileSync(p, 'utf8'));
   } catch {
-    return fallback;
+    return arguments.length >= 2 ? fallback : null;
   }
+}
+
+function readProcessCommandLineSync(pid) {
+  if (process.platform === 'linux') {
+    try {
+      const raw = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+      if (raw) return raw.replace(/\0+/g, ' ').trim();
+    } catch {}
+  }
+  if (process.platform === 'win32') {
+    try {
+      return execFileSync(
+        'powershell',
+        ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
+        { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }
+      ).trim();
+    } catch {
+      return '';
+    }
+  }
+  try {
+    return execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
+      encoding: 'utf8',
+      timeout: 1500,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
+export function isMatchingDaemonPid(pid, pattern = /(?:^|[\\/ "'])daemon\.mjs(?:\s|$|["'])|anti-claude[\\/]+core[\\/]+daemon\.mjs/i, { commandReader = readProcessCommandLineSync, killProbe = process.kill } = {}) {
+  const num = Number(pid);
+  if (!Number.isInteger(num) || num <= 0 || num === process.pid) return false;
+  try {
+    killProbe(num, 0);
+  } catch {
+    return false;
+  }
+  const cmd = String(commandReader(num) || '');
+  return Boolean(cmd && pattern.test(cmd));
 }
 
 function writeFileAtomic(p, content) {
@@ -311,7 +356,7 @@ function checkFontsInstalled() {
   }
 }
 
-function syncFontsFromLocalClaudeApp() {
+function syncFontsFromLocalClaudeApp(state = null) {
   if (process.platform !== 'darwin') return { synced: false, reason: 'not_macos' };
   const claudeFontsDir = '/Applications/Claude.app/Contents/Resources/fonts';
   if (!fs.existsSync(claudeFontsDir)) return { synced: false, reason: 'claude_app_not_installed' };
@@ -326,6 +371,10 @@ function syncFontsFromLocalClaudeApp() {
         copied.push(name);
       }
     }
+  }
+  if (state && copied.length > 0) {
+    const prev = Array.isArray(state.fontsCopied) ? state.fontsCopied : [];
+    state.fontsCopied = Array.from(new Set([...prev, ...copied]));
   }
   return { synced: true, copied, note: 'Fonts are copied from your own local Claude.app for personal use only.' };
 }
@@ -427,9 +476,24 @@ function migrateLegacyState() {
     const hasBak = hasLegacyBackup && fs.existsSync(legacyBak);
     if (hasBak) fs.copyFileSync(legacyBak, path.join(BACKUP_DIR, f));
     if (fs.existsSync(live)) {
+      const liveText = readTextSafe(live);
+      const srcText = readTextSafe(path.join(__dirname, 'user', f));
       fs.copyFileSync(live, path.join(USER_DIR, f));
-      fs.copyFileSync(live, path.join(BASE_DIR, f));
-      state.files[f] = { existedBefore: false, deployedSha: sha256File(live) };
+      /* Only establish a base snapshot when the v1 file matches a verifiable template/stub;
+         otherwise leave base unset so modified v1 CSS/JS is preserved and new template is saved to incoming/ */
+      if (liveText !== null && srcText !== null && liveText === srcText) {
+        writeFileAtomic(path.join(BASE_DIR, f), srcText);
+        state.files[f] = { existedBefore: false, deployedSha: sha256Text(srcText) };
+      } else if (liveText !== null && STUB_CONTENT[f] && liveText === STUB_CONTENT[f]) {
+        writeFileAtomic(path.join(BASE_DIR, f), STUB_CONTENT[f]);
+        state.files[f] = { existedBefore: false, deployedSha: sha256Text(STUB_CONTENT[f]) };
+      } else if (f.endsWith('.json')) {
+        const emptyJson = '{}\n';
+        writeFileAtomic(path.join(BASE_DIR, f), emptyJson);
+        state.files[f] = { existedBefore: false, deployedSha: sha256Text(emptyJson) };
+      } else {
+        state.files[f] = { existedBefore: false, deployedSha: '' };
+      }
     }
   }
   state.settings = { legacyUnknown: true };
@@ -474,30 +538,67 @@ function migrateLegacyV2State() {
 
 /**
  * Migrate live user customizations from legacy `~/.gemini/antigravity/theme-patch/user/`
- * into `~/.gemini/antigravity/anti-claude/user/`, then retire the external `theme-patch`
- * daemon, wrapper scripts, and directory.
+ * into `~/.gemini/antigravity/anti-claude/user/`, preserve a recoverable backup whenever
+ * retiring an independent `theme-patch` install or unmigrated custom files, then retire
+ * the external `theme-patch` daemon, wrapper scripts, and directory.
  */
 function retireLegacyThemePatch(state) {
-  const out = { migratedFiles: [], retiredDaemon: false, removedDir: false };
+  const out = { migratedFiles: [], retiredDaemon: false, removedDir: false, backupDir: null };
+  const hadLegacyPatchDir = fs.existsSync(LEGACY_THEME_PATCH_DIR);
   const hadLegacyUserDir = fs.existsSync(LEGACY_THEME_USER_DIR);
-  const hadExistingState = state && Object.keys(state.files || {}).length > 0;
+  const hadExistingState = Boolean(state && Object.keys(state.files || {}).length > 0);
+  const isKnownAntiClaudeLegacy = Boolean(
+    hadExistingState ||
+      state?.migratedFrom ||
+      fs.existsSync(LEGACY_DAEMON_WRAPPER_FILE) ||
+      fs.existsSync(LEGACY_SYNC_STATE_FILE) ||
+      fs.existsSync(LEGACY_BACKUP_DIR)
+  );
 
-  if (hadLegacyUserDir && hadExistingState) {
+  let hasUnmigratedContent = !isKnownAntiClaudeLegacy && hadLegacyPatchDir;
+  let copyVerified = true;
+
+  if (hadLegacyUserDir) {
     fs.mkdirSync(USER_DIR, { recursive: true });
     for (const f of USER_LAYER_FILES) {
       const legacyLive = path.join(LEGACY_THEME_USER_DIR, f);
       const newLive = path.join(USER_DIR, f);
-      if (!fs.existsSync(newLive) && fs.existsSync(legacyLive)) {
-        fs.copyFileSync(legacyLive, newLive);
-        out.migratedFiles.push(f);
+      if (fs.existsSync(legacyLive)) {
+        if (!fs.existsSync(newLive)) {
+          fs.copyFileSync(legacyLive, newLive);
+          if (sha256File(newLive) !== sha256File(legacyLive)) {
+            copyVerified = false;
+          } else {
+            out.migratedFiles.push(f);
+          }
+        } else if (sha256File(newLive) !== sha256File(legacyLive)) {
+          hasUnmigratedContent = true;
+        }
       }
-      /* Legacy backups were only stock upstream theme-patch files; once theme-patch is retired, uninstall should remove USER_DIR cleanly */
-      if (state.files[f] && !state.retiredThemePatch) {
+      /* Legacy backups from Anti-Claude <= v2.3.9 were stock upstream theme-patch files;
+         for standalone theme-patch (!isKnownAntiClaudeLegacy), installUserLayer backs up newLive into BACKUP_DIR */
+      if (isKnownAntiClaudeLegacy && state?.files?.[f] && !state.retiredThemePatch) {
         state.files[f].existedBefore = false;
         fs.rmSync(path.join(BACKUP_DIR, f), { force: true });
       }
     }
-    state.retiredThemePatch = true;
+
+    const ignoredLegacyUserNames = new Set([
+      ...USER_LAYER_FILES,
+      '.DS_Store',
+      '.backup-before-claude-ux',
+      '.claude-ux-sync-state.json',
+      'auto-sync.log'
+    ]);
+    try {
+      for (const name of fs.readdirSync(LEGACY_THEME_USER_DIR)) {
+        if (!ignoredLegacyUserNames.has(name)) {
+          hasUnmigratedContent = true;
+          break;
+        }
+      }
+    } catch {}
+    if (state) state.retiredThemePatch = true;
   }
 
   /* Stop legacy com.antigravity.theme LaunchAgent / Windows VBS / PID if present */
@@ -522,7 +623,11 @@ function retireLegacyThemePatch(state) {
   const legacyPidFile = path.join(AGY_DIR, 'theme-daemon.pid');
   if (fs.existsSync(legacyPidFile)) {
     const pid = parseInt(readTextSafe(legacyPidFile) || '0', 10);
-    if (pid > 0 && !NO_LAUNCHD) {
+    if (
+      pid > 0 &&
+      !NO_LAUNCHD &&
+      isMatchingDaemonPid(pid, /theme-patch|antigravity-font-daemon|theme.*daemon/i)
+    ) {
       try {
         process.kill(pid, 'SIGTERM');
       } catch {}
@@ -538,7 +643,16 @@ function retireLegacyThemePatch(state) {
   }
   removeDirIfEmpty(path.join(AGY_DIR, 'scripts'));
 
-  if (fs.existsSync(LEGACY_THEME_PATCH_DIR)) {
+  if (hadLegacyPatchDir && copyVerified) {
+    if (hasUnmigratedContent) {
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const archiveDir = path.join(AGY_DIR, `theme-patch-backup-${ts}`);
+      fs.cpSync(LEGACY_THEME_PATCH_DIR, archiveDir, { recursive: true });
+      if (!fs.existsSync(archiveDir)) {
+        return out;
+      }
+      out.backupDir = archiveDir;
+    }
     fs.rmSync(LEGACY_THEME_PATCH_DIR, { recursive: true, force: true });
     out.removedDir = true;
   }
@@ -559,17 +673,27 @@ function saveState(state) {
 /* Source validation & git self-pull                                          */
 /* -------------------------------------------------------------------------- */
 
-function validateSourceRoot(root = __dirname) {
+const JSON_INVALID = Symbol('json_invalid');
+
+export function validateSourceRoot(root = __dirname) {
   const problems = [];
   for (const rel of ['install.mjs', 'core/daemon.mjs', 'core/runtime.js', 'user/custom.js', 'cli/statusline.mjs']) {
+    const abs = path.join(root, rel);
+    if (!fs.existsSync(abs)) {
+      problems.push(`${rel}: missing`);
+      continue;
+    }
     try {
-      execFileSync(process.execPath, ['--check', path.join(root, rel)], { stdio: 'pipe' });
+      execFileSync(process.execPath, ['--check', abs], { stdio: 'pipe' });
     } catch (err) {
       problems.push(`${rel}: ${String(err.stderr || err.message).split('\n')[0]}`);
     }
   }
   for (const rel of ['core/i18n.json', 'user/config.json', 'user/i18n.override.json']) {
-    if (readJsonSafe(path.join(root, rel), undefined) === undefined) problems.push(`${rel}: invalid JSON`);
+    const parsed = readJsonSafe(path.join(root, rel), JSON_INVALID);
+    if (parsed === JSON_INVALID || !isPlainObject(parsed)) {
+      problems.push(`${rel}: invalid or missing JSON object`);
+    }
   }
   if (!fs.existsSync(path.join(root, 'core', 'base.css'))) problems.push('core/base.css missing');
   if (!fs.existsSync(path.join(root, 'rules', 'claude-execution-sync.md'))) problems.push('rules/claude-execution-sync.md missing');
@@ -593,6 +717,16 @@ function pullSelfRepoIfGit() {
 /* Live CDP (with per-request deadline and close/error handling)              */
 /* -------------------------------------------------------------------------- */
 
+function rankCdpPageTarget(t) {
+  const url = String(t?.url || '');
+  const title = String(t?.title || '');
+  if (url.startsWith('vscode-file://')) return 0;
+  if (/Antigravity/i.test(title) || /workbench|jetski/i.test(url)) return 1;
+  if (url.includes('127.0.0.1:')) return 2;
+  if (url.includes('localhost:')) return 3;
+  return 9;
+}
+
 export async function withCdpPage(fn, { timeoutMs = CDP_TIMEOUT_MS } = {}) {
   if (NO_CDP) return { ok: false, reason: 'cdp_disabled', appRunning: false };
   const raw = readTextSafe(getDevToolsPortFile());
@@ -600,73 +734,97 @@ export async function withCdpPage(fn, { timeoutMs = CDP_TIMEOUT_MS } = {}) {
   const [port] = raw.trim().split(/\r?\n/);
   if (!port) return { ok: false, reason: 'empty_port' };
 
-  let ws;
+  let candidates = [];
   try {
     const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(2000) });
     const list = await res.json();
-    const target = list.find((x) => x.type === 'page' && String(x.url).includes('127.0.0.1:'));
-    if (!target || !target.webSocketDebuggerUrl) return { ok: false, reason: 'main_page_not_found' };
-
-    ws = new WebSocket(target.webSocketDebuggerUrl);
-    const pending = new Map();
-    let closedReason = null;
-    const failAll = (reason) => {
-      closedReason = closedReason || reason;
-      for (const [, p] of pending) p.reject(new Error(reason));
-      pending.clear();
-    };
-    ws.addEventListener('message', (ev) => {
-      let d;
-      try {
-        d = JSON.parse(ev.data);
-      } catch {
-        return;
-      }
-      const p = pending.get(d.id);
-      if (p) {
-        pending.delete(d.id);
-        p.resolve(d);
-      }
-    });
-    ws.addEventListener('close', () => failAll('ws_closed'));
-    ws.addEventListener('error', () => failAll('ws_error'));
-
-    await new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('ws_open_timeout')), 2500);
-      ws.addEventListener('open', () => (clearTimeout(t), resolve()), { once: true });
-      ws.addEventListener('close', () => (clearTimeout(t), reject(new Error('ws_closed'))), { once: true });
-      ws.addEventListener('error', () => (clearTimeout(t), reject(new Error('ws_error'))), { once: true });
-    });
-
-    let nextId = 1;
-    const send = (method, params = {}) =>
-      new Promise((resolve, reject) => {
-        if (closedReason) return reject(new Error(closedReason));
-        const id = nextId++;
-        const timer = setTimeout(() => {
-          pending.delete(id);
-          reject(new Error('cdp_timeout'));
-        }, timeoutMs);
-        pending.set(id, {
-          resolve: (v) => (clearTimeout(timer), resolve(v)),
-          reject: (e) => (clearTimeout(timer), reject(e))
-        });
-        try {
-          ws.send(JSON.stringify({ id, method, params }));
-        } catch (err) {
-          pending.delete(id);
-          clearTimeout(timer);
-          reject(err);
-        }
-      });
-    return await fn(send);
+    candidates = (Array.isArray(list) ? list : [])
+      .filter(
+        (x) =>
+          x &&
+          x.type === 'page' &&
+          x.webSocketDebuggerUrl &&
+          !String(x.url || '').startsWith('devtools://') &&
+          !String(x.title || '').includes('Launchpad') &&
+          rankCdpPageTarget(x) < 9
+      )
+      .sort((a, b) => rankCdpPageTarget(a) - rankCdpPageTarget(b));
   } catch (err) {
     return { ok: false, reason: String(err?.message || err) };
-  } finally {
-    try {
-      ws?.close();
-    } catch {}
   }
+  if (!candidates.length) return { ok: false, reason: 'main_page_not_found' };
+
+  let lastResult = { ok: false, reason: 'main_page_not_found' };
+  for (let idx = 0; idx < candidates.length; idx++) {
+    const target = candidates[idx];
+    let ws;
+    try {
+      ws = new WebSocket(target.webSocketDebuggerUrl);
+      const pending = new Map();
+      let closedReason = null;
+      const failAll = (reason) => {
+        closedReason = closedReason || reason;
+        for (const [, p] of pending) p.reject(new Error(reason));
+        pending.clear();
+      };
+      ws.addEventListener('message', (ev) => {
+        let d;
+        try {
+          d = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        const p = pending.get(d.id);
+        if (p) {
+          pending.delete(d.id);
+          p.resolve(d);
+        }
+      });
+      ws.addEventListener('close', () => failAll('ws_closed'));
+      ws.addEventListener('error', () => failAll('ws_error'));
+
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error('ws_open_timeout')), 2500);
+        ws.addEventListener('open', () => (clearTimeout(t), resolve()), { once: true });
+        ws.addEventListener('close', () => (clearTimeout(t), reject(new Error('ws_closed'))), { once: true });
+        ws.addEventListener('error', () => (clearTimeout(t), reject(new Error('ws_error'))), { once: true });
+      });
+
+      let nextId = 1;
+      const send = (method, params = {}) =>
+        new Promise((resolve, reject) => {
+          if (closedReason) return reject(new Error(closedReason));
+          const id = nextId++;
+          const timer = setTimeout(() => {
+            pending.delete(id);
+            reject(new Error('cdp_timeout'));
+          }, timeoutMs);
+          pending.set(id, {
+            resolve: (v) => (clearTimeout(timer), resolve(v)),
+            reject: (e) => (clearTimeout(timer), reject(e))
+          });
+          try {
+            ws.send(JSON.stringify({ id, method, params }));
+          } catch (err) {
+            pending.delete(id);
+            clearTimeout(timer);
+            reject(err);
+          }
+        });
+      lastResult = await fn(send);
+      if (lastResult?.ok || lastResult?.reason !== 'pref_store_not_found' || idx === candidates.length - 1) {
+        return lastResult;
+      }
+    } catch (err) {
+      lastResult = { ok: false, reason: String(err?.message || err) };
+      if (idx === candidates.length - 1) return lastResult;
+    } finally {
+      try {
+        ws?.close();
+      } catch {}
+    }
+  }
+  return lastResult;
 }
 
 /** Read (and optionally set) Antigravity preference values through the live React pref store. */
@@ -917,16 +1075,18 @@ function installUserLayer(state, { sourceRoot = __dirname, overwriteLocal = fals
   return result;
 }
 
-function restoreUserLayer(state) {
+function restoreUserLayer(state, saveDir) {
   const out = { restored: [], removed: [], stubbed: [], kept: [], savedLocalEdits: [] };
-  const saveDir = path.join(AGY_DIR, `anti-claude-uninstall-saved-${new Date().toISOString().replace(/[:.]/g, '-')}`);
   for (const f of USER_LAYER_FILES) {
     const entry = state.files?.[f];
     if (!entry) continue;
     const dst = path.join(USER_DIR, f);
     const cur = readTextSafe(dst);
     const base = readTextSafe(path.join(BASE_DIR, f));
-    if (cur !== null && base !== null && cur !== base) {
+    const hasEdits =
+      cur !== null &&
+      (base !== null ? cur !== base : Boolean(entry.deployedSha) ? sha256Text(cur) !== entry.deployedSha : true);
+    if (hasEdits) {
       fs.mkdirSync(saveDir, { recursive: true });
       fs.writeFileSync(path.join(saveDir, f), cur, 'utf8');
       out.savedLocalEdits.push(path.join(saveDir, f));
@@ -947,6 +1107,91 @@ function restoreUserLayer(state) {
     }
   }
   return out;
+}
+
+function preservePreviousLocalSaves(saveDir) {
+  const preserved = [];
+  if (!fs.existsSync(LOCAL_SAVE_DIR)) return preserved;
+  try {
+    const entries = fs.readdirSync(LOCAL_SAVE_DIR);
+    if (!entries.length) return preserved;
+    const targetSubdir = path.join(saveDir, 'local-saves');
+    fs.mkdirSync(targetSubdir, { recursive: true });
+    for (const name of entries) {
+      const src = path.join(LOCAL_SAVE_DIR, name);
+      const dst = path.join(targetSubdir, name);
+      fs.cpSync(src, dst, { recursive: true });
+      preserved.push(dst);
+    }
+  } catch {}
+  return preserved;
+}
+
+function cleanupUninstallExtras(state) {
+  const fontsRemoved = [];
+  if (Array.isArray(state?.fontsCopied) && state.fontsCopied.length > 0) {
+    const fontsDir = getUserFontsDir();
+    for (const fname of state.fontsCopied) {
+      if (typeof fname !== 'string' || !/^Anthropic.*\.(ttf|otf)$/i.test(path.basename(fname))) continue;
+      const fp = path.join(fontsDir, path.basename(fname));
+      if (fs.existsSync(fp)) {
+        try {
+          fs.rmSync(fp, { force: true });
+          fontsRemoved.push(fp);
+        } catch {}
+      }
+    }
+  }
+
+  const sidecarsRemoved = [];
+  if (fs.existsSync(SIDECARS_DIR)) {
+    try {
+      for (const entry of fs.readdirSync(SIDECARS_DIR, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const scDir = path.join(SIDECARS_DIR, entry.name);
+        const sc = readJsonSafe(path.join(scDir, 'sidecar.json'), null);
+        if (entry.name.startsWith('ac-') || sc?.created_by === 'anti-claude') {
+          fs.rmSync(scDir, { recursive: true, force: true });
+          sidecarsRemoved.push(entry.name);
+        }
+      }
+    } catch {}
+  }
+
+  const projectsCleaned = [];
+  const reg = readJsonSafe(PROJECTS_REGISTRY_FILE, null);
+  if (Array.isArray(reg?.dirs)) {
+    for (const rawDir of reg.dirs) {
+      if (typeof rawDir !== 'string' || !path.isAbsolute(rawDir) || !fs.existsSync(rawDir)) continue;
+      const agentsPath = path.join(rawDir, 'AGENTS.md');
+      const existing = readTextSafe(agentsPath);
+      let touched = false;
+      if (existing) {
+        const bIdx = existing.indexOf(PROJECT_RULE_BEGIN);
+        const eIdx = bIdx !== -1 ? existing.indexOf(PROJECT_RULE_END, bIdx) : -1;
+        if (bIdx !== -1 && eIdx > bIdx) {
+          let before = existing.slice(0, bIdx).replace(/\s+$/, '');
+          let after = existing.slice(eIdx + PROJECT_RULE_END.length).replace(/^\s+/, '');
+          if (!before) after = after.replace(/^---(?:\r?\n)+/, '').replace(/^---\s*$/, '').replace(/^\s+/, '');
+          else if (!after) before = before.replace(/(?:\r?\n)+---$/, '').replace(/\s+$/, '');
+          const rest = [before, after].filter(Boolean).join('\n\n').trim();
+          if (rest) writeFileAtomic(agentsPath, `${rest}\n`);
+          else fs.rmSync(agentsPath, { force: true });
+          touched = true;
+        }
+      }
+      const acDir = path.join(rawDir, '.anti-claude');
+      if (fs.existsSync(acDir)) {
+        try {
+          fs.rmSync(acDir, { recursive: true, force: true });
+          touched = true;
+        } catch {}
+      }
+      if (touched) projectsCleaned.push(rawDir);
+    }
+  }
+
+  return { fontsRemoved, sidecarsRemoved, projectsCleaned };
 }
 
 function runLiveVerify() {
@@ -1089,8 +1334,24 @@ function ensureCoreDaemon() {
 
   if (process.platform === 'win32') {
     const vbsPath = getWinStartupVbsPath();
-    const q = (s) => String(s).replace(/"/g, '""');
-    const vbs = `Set sh = CreateObject("WScript.Shell")\r\nsh.Run """${q(nodePath)}"" ""${q(CORE_DAEMON_SCRIPT)}"" --user-dir ""${q(USER_DIR)}""", 0, False\r\n`;
+    /* Encode non-ASCII characters via ChrW() so WScript never garbles Unicode usernames without BOM */
+    const vbsExpr = (s) => {
+      let out = '"';
+      for (const ch of String(s)) {
+        const cp = ch.codePointAt(0);
+        if (ch === '"') out += '""';
+        else if (cp >= 32 && cp <= 126) out += ch;
+        else if (cp <= 0xffff) out += `" & ChrW(${cp}) & "`;
+        else {
+          const hi = Math.floor((cp - 0x10000) / 0x400) + 0xd800;
+          const lo = ((cp - 0x10000) % 0x400) + 0xdc00;
+          out += `" & ChrW(${hi}) & ChrW(${lo}) & "`;
+        }
+      }
+      return out + '"';
+    };
+    const cmdExpr = `${vbsExpr(`"${nodePath}" "${CORE_DAEMON_SCRIPT}" --user-dir "${USER_DIR}"`)}`;
+    const vbs = `Set sh = CreateObject("WScript.Shell")\r\nsh.Run ${cmdExpr.replace(/""/g, '""""')}, 0, False\r\n`;
     try {
       writeFileAtomic(vbsPath, vbs);
     } catch {}
@@ -1143,7 +1404,7 @@ function disableCoreDaemon() {
 
   if (fs.existsSync(PID_FILE)) {
     const pid = parseInt(readTextSafe(PID_FILE) || '0', 10);
-    if (pid > 0 && !NO_LAUNCHD) {
+    if (pid > 0 && !NO_LAUNCHD && isMatchingDaemonPid(pid)) {
       try {
         process.kill(pid, 'SIGTERM');
       } catch {}
@@ -1161,10 +1422,7 @@ function inspectCoreDaemon() {
     const parsed = parseInt(readTextSafe(PID_FILE) || '0', 10);
     if (parsed > 0) {
       pid = parsed;
-      try {
-        process.kill(parsed, 0);
-        pidAlive = true;
-      } catch {}
+      pidAlive = isMatchingDaemonPid(parsed);
     }
   }
   if (process.platform === 'darwin') {
@@ -1418,7 +1676,7 @@ function installCliLayer(state, { sourceRoot = __dirname, overwriteLocal = false
   };
 }
 
-function restoreCliLayer(state) {
+function restoreCliLayer(state, sharedSaveDir = null) {
   const out = { script: 'not_managed', settings: 'not_managed', savedLocalEdits: [] };
   const cliState = state?.cli;
   if (!cliState || (!cliState.statusLineScript && !cliState.settings)) return out;
@@ -1453,7 +1711,8 @@ function restoreCliLayer(state) {
     const cur = readTextSafe(AGY_CLI_STATUSLINE_FILE);
     const base = readTextSafe(path.join(BASE_DIR, AGY_CLI_STATUSLINE_NAME));
     if (cur !== null && base !== null && cur !== base) {
-      const saveDir = path.join(AGY_DIR, `anti-claude-uninstall-saved-${new Date().toISOString().replace(/[:.]/g, '-')}`);
+      const saveDir =
+        sharedSaveDir || path.join(AGY_DIR, `anti-claude-uninstall-saved-${new Date().toISOString().replace(/[:.]/g, '-')}`);
       fs.mkdirSync(saveDir, { recursive: true });
       const savedPath = path.join(saveDir, AGY_CLI_STATUSLINE_NAME);
       fs.writeFileSync(savedPath, cur, 'utf8');
@@ -1550,15 +1809,36 @@ async function cmdInstall(flags) {
   const noCli = flags.has('--no-cli') || (NO_CLI && !explicitCli);
   const antigravityCli = detectAntigravityCli();
 
-  const state = loadState() || newState();
-  state.options.desktop = !cliOnly;
-  state.options.cli = !noCli && (explicitCli || antigravityCli.detected);
+  const existingState = loadState();
+  const desktopAlreadyInstalled = Boolean(
+    existingState &&
+      (existingState.options?.desktop === true || Object.keys(existingState.files || {}).length > 0)
+  );
+  const wasPureCliOnly = Boolean(existingState && existingState.options?.desktop === false && !desktopAlreadyInstalled);
+  const state = existingState || newState();
+
+  /* Keep installed component state separate from single-invocation `--cli-only` scope so an existing
+     Desktop installation stays upgradable by `sync-upgrade` even after `install --cli-only`. */
+  if (cliOnly) {
+    state.options.desktop = desktopAlreadyInstalled;
+  } else {
+    state.options.desktop = true;
+  }
+  state.options.cli = !noCli && (explicitCli || antigravityCli.detected || Boolean(existingState?.options?.cli && !flags.has('--no-cli')));
+
   if (flags.has('--no-cli-statusline')) state.options.cliStatusLine = false;
   else if (flags.has('--cli-statusline') || state.options.cliStatusLine === undefined) state.options.cliStatusLine = true;
-  if (flags.has('--no-step-unlock') || cliOnly) state.options.stepUnlock = false;
+
+  if (flags.has('--no-step-unlock')) state.options.stepUnlock = false;
+  else if (flags.has('--step-unlock') || (!cliOnly && wasPureCliOnly)) state.options.stepUnlock = true;
+  else if (cliOnly && !desktopAlreadyInstalled) state.options.stepUnlock = false;
+
   if (flags.has('--no-agents-rule')) state.options.agentsRule = false;
-  if (flags.has('--no-auto-update') || cliOnly) state.options.autoUpdate = false;
-  else if (flags.has('--auto-update')) state.options.autoUpdate = true;
+  else if (flags.has('--agents-rule')) state.options.agentsRule = true;
+
+  if (flags.has('--no-auto-update')) state.options.autoUpdate = false;
+  else if (flags.has('--auto-update') || (!cliOnly && wasPureCliOnly)) state.options.autoUpdate = true;
+  else if (cliOnly && !desktopAlreadyInstalled) state.options.autoUpdate = false;
 
   if (cliOnly) {
     const cliLayer = installCliLayer(state, { overwriteLocal: flags.has('--overwrite-local'), allowSettingsEnable: true });
@@ -1570,14 +1850,20 @@ async function cmdInstall(flags) {
     const ruleStatus = state.options.agentsRule ? injectAgentsMdRule(state, { allowInsert: true }) : 'disabled_by_option';
     state.sync = Object.assign({}, state.sync, { cliVersion: antigravityCli.version, lastAppliedAt: Date.now() });
     saveState(state);
-    return finalize({ mode: 'cli-only', antigravityCli: detectAntigravityCli(), cliLayer, ruleStatus }, { critical, warnings });
+    return finalize(
+      { mode: desktopAlreadyInstalled ? 'desktop+cli' : 'cli-only', scope: 'cli-only', antigravityCli: detectAntigravityCli(), cliLayer, ruleStatus },
+      { critical, warnings }
+    );
   }
 
   /* Migrate any user overrides from legacy theme-patch/user and retire upstream theme-patch */
   const legacyMigration = retireLegacyThemePatch(state);
+  if (legacyMigration.backupDir) {
+    warnings.push(`standalone theme-patch archived to ${legacyMigration.backupDir}`);
+  }
 
   const fontsBefore = checkFontsInstalled();
-  const fontSync = fontsBefore.hasAnthropicSans || NO_FONTS ? null : syncFontsFromLocalClaudeApp();
+  const fontSync = fontsBefore.hasAnthropicSans || NO_FONTS ? null : syncFontsFromLocalClaudeApp(state);
 
   let layer;
   try {
@@ -1742,20 +2028,37 @@ async function cmdUninstall() {
     return finalize({ noop: true, reason: 'not_installed', autoUpdateRemoved, daemonStopped });
   }
   const warnings = [];
+  const saveDir = path.join(AGY_DIR, `anti-claude-uninstall-saved-${new Date().toISOString().replace(/[:.]/g, '-')}`);
   const isDesktop = state.options?.desktop !== false || Object.keys(state.files || {}).length > 0;
   const autoUpdateRemoved = disableMacAutoUpdateAgent();
   const daemonStopped = isDesktop ? disableCoreDaemon() : { stopped: false };
   const liveTeardown = isDesktop ? runLiveTeardownOnce() : { skipped: 'cli_only' };
   const settings = isDesktop ? await revertStepUnlock(state) : { skipped: 'cli_only' };
   if (settings.live && !settings.live.ok && settings.live.appRunning !== false) warnings.push(`live settings revert: ${settings.live.reason}`);
-  const files = isDesktop ? restoreUserLayer(state) : { restored: [], removed: [], stubbed: [], kept: [], savedLocalEdits: [] };
+  const files = isDesktop ? restoreUserLayer(state, saveDir) : { restored: [], removed: [], stubbed: [], kept: [], savedLocalEdits: [] };
+  const preservedOverwrites = preservePreviousLocalSaves(saveDir);
+  if (preservedOverwrites.length) {
+    files.savedLocalEdits.push(...preservedOverwrites);
+  }
   if (files.savedLocalEdits.length) warnings.push(`your post-install edits were saved: ${files.savedLocalEdits.join(', ')}`);
-  const cli = restoreCliLayer(state);
+  const cli = restoreCliLayer(state, saveDir);
   if (cli.savedLocalEdits.length) warnings.push(`your post-install CLI edits were saved: ${cli.savedLocalEdits.join(', ')}`);
   const ruleRemoved = removeAgentsMdRule();
+  const extras = cleanupUninstallExtras(state);
 
   /* Remove owned state artifacts while preserving USER_DIR if pre-existing user files were restored into it */
-  for (const p of [STATE_FILE, PID_FILE, BACKUP_DIR, BASE_DIR, INCOMING_DIR, LOCAL_SAVE_DIR, SYNC_LOG_FILE, LAUNCHD_LOG_FILE, DAEMON_LOG_FILE]) {
+  for (const p of [
+    STATE_FILE,
+    PID_FILE,
+    PROJECTS_REGISTRY_FILE,
+    BACKUP_DIR,
+    BASE_DIR,
+    INCOMING_DIR,
+    LOCAL_SAVE_DIR,
+    SYNC_LOG_FILE,
+    LAUNCHD_LOG_FILE,
+    DAEMON_LOG_FILE
+  ]) {
     fs.rmSync(p, { recursive: true, force: true });
   }
   removeDirIfEmpty(USER_DIR);
@@ -1763,7 +2066,7 @@ async function cmdUninstall() {
   fs.rmSync(LEGACY_V2_STATE_DIR, { recursive: true, force: true });
   fs.rmSync(LEGACY_SYNC_LOG_FILE, { force: true });
 
-  return finalize({ autoUpdateRemoved, daemonStopped, liveTeardown, settings, files, cli, ruleRemoved }, { warnings });
+  return finalize({ autoUpdateRemoved, daemonStopped, liveTeardown, settings, files, cli, ruleRemoved, extras }, { warnings });
 }
 
 async function main(argv) {
@@ -1788,8 +2091,33 @@ async function main(argv) {
     return console.log(JSON.stringify(disableMacAutoUpdateAgent(), null, 2));
   }
   if (sub === 'uninstall') return cmdUninstall();
-  if (sub === 'sync-fonts') return console.log(JSON.stringify(syncFontsFromLocalClaudeApp(), null, 2));
-  return cmdDoctor();
+  if (sub === 'sync-fonts') {
+    const state = loadState();
+    const res = syncFontsFromLocalClaudeApp(state);
+    if (state && res?.copied?.length) saveState(state);
+    return console.log(JSON.stringify(res, null, 2));
+  }
+  if (sub === 'doctor') return cmdDoctor();
+  if (sub === '--help' || sub === '-h' || sub === 'help') {
+    return console.log(
+      JSON.stringify(
+        {
+          ok: true,
+          commands: ['install', 'sync-upgrade', 'doctor', 'uninstall', 'auto-update-on', 'auto-update-off', 'sync-fonts']
+        },
+        null,
+        2
+      )
+    );
+  }
+  return finalize(
+    { subcommand: sub },
+    {
+      critical: [
+        `unknown command: ${sub} (expected: install | sync-upgrade | doctor | uninstall | auto-update-on | auto-update-off | sync-fonts)`
+      ]
+    }
+  );
 }
 
 const isMain = (() => {

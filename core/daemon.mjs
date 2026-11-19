@@ -13,7 +13,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -41,7 +41,9 @@ function resolveArgValue(flag) {
   return null;
 }
 
-const STATE_DIR = path.join(HOME, '.gemini', 'antigravity', 'anti-claude');
+const STATE_DIR = path.resolve(
+  process.env.ANTI_CLAUDE_STATE_DIR || path.join(HOME, '.gemini', 'antigravity', 'anti-claude')
+);
 const USER_DIR = path.resolve(
   resolveArgValue('--user-dir') || process.env.ANTI_CLAUDE_USER_DIR || path.join(STATE_DIR, 'user')
 );
@@ -101,46 +103,128 @@ if (VERIFY_ONCE && (process.env.ANTI_CLAUDE_FAKE_VERIFY_OK === '1' || process.en
 /* 1. Single-Instance PID Management                                          */
 /* -------------------------------------------------------------------------- */
 
-function claimPidFile() {
-  if (RUN_ONCE) return;
-  try {
-    fs.mkdirSync(STATE_DIR, { recursive: true });
-    if (fs.existsSync(PID_FILE)) {
-      const prevPid = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
-      if (prevPid > 0 && prevPid !== process.pid) {
-        try {
-          process.kill(prevPid, 'SIGTERM');
-        } catch {}
-      }
+function readProcessCommandLine(pid) {
+  if (process.platform === 'linux') {
+    try {
+      const raw = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+      if (raw) return raw.replace(/\0+/g, ' ').trim();
+    } catch {}
+  }
+  if (process.platform === 'win32') {
+    try {
+      return execFileSync(
+        'powershell',
+        ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
+        { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }
+      ).trim();
+    } catch {
+      return '';
     }
-    fs.writeFileSync(PID_FILE, `${process.pid}\n`, 'utf8');
+  }
+  try {
+    return execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
+      encoding: 'utf8',
+      timeout: 1500,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+
+export function isOwnDaemonProcess(pid, { commandReader = readProcessCommandLine, killProbe = process.kill } = {}) {
+  const num = Number(pid);
+  if (!Number.isInteger(num) || num <= 0) return false;
+  if (num === process.pid) return true;
+  try {
+    killProbe(num, 0);
+  } catch {
+    return false;
+  }
+  const cmd = String(commandReader(num) || '');
+  if (!cmd) return false;
+  return /(?:^|[\\/ "'])daemon\.mjs(?:\s|$|["'])|anti-claude[\\/]+core[\\/]+daemon\.mjs/i.test(cmd);
+}
+
+let pidCleanupBound = false;
+function removeOwnPidFile(pidFile = PID_FILE) {
+  try {
+    if (!fs.existsSync(pidFile)) return;
+    const owner = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+    if (owner === process.pid) {
+      fs.rmSync(pidFile, { force: true });
+    }
   } catch {}
 }
 
-function checkPidOwnership() {
-  if (RUN_ONCE) return;
+export function claimPidFile({
+  pidFile = PID_FILE,
+  stateDir = STATE_DIR,
+  runOnce = RUN_ONCE,
+  isDaemonFn = isOwnDaemonProcess,
+  killFn = process.kill,
+  bindExit = true
+} = {}) {
+  if (runOnce) return;
   try {
-    if (!fs.existsSync(PID_FILE)) {
-      fs.mkdirSync(STATE_DIR, { recursive: true });
-      fs.writeFileSync(PID_FILE, `${process.pid}\n`, 'utf8');
-      return;
+    fs.mkdirSync(stateDir, { recursive: true });
+    if (fs.existsSync(pidFile)) {
+      const prevPid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+      if (prevPid > 0 && prevPid !== process.pid && isDaemonFn(prevPid)) {
+        try {
+          killFn(prevPid, 'SIGTERM');
+        } catch {}
+      }
     }
-    const owner = parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
-    if (owner > 0 && owner !== process.pid) {
-      try {
-        process.kill(owner, 0);
-        /* A newer daemon took over PID_FILE; exit cleanly */
-        for (const [, entry] of attachedTargets.entries()) {
-          try {
-            entry.ws.close();
-          } catch {}
-        }
-        process.exit(0);
-      } catch {
-        fs.writeFileSync(PID_FILE, `${process.pid}\n`, 'utf8');
+    fs.writeFileSync(pidFile, `${process.pid}\n`, 'utf8');
+    if (bindExit && !pidCleanupBound && pidFile === PID_FILE) {
+      pidCleanupBound = true;
+      process.on('exit', () => removeOwnPidFile(PID_FILE));
+      for (const sig of ['SIGTERM', 'SIGINT']) {
+        process.on(sig, () => {
+          removeOwnPidFile(PID_FILE);
+          process.exit(0);
+        });
       }
     }
   } catch {}
+}
+
+export function checkPidOwnership({
+  pidFile = PID_FILE,
+  stateDir = STATE_DIR,
+  runOnce = RUN_ONCE,
+  isDaemonFn = isOwnDaemonProcess,
+  onSuperseded = null
+} = {}) {
+  if (runOnce) return 'once';
+  try {
+    if (!fs.existsSync(pidFile)) {
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(pidFile, `${process.pid}\n`, 'utf8');
+      return 'reclaimed_missing';
+    }
+    const owner = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+    if (owner === process.pid) return 'owned';
+    if (owner > 0 && isDaemonFn(owner)) {
+      if (typeof onSuperseded === 'function') {
+        onSuperseded(owner);
+        return 'superseded';
+      }
+      /* A newer verified daemon took over PID_FILE; exit cleanly */
+      for (const [, entry] of attachedTargets.entries()) {
+        try {
+          entry.ws.close();
+        } catch {}
+      }
+      process.exit(0);
+    }
+    /* Stale or reused non-daemon PID: reclaim ownership rather than exiting */
+    fs.writeFileSync(pidFile, `${process.pid}\n`, 'utf8');
+    return 'reclaimed_stale';
+  } catch {
+    return 'error';
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -236,6 +320,60 @@ function hasRecentConversationWalActivity(conversationsDir, withinMs = 15000) {
 }
 
 /**
+ * Wait for a terminated Antigravity process to exit and release its Electron `SingletonLock`,
+ * checking both lock release and replacement processes across bounded retries so delayed lock
+ * cleanup (e.g. ~900ms) never leaves the app closed.
+ */
+export async function waitForMacRelaunchReady({
+  targetPid,
+  isProcessAlive,
+  listMainProcs,
+  hasLock,
+  tryClearStaleLock = () => false,
+  onReadyToOpen,
+  nowFn = () => Date.now(),
+  sleepFn = (ms) => new Promise((r) => setTimeout(r, ms)),
+  exitTimeoutMs = 8000,
+  lockTimeoutMs = 6000,
+  pollMs = 120,
+  initialSettleMs = 350
+}) {
+  const exitDeadline = nowFn() + exitTimeoutMs;
+  await sleepFn(pollMs);
+  while (isProcessAlive(targetPid)) {
+    if (nowFn() >= exitDeadline) {
+      return { relaunched: false, reason: 'exit_timeout' };
+    }
+    await sleepFn(pollMs);
+  }
+
+  /* Allow launchservicesd ASN teardown to settle, then poll for SingletonLock release or takeover */
+  if (initialSettleMs > 0) {
+    await sleepFn(initialSettleMs);
+  }
+
+  const lockDeadline = nowFn() + lockTimeoutMs;
+  while (true) {
+    const afterProcs = await listMainProcs();
+    if (Array.isArray(afterProcs) && afterProcs.length > 0) {
+      return { relaunched: false, reason: 'replaced_by_other_instance' };
+    }
+    if (!hasLock()) {
+      await onReadyToOpen();
+      return { relaunched: true };
+    }
+    if (nowFn() >= lockDeadline) {
+      if (tryClearStaleLock(targetPid) && !hasLock()) {
+        await onReadyToOpen();
+        return { relaunched: true, staleLockCleared: true };
+      }
+      return { relaunched: false, reason: 'singleton_lock_held' };
+    }
+    await sleepFn(pollMs);
+  }
+}
+
+/**
  * Antigravity 2.33.0+ stopped appending `--remote-debugging-port=0` by default in C++.
  * Modifying `/Applications/Antigravity.app` breaks Google's Developer ID code signature
  * and blocks Squirrel.Mac auto-updates. Instead, when a fresh cold launch or in-app restart (`<= 35s` old)
@@ -247,7 +385,10 @@ function startMacCdpBootstrap() {
   const portFile = path.join(appDataDir, 'DevToolsActivePort');
   const singletonLock = path.join(appDataDir, 'SingletonLock');
   const convDir = path.join(HOME, '.gemini', 'antigravity', 'conversations');
-  const mainBin = '/Applications/Antigravity.app/Contents/MacOS/Antigravity';
+  const candidateApps = [
+    '/Applications/Antigravity.app',
+    path.join(HOME, 'Applications', 'Antigravity.app')
+  ];
   let busy = false;
   let lastAttemptAt = 0;
   const attemptedPids = new Map();
@@ -276,8 +417,12 @@ function startMacCdpBootstrap() {
       const pid = Number(m[1]);
       const age = parseEtimeSec(m[2]);
       const cmd = m[3];
-      if (cmd === mainBin || cmd.startsWith(mainBin + ' ')) {
-        list.push({ pid, age, hasCdp: cmd.includes('--remote-debugging-port') });
+      for (const appBundle of candidateApps) {
+        const mainBin = path.join(appBundle, 'Contents', 'MacOS', 'Antigravity');
+        if (cmd === mainBin || cmd.startsWith(mainBin + ' ')) {
+          list.push({ pid, age, appBundle, hasCdp: cmd.includes('--remote-debugging-port') });
+          break;
+        }
       }
     }
     return list;
@@ -291,6 +436,33 @@ function startMacCdpBootstrap() {
       return false;
     }
   };
+
+  const tryClearStaleSingletonLock = (expectedDeadPid) => {
+    try {
+      const linkTarget = fs.readlinkSync(singletonLock);
+      const m = String(linkTarget || '').match(/-(\d+)$/);
+      if (!m) return false;
+      const lockPid = Number(m[1]);
+      if (!lockPid) return false;
+      if (lockPid !== expectedDeadPid) {
+        try {
+          process.kill(lockPid, 0);
+          return false;
+        } catch {}
+      }
+      fs.rmSync(singletonLock, { force: true });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const queryMainProcs = () =>
+    new Promise((resolve) => {
+      execFile('ps', ['-axo', 'pid=,etime=,command='], { timeout: 2000 }, (err, stdout) => {
+        resolve(!err && stdout ? parseMainProcesses(stdout) : []);
+      });
+    });
 
   const waitPortAndSync = (triesLeft = 40) => {
     if (readPort(portFile) > 0) {
@@ -314,87 +486,69 @@ function startMacCdpBootstrap() {
     if (recentAttempts.length >= 3) return;
 
     busy = true;
-    execFile('ps', ['-axo', 'pid=,etime=,command='], { timeout: 2500 }, (err, stdout) => {
-      if (err || !stdout) {
-        busy = false;
-        return;
-      }
-      const procs = parseMainProcesses(stdout);
-      if (procs.some((p) => p.hasCdp)) {
-        if (readPort(portFile) > 0 && attachedTargets.size === 0) {
-          sync().catch(() => {});
-        }
-        busy = false;
-        return;
-      }
-
-      const candidate = procs.find((p) => !p.hasCdp && !attemptedPids.has(p.pid) && p.age <= 35);
-      if (!candidate) {
-        busy = false;
-        return;
-      }
-      if (candidate.age > 15 && hasRecentConversationWalActivity(convDir, 8000)) {
-        busy = false;
-        return;
-      }
-
-      const targetPid = candidate.pid;
-      const startTs = Date.now();
-      lastAttemptAt = startTs;
-      attemptedPids.set(targetPid, startTs);
-      recentAttempts.push(startTs);
-      console.log(
-        `[Anti-Claude Daemon] Relaunching fresh Antigravity (PID ${targetPid}, age=${candidate.age}s) with --remote-debugging-port=0`
-      );
-
+    queryMainProcs().then(async (procs) => {
       try {
-        process.kill(targetPid, 'SIGTERM');
-      } catch {
-        busy = false;
-        return;
-      }
-
-      const deadline = Date.now() + 8000;
-      const waitExit = () => {
-        let alive = false;
-        try {
-          process.kill(targetPid, 0);
-          alive = true;
-        } catch {}
-        if (alive) {
-          if (Date.now() < deadline) {
-            setTimeout(waitExit, 120);
-          } else {
-            console.warn(`[Anti-Claude Daemon] PID ${targetPid} did not exit within 8s; skipping relaunch`);
-            busy = false;
+        if (procs.some((p) => p.hasCdp)) {
+          if (readPort(portFile) > 0 && attachedTargets.size === 0) {
+            sync().catch(() => {});
           }
           return;
         }
 
-        /* Wait 350ms for SingletonLock & macOS launchservicesd ASN teardown, then re-verify no new instance raced in */
-        setTimeout(() => {
-          execFile('ps', ['-axo', 'pid=,etime=,command='], { timeout: 2000 }, (psErr, psOut) => {
-            const afterProcs = !psErr && psOut ? parseMainProcesses(psOut) : [];
-            if (afterProcs.length > 0 || hasSingletonLock()) {
-              /* Another instance (e.g. Electron's in-app relaunch helper) already spawned; next tick will inspect it cleanly */
-              busy = false;
-              return;
-            }
+        const candidate = procs.find((p) => !p.hasCdp && !attemptedPids.has(p.pid) && p.age <= 35);
+        if (!candidate) return;
+        if (candidate.age > 15 && hasRecentConversationWalActivity(convDir, 8000)) return;
+
+        const targetPid = candidate.pid;
+        const appBundle = candidate.appBundle || candidateApps.find((p) => fs.existsSync(p)) || candidateApps[0];
+        const startTs = Date.now();
+        lastAttemptAt = startTs;
+        attemptedPids.set(targetPid, startTs);
+        recentAttempts.push(startTs);
+        console.log(
+          `[Anti-Claude Daemon] Relaunching fresh Antigravity (PID ${targetPid}, age=${candidate.age}s) with --remote-debugging-port=0`
+        );
+
+        try {
+          process.kill(targetPid, 'SIGTERM');
+        } catch {
+          return;
+        }
+
+        const outcome = await waitForMacRelaunchReady({
+          targetPid,
+          isProcessAlive: (pid) => {
             try {
-              fs.rmSync(portFile, { force: true });
-            } catch {}
-            execFile(
-              '/usr/bin/open',
-              ['-n', '-a', '/Applications/Antigravity.app', '--args', '--remote-debugging-port=0'],
-              () => {
-                busy = false;
-                waitPortAndSync(40);
-              }
-            );
-          });
-        }, 350);
-      };
-      setTimeout(waitExit, 140);
+              process.kill(pid, 0);
+              return true;
+            } catch {
+              return false;
+            }
+          },
+          listMainProcs: queryMainProcs,
+          hasLock: hasSingletonLock,
+          tryClearStaleLock: tryClearStaleSingletonLock,
+          onReadyToOpen: () =>
+            new Promise((resolve) => {
+              try {
+                fs.rmSync(portFile, { force: true });
+              } catch {}
+              execFile(
+                '/usr/bin/open',
+                ['-n', '-a', appBundle, '--args', '--remote-debugging-port=0'],
+                () => {
+                  waitPortAndSync(40);
+                  resolve();
+                }
+              );
+            })
+        });
+        if (!outcome.relaunched && outcome.reason === 'exit_timeout') {
+          console.warn(`[Anti-Claude Daemon] PID ${targetPid} did not exit within 8s; skipping relaunch`);
+        }
+      } finally {
+        busy = false;
+      }
     });
   };
 
@@ -435,7 +589,7 @@ let lastBundleFilesSig = '';
 let cachedRuntimeTemplate = '';
 let cachedBootPayloadBase = null;
 let cachedBundleHash = '';
-let cachedVersion = '2.6.2';
+let cachedVersion = '3.0.0';
 let activeConfig = {
   enabled: true,
   contextLimit: 256000,
@@ -470,7 +624,7 @@ function rebuildBundleIfNeeded() {
   lastBundleFilesSig = filesSig;
 
   const pkg = readJsonOrFallback(PKG_FILE, {});
-  cachedVersion = pkg?.version ? `anti-claude-${pkg.version}` : 'anti-claude-2.6.2';
+  cachedVersion = pkg?.version ? `anti-claude-${pkg.version}` : 'anti-claude-3.0.0';
 
   const rawCfg = readJsonOrFallback(userConfigFile, {});
   const enabled = rawCfg?.enabled !== false;
@@ -529,11 +683,12 @@ function rebuildBundleIfNeeded() {
   return true;
 }
 
-function buildRuntimeScript(hostThemeMode = null) {
+function buildRuntimeScript(hostThemeMode = null, rpcToken = '') {
   if (!cachedRuntimeTemplate || !cachedBootPayloadBase) return '';
-  const payload = hostThemeMode
-    ? Object.assign({}, cachedBootPayloadBase, { hostThemeMode })
-    : cachedBootPayloadBase;
+  const extra = {};
+  if (hostThemeMode) extra.hostThemeMode = hostThemeMode;
+  if (rpcToken) extra.rpcToken = rpcToken;
+  const payload = Object.keys(extra).length > 0 ? Object.assign({}, cachedBootPayloadBase, extra) : cachedBootPayloadBase;
   return cachedRuntimeTemplate.replace('(__AG_BOOT_PAYLOAD__);', () => `(${JSON.stringify(payload)});`);
 }
 
@@ -991,6 +1146,55 @@ function parseConversationMetrics(cascadeId, conversationsDir) {
 /* 4.5 Local Zero-Config Project Context Bridge (AGENTS.md + .anti-claude/)   */
 /* -------------------------------------------------------------------------- */
 
+const PROJECTS_REGISTRY_FILE = path.join(STATE_DIR, 'projects-registry.json');
+
+function isSafeProjectDir(absDir) {
+  if (!absDir || !path.isAbsolute(absDir)) return false;
+  if (path.dirname(absDir) === absDir) return false; // filesystem root
+  const resolvedHome = path.resolve(HOME);
+  if (absDir === resolvedHome) return false;
+  const blockedPrefixes = [
+    path.join(resolvedHome, '.ssh'),
+    path.join(resolvedHome, '.gnupg'),
+    path.join(resolvedHome, '.aws'),
+    STATE_DIR,
+    GLOBAL_SKILLS_DIR,
+    GLOBAL_AGENTS_DIR,
+    SIDECARS_DIR,
+    '/System',
+    '/bin',
+    '/sbin',
+    '/usr',
+    '/etc',
+    '/private/etc',
+    'C:\\Windows',
+    'C:\\Program Files'
+  ];
+  for (const blocked of blockedPrefixes) {
+    if (absDir === blocked || isPathInsideDir(blocked, absDir)) return false;
+  }
+  return true;
+}
+
+function recordManagedProjectDir(dirPath, active = true) {
+  try {
+    const cur = readJsonOrFallback(PROJECTS_REGISTRY_FILE, null);
+    const list = new Set(Array.isArray(cur?.dirs) ? cur.dirs : []);
+    if (active) list.add(dirPath);
+    else list.delete(dirPath);
+    if (list.size > 0) {
+      writeAtomicUtf8(PROJECTS_REGISTRY_FILE, `${JSON.stringify({ schema: 1, dirs: [...list] }, null, 2)}\n`);
+    } else if (fs.existsSync(PROJECTS_REGISTRY_FILE)) {
+      fs.rmSync(PROJECTS_REGISTRY_FILE, { force: true });
+    }
+  } catch {}
+}
+
+function getRegisteredProjectDirs() {
+  const cur = readJsonOrFallback(PROJECTS_REGISTRY_FILE, null);
+  return Array.isArray(cur?.dirs) ? cur.dirs.map((d) => resolveLocalProjectDir(d)).filter(Boolean) : [];
+}
+
 function resolveLocalProjectDir(rawDir) {
   if (!rawDir || typeof rawDir !== 'string') return null;
   let p = rawDir.trim();
@@ -1004,7 +1208,7 @@ function resolveLocalProjectDir(rawDir) {
     }
   }
   const abs = path.resolve(p);
-  if (!path.isAbsolute(abs)) return null;
+  if (!isSafeProjectDir(abs)) return null;
   try {
     const st = fs.statSync(abs, { throwIfNoEntry: false });
     if (!st || !st.isDirectory()) return null;
@@ -1051,7 +1255,10 @@ function readProjectContext(rawDir) {
   const endIdx = beginIdx !== -1 ? agentsText.indexOf(PROJECT_RULE_END, beginIdx) : -1;
   const hasManagedBlock = beginIdx !== -1 && endIdx > beginIdx;
   const outsideText = hasManagedBlock
-    ? (agentsText.slice(0, beginIdx) + agentsText.slice(endIdx + PROJECT_RULE_END.length)).trim()
+    ? (
+        agentsText.slice(0, beginIdx).replace(/\s+$/, '').replace(/(?:\r?\n)*---$/, '') +
+        agentsText.slice(endIdx + PROJECT_RULE_END.length).replace(/^\s+/, '').replace(/^---(?:\r?\n)*/, '')
+      ).trim()
     : agentsText.trim();
 
   let instructions = typeof rawMeta?.instructions === 'string' ? rawMeta.instructions : '';
@@ -1193,15 +1400,27 @@ function uniqueDestPath(destDir, rawBaseName) {
   return candidate;
 }
 
-function saveProjectContext(payload) {
+export function saveProjectContext(payload) {
   const dirPath = resolveLocalProjectDir(payload?.dirPath);
   if (!dirPath) return { ok: false, error: 'invalid_directory' };
 
-  const instructions = typeof payload?.instructions === 'string' ? payload.instructions.replace(/\r\n/g, '\n') : '';
-  const ops = Array.isArray(payload?.files) ? payload.files : [];
   const prevMeta = readJsonOrFallback(path.join(dirPath, PROJECT_META_REL), null);
   const prevFiles = Array.isArray(prevMeta?.files) ? prevMeta.files : [];
   const filesDir = path.join(dirPath, PROJECT_FILES_REL);
+
+  let fallbackInstructions = typeof prevMeta?.instructions === 'string' ? prevMeta.instructions : '';
+  if (!prevMeta && payload?.instructions === undefined) {
+    const curCtx = readProjectContext(dirPath);
+    if (curCtx?.ok && typeof curCtx.instructions === 'string') fallbackInstructions = curCtx.instructions;
+  }
+  const instructions =
+    typeof payload?.instructions === 'string' ? payload.instructions.replace(/\r\n/g, '\n') : fallbackInstructions;
+
+  /* Preserve existing attachments unless `payload.files` was explicitly provided */
+  const hasExplicitFiles = Array.isArray(payload?.files);
+  const ops = hasExplicitFiles
+    ? payload.files
+    : prevFiles.map((f) => ({ action: 'keep', relPath: f.relPath, name: f.name }));
 
   const keptManagedRelPaths = new Set();
   const nextFiles = [];
@@ -1230,6 +1449,9 @@ function saveProjectContext(payload) {
         fs.mkdirSync(filesDir, { recursive: true });
         finalAbs = uniqueDestPath(filesDir, path.basename(srcAbs));
         fs.copyFileSync(srcAbs, finalAbs);
+        try {
+          fs.chmodSync(finalAbs, 0o644);
+        } catch {}
         managedCopy = true;
       } else {
         managedCopy = isPathInsideDir(filesDir, srcAbs);
@@ -1245,7 +1467,7 @@ function saveProjectContext(payload) {
       if (buf.length > 50 * 1024 * 1024) continue;
       fs.mkdirSync(filesDir, { recursive: true });
       const finalAbs = uniqueDestPath(filesDir, op.name);
-      fs.writeFileSync(finalAbs, buf);
+      fs.writeFileSync(finalAbs, buf, { mode: 0o644 });
       const relNorm = path.relative(dirPath, finalAbs).replace(/\\/g, '/');
       if (seenRelPaths.has(relNorm)) continue;
       seenRelPaths.add(relNorm);
@@ -1254,16 +1476,18 @@ function saveProjectContext(payload) {
     }
   }
 
-  /* Clean up removed managed copies inside .anti-claude/files/ only (never delete user files outside it) */
-  for (const old of prevFiles) {
-    if (!old?.managedCopy || typeof old.relPath !== 'string') continue;
-    const relNorm = old.relPath.replace(/\\/g, '/');
-    if (keptManagedRelPaths.has(relNorm)) continue;
-    const oldAbs = path.resolve(dirPath, relNorm);
-    if (isPathInsideDir(filesDir, oldAbs)) {
-      try {
-        fs.rmSync(oldAbs, { force: true });
-      } catch {}
+  /* Clean up removed managed copies inside .anti-claude/files/ only when `payload.files` was explicitly updated */
+  if (hasExplicitFiles) {
+    for (const old of prevFiles) {
+      if (!old?.managedCopy || typeof old.relPath !== 'string') continue;
+      const relNorm = old.relPath.replace(/\\/g, '/');
+      if (keptManagedRelPaths.has(relNorm)) continue;
+      const oldAbs = path.resolve(dirPath, relNorm);
+      if (isPathInsideDir(filesDir, oldAbs)) {
+        try {
+          fs.rmSync(oldAbs, { force: true });
+        } catch {}
+      }
     }
   }
 
@@ -1294,12 +1518,15 @@ function saveProjectContext(payload) {
 
   let nextAgents = existingAgents;
   if (beginIdx !== -1 && endIdx > beginIdx) {
-    const before = existingAgents.slice(0, beginIdx).replace(/\s+$/, '');
-    const after = existingAgents.slice(endIdx + PROJECT_RULE_END.length).replace(/^\s+/, '');
+    let before = existingAgents.slice(0, beginIdx).replace(/\s+$/, '');
+    let after = existingAgents.slice(endIdx + PROJECT_RULE_END.length).replace(/^\s+/, '');
     if (managedBlock) {
       nextAgents = [before, managedBlock, after].filter(Boolean).join('\n\n') + '\n';
     } else {
-      const rest = [before, after].filter(Boolean).join('\n\n');
+      /* Strip the `---` divider inserted when prepending/appending the managed block */
+      if (!before) after = after.replace(/^---(?:\r?\n)+/, '').replace(/^---\s*$/, '').replace(/^\s+/, '');
+      else if (!after) before = before.replace(/(?:\r?\n)+---$/, '').replace(/\s+$/, '');
+      const rest = [before, after].filter(Boolean).join('\n\n').trim();
       nextAgents = rest ? `${rest}\n` : '';
     }
   } else if (managedBlock) {
@@ -1317,7 +1544,10 @@ function saveProjectContext(payload) {
 
   const preservedTasks = Array.isArray(prevMeta?.scheduledTasks) ? prevMeta.scheduledTasks : [];
   const metaPath = path.join(dirPath, PROJECT_META_REL);
-  if (instructions.trim() || nextFiles.length > 0 || nextExtraFolders.length > 0 || preservedTasks.length > 0) {
+  const hasManagedData = Boolean(
+    instructions.trim() || nextFiles.length > 0 || nextExtraFolders.length > 0 || preservedTasks.length > 0
+  );
+  if (hasManagedData) {
     writeAtomicUtf8(
       metaPath,
       `${JSON.stringify(
@@ -1333,6 +1563,7 @@ function saveProjectContext(payload) {
         2
       )}\n`
     );
+    recordManagedProjectDir(dirPath, true);
   } else {
     try {
       fs.rmSync(metaPath, { force: true });
@@ -1340,6 +1571,7 @@ function saveProjectContext(payload) {
       const acDir = path.join(dirPath, '.anti-claude');
       if (fs.existsSync(acDir) && fs.readdirSync(acDir).length === 0) fs.rmdirSync(acDir);
     } catch {}
+    recordManagedProjectDir(dirPath, false);
   }
 
   return readProjectContext(dirPath);
@@ -1525,7 +1757,26 @@ function readProjectScheduledTasks(dirPath, rawMeta, extraFolders = []) {
   return tasks;
 }
 
-function saveProjectScheduledTask(payload) {
+function buildProjectDirSet(dirPath, prevMeta) {
+  const dirs = new Set([path.resolve(dirPath)]);
+  const extra = Array.isArray(prevMeta?.extraFolders) ? prevMeta.extraFolders : [];
+  for (const ef of extra) {
+    const p = resolveLocalProjectDir(typeof ef === 'string' ? ef : ef?.absPath);
+    if (p) dirs.add(p);
+  }
+  return dirs;
+}
+
+function sidecarBelongsToProject(sc, sidecarId, prevTasks, projectDirs, dirPath) {
+  if (Array.isArray(prevTasks) && prevTasks.some((t) => t && t.sidecarId === sidecarId)) return true;
+  if (!sc || typeof sc !== 'object') return false;
+  if (sc.anti_claude_project_dir && path.resolve(sc.anti_claude_project_dir) === dirPath) return true;
+  if (sc.builtin !== 'schedule') return false;
+  const uris = Array.isArray(sc.agent_permissions?.workspace_uris) ? sc.agent_permissions.workspace_uris : [];
+  return uris.map(fromFileUriSafe).some((p) => p && projectDirs.has(p));
+}
+
+export function saveProjectScheduledTask(payload, { sidecarsDir = SIDECARS_DIR } = {}) {
   const dirPath = resolveLocalProjectDir(payload?.dirPath);
   if (!dirPath) return { ok: false, error: 'invalid_directory' };
   const rawTask = payload?.task;
@@ -1552,6 +1803,8 @@ function saveProjectScheduledTask(payload) {
   const metaPath = path.join(dirPath, PROJECT_META_REL);
   const prevMeta = readJsonOrFallback(metaPath, null) || {};
   const prevTasks = Array.isArray(prevMeta.scheduledTasks) ? prevMeta.scheduledTasks.slice() : [];
+  const projectDirs = buildProjectDirSet(dirPath, prevMeta);
+  projectDirs.add(folderPath);
 
   const editId = typeof rawTask.id === 'string' && rawTask.id.trim() ? rawTask.id.trim() : '';
   const existingIdx = editId ? prevTasks.findIndex((t) => t && t.id === editId) : -1;
@@ -1561,8 +1814,12 @@ function saveProjectScheduledTask(payload) {
 
   if (frequency === 'manual') {
     if (sidecarId && /^[a-z0-9._-]+$/i.test(sidecarId)) {
-      const scDir = path.join(SIDECARS_DIR, sidecarId);
-      if (isPathInsideDir(SIDECARS_DIR, scDir) && fs.existsSync(scDir)) {
+      const scDir = path.join(sidecarsDir, sidecarId);
+      if (isPathInsideDir(sidecarsDir, scDir) && fs.existsSync(scDir)) {
+        const existingSc = readJsonOrFallback(path.join(scDir, 'sidecar.json'), null);
+        if (!sidecarBelongsToProject(existingSc, sidecarId, prevTasks, projectDirs, dirPath)) {
+          return { ok: false, error: 'sidecar_not_in_project' };
+        }
         try {
           fs.rmSync(scDir, { recursive: true, force: true });
         } catch {}
@@ -1573,14 +1830,47 @@ function saveProjectScheduledTask(payload) {
     if (!sidecarId || !/^[a-z0-9._-]+$/i.test(sidecarId)) {
       sidecarId = slugifySidecarId(name, dirPath);
     }
-    const scDir = path.join(SIDECARS_DIR, sidecarId);
-    if (!isPathInsideDir(SIDECARS_DIR, scDir)) return { ok: false, error: 'invalid_sidecar_id' };
+    const scDir = path.join(sidecarsDir, sidecarId);
+    if (!isPathInsideDir(sidecarsDir, scDir)) return { ok: false, error: 'invalid_sidecar_id' };
     const existingSc = readJsonOrFallback(path.join(scDir, 'sidecar.json'), null);
+    if (existingSc && !sidecarBelongsToProject(existingSc, sidecarId, prevTasks, projectDirs, dirPath)) {
+      return { ok: false, error: 'sidecar_not_in_project' };
+    }
     const args = [cron, 'agentapi', 'new-conversation'];
     if (model) args.push(`--model=${model}`);
     args.push('--', instructions);
+
+    /* Preserve multi-workspace `workspace_uris` on native sidecars unless the user changed this task's folder */
+    const nextUri = toFileUriSafe(folderPath);
+    const existingUris = Array.isArray(existingSc?.agent_permissions?.workspace_uris)
+      ? existingSc.agent_permissions.workspace_uris
+      : [];
+    let nextWorkspaceUris = [nextUri];
+    if (existingUris.length > 0) {
+      const prevMatchedDir =
+        (existing?.folderPath && resolveLocalProjectDir(existing.folderPath)) ||
+        existingUris.map(fromFileUriSafe).find((p) => p && projectDirs.has(p)) ||
+        '';
+      if (prevMatchedDir && folderPath === prevMatchedDir) {
+        nextWorkspaceUris = existingUris.slice();
+      } else if (prevMatchedDir) {
+        const replaced = [];
+        let didReplace = false;
+        for (const u of existingUris) {
+          if (!didReplace && fromFileUriSafe(u) === prevMatchedDir) {
+            replaced.push(nextUri);
+            didReplace = true;
+          } else if (u !== nextUri) {
+            replaced.push(u);
+          }
+        }
+        if (!didReplace && !replaced.includes(nextUri)) replaced.unshift(nextUri);
+        nextWorkspaceUris = replaced;
+      }
+    }
+
     const nextSidecar = {
-      ...(existingSc && typeof existingSc === 'object' ? existingSc : {}),
+      ...(existingSc && typeof existingSc === 'object' ? existingSc : { created_by: 'anti-claude', anti_claude_project_dir: dirPath }),
       builtin: 'schedule',
       args,
       restart_policy: 'always',
@@ -1588,7 +1878,7 @@ function saveProjectScheduledTask(payload) {
       description,
       agent_permissions: {
         ...(existingSc?.agent_permissions && typeof existingSc.agent_permissions === 'object' ? existingSc.agent_permissions : {}),
-        workspace_uris: [toFileUriSafe(folderPath)]
+        workspace_uris: nextWorkspaceUris
       }
     };
     writeAtomicUtf8(path.join(scDir, 'sidecar.json'), `${JSON.stringify(nextSidecar, null, 2)}\n`);
@@ -1631,12 +1921,13 @@ function saveProjectScheduledTask(payload) {
       2
     )}\n`
   );
+  recordManagedProjectDir(dirPath, true);
 
   const ctx = readProjectContext(dirPath);
   return { ...ctx, savedTaskId: savedId, sidecarId };
 }
 
-function deleteProjectScheduledTask(payload) {
+export function deleteProjectScheduledTask(payload, { sidecarsDir = SIDECARS_DIR } = {}) {
   const dirPath = resolveLocalProjectDir(payload?.dirPath);
   if (!dirPath) return { ok: false, error: 'invalid_directory' };
   const taskId = String(payload?.taskId || '').trim();
@@ -1646,15 +1937,25 @@ function deleteProjectScheduledTask(payload) {
   const metaPath = path.join(dirPath, PROJECT_META_REL);
   const prevMeta = readJsonOrFallback(metaPath, null);
   const prevTasks = Array.isArray(prevMeta?.scheduledTasks) ? prevMeta.scheduledTasks : [];
+  const projectDirs = buildProjectDirSet(dirPath, prevMeta);
   const target = prevTasks.find((t) => t && (t.id === taskId || (reqSidecarId && t.sidecarId === reqSidecarId)));
-  const sidecarId = String(target?.sidecarId || reqSidecarId || '').trim();
+  const inferredSidecarId = !target && taskId.startsWith('sidecar:') ? taskId.slice('sidecar:'.length) : '';
+  const sidecarId = String(target?.sidecarId || reqSidecarId || inferredSidecarId || '').trim();
 
-  if (sidecarId && /^[a-z0-9._-]+$/i.test(sidecarId)) {
-    const scDir = path.join(SIDECARS_DIR, sidecarId);
-    if (isPathInsideDir(SIDECARS_DIR, scDir) && fs.existsSync(scDir)) {
+  if (sidecarId) {
+    if (!/^[a-z0-9._-]+$/i.test(sidecarId)) return { ok: false, error: 'invalid_sidecar_id' };
+    const scDir = path.join(sidecarsDir, sidecarId);
+    if (!isPathInsideDir(sidecarsDir, scDir)) return { ok: false, error: 'invalid_sidecar_id' };
+    if (fs.existsSync(scDir)) {
+      const existingSc = readJsonOrFallback(path.join(scDir, 'sidecar.json'), null);
+      if (!sidecarBelongsToProject(existingSc, sidecarId, prevTasks, projectDirs, dirPath)) {
+        return { ok: false, error: 'sidecar_not_in_project' };
+      }
       try {
         fs.rmSync(scDir, { recursive: true, force: true });
       } catch {}
+    } else if (!target) {
+      return { ok: false, error: 'sidecar_not_found' };
     }
   }
 
@@ -1685,6 +1986,8 @@ function deleteProjectScheduledTask(payload) {
         const acDir = path.join(dirPath, '.anti-claude');
         if (fs.existsSync(acDir) && fs.readdirSync(acDir).length === 0) fs.rmdirSync(acDir);
       } catch {}
+      const agentsText = readTextOrEmpty(path.join(dirPath, 'AGENTS.md'));
+      if (!agentsText.includes(PROJECT_RULE_BEGIN)) recordManagedProjectDir(dirPath, false);
     }
   }
 
@@ -1769,21 +2072,35 @@ function pickLocalFolderNative() {
   });
 }
 
-function revealLocalPath(rawPath) {
+function revealLocalPath(rawPath, { openFolderContents = false } = {}) {
   if (!rawPath || typeof rawPath !== 'string') return { ok: false, error: 'missing_path' };
   const abs = path.resolve(rawPath);
   const st = fs.statSync(abs, { throwIfNoEntry: false });
   if (!st) return { ok: false, error: 'not_found' };
+  const openInside = openFolderContents && st.isDirectory();
   if (process.platform === 'darwin') {
-    execFile('open', st.isDirectory() ? [abs] : ['-R', abs], () => {});
+    execFile('open', openInside ? [abs] : ['-R', abs], () => {});
     return { ok: true };
   }
   if (process.platform === 'win32') {
-    execFile('explorer', st.isDirectory() ? [abs] : [`/select,${abs}`], () => {});
+    execFile('explorer', openInside ? [abs] : [`/select,${abs}`], () => {});
     return { ok: true };
   }
-  execFile('xdg-open', [st.isDirectory() ? abs : path.dirname(abs)], () => {});
+  execFile('xdg-open', [openInside ? abs : path.dirname(abs)], () => {});
   return { ok: true };
+}
+
+function formatYamlScalar(raw, alwaysQuote = false) {
+  const s = String(raw ?? '').replace(/\r?\n/g, ' ').trim();
+  if (
+    !alwaysQuote &&
+    /^[A-Za-z0-9_\u4e00-\u9fff][A-Za-z0-9._\-\s\u4e00-\u9fff]*$/.test(s) &&
+    !/[:#\[\]{}&*!|>'"%@`,?\\]/.test(s) &&
+    !/^(?:true|false|null|yes|no|on|off|~)$/i.test(s)
+  ) {
+    return s;
+  }
+  return JSON.stringify(s);
 }
 
 function sanitizeSkillFolderName(rawName) {
@@ -1797,7 +2114,7 @@ function sanitizeSkillFolderName(rawName) {
   return cleaned;
 }
 
-function createLocalSkill(payload) {
+export function createLocalSkill(payload, { skillsDir = GLOBAL_SKILLS_DIR } = {}) {
   const rawName = String(payload?.name || '').trim();
   const description = String(payload?.description || '').trim();
   const instructions = String(payload?.instructions || '').replace(/\r\n/g, '\n').trim();
@@ -1806,16 +2123,16 @@ function createLocalSkill(payload) {
   }
   const folderName = sanitizeSkillFolderName(rawName);
   if (!folderName) return { ok: false, error: 'invalid_skill_name' };
-  fs.mkdirSync(GLOBAL_SKILLS_DIR, { recursive: true });
-  const targetDir = path.join(GLOBAL_SKILLS_DIR, folderName);
-  if (!isPathInsideDir(GLOBAL_SKILLS_DIR, targetDir)) return { ok: false, error: 'invalid_skill_path' };
+  fs.mkdirSync(skillsDir, { recursive: true });
+  const targetDir = path.join(skillsDir, folderName);
+  if (!isPathInsideDir(skillsDir, targetDir)) return { ok: false, error: 'invalid_skill_path' };
   if (fs.existsSync(targetDir) && !payload?.overwrite) {
     return { ok: false, error: 'skill_already_exists' };
   }
   fs.mkdirSync(targetDir, { recursive: true });
-  const yamlDesc = description.replace(/\r?\n/g, ' ').replace(/"/g, '\\"');
-  const yamlName = rawName.replace(/\r?\n/g, ' ').replace(/"/g, '\\"');
-  const content = `---\nname: ${yamlName}\ndescription: "${yamlDesc}"\n---\n\n${instructions}\n`;
+  const yamlName = formatYamlScalar(rawName, false);
+  const yamlDesc = formatYamlScalar(description, true);
+  const content = `---\nname: ${yamlName}\ndescription: ${yamlDesc}\n---\n\n${instructions}\n`;
   const skillMdPath = path.join(targetDir, 'SKILL.md');
   writeAtomicUtf8(skillMdPath, content);
   return { ok: true, name: rawName, folderName, dirPath: targetDir, skillMdPath };
@@ -1849,7 +2166,7 @@ async function importLocalSkillNative() {
   return { ok: true, canceled: false, folderName: destName, dirPath: destDir, skillMdPath: path.join(destDir, 'SKILL.md') };
 }
 
-function createLocalAgent(payload) {
+export function createLocalAgent(payload, { agentsDir = GLOBAL_AGENTS_DIR } = {}) {
   const rawName = String(payload?.name || '').trim();
   const description = String(payload?.description || '').trim();
   const systemPrompt = String(payload?.systemPrompt || '').replace(/\r\n/g, '\n').trim();
@@ -1861,9 +2178,9 @@ function createLocalAgent(payload) {
   if (RESERVED_AGENT_NAMES.has(fileSlug.toLowerCase())) {
     return { ok: false, error: 'reserved_agent_name' };
   }
-  fs.mkdirSync(GLOBAL_AGENTS_DIR, { recursive: true });
-  const targetFile = path.join(GLOBAL_AGENTS_DIR, `${fileSlug}.md`);
-  if (!isPathInsideDir(GLOBAL_AGENTS_DIR, targetFile)) return { ok: false, error: 'invalid_agent_path' };
+  fs.mkdirSync(agentsDir, { recursive: true });
+  const targetFile = path.join(agentsDir, `${fileSlug}.md`);
+  if (!isPathInsideDir(agentsDir, targetFile)) return { ok: false, error: 'invalid_agent_path' };
   if (fs.existsSync(targetFile) && !payload?.overwrite) {
     return { ok: false, error: 'agent_already_exists' };
   }
@@ -1875,12 +2192,12 @@ function createLocalAgent(payload) {
   const tools = rawTools.filter((t) => ALLOWED_AGENT_TOOLS.includes(t));
   const finalTools = tools.length ? tools : ['read_file'];
 
-  const yamlName = fileSlug.replace(/\r?\n/g, ' ').replace(/"/g, '\\"');
-  const yamlDesc = description.replace(/\r?\n/g, ' ').replace(/"/g, '\\"');
+  const yamlName = formatYamlScalar(fileSlug, false);
+  const yamlDesc = formatYamlScalar(description, true);
   const content = [
     '---',
     `name: ${yamlName}`,
-    `description: "${yamlDesc}"`,
+    `description: ${yamlDesc}`,
     `subagent: ${subagent ? 'true' : 'false'}`,
     `mainAgent: ${mainAgent ? 'true' : 'false'}`,
     `tools: [${finalTools.join(', ')}]`,
@@ -1890,7 +2207,7 @@ function createLocalAgent(payload) {
     ''
   ].join('\n');
   writeAtomicUtf8(targetFile, content);
-  return { ok: true, name: fileSlug, filePath: targetFile, dirPath: GLOBAL_AGENTS_DIR };
+  return { ok: true, name: fileSlug, filePath: targetFile, dirPath: agentsDir };
 }
 
 async function importLocalAgentNative() {
@@ -1966,7 +2283,7 @@ async function handleProjectRpcRequest(rawPayload) {
     }
     if (action === 'openSkillsDir') {
       fs.mkdirSync(GLOBAL_SKILLS_DIR, { recursive: true });
-      return { reqId, result: revealLocalPath(GLOBAL_SKILLS_DIR) };
+      return { reqId, result: revealLocalPath(GLOBAL_SKILLS_DIR, { openFolderContents: true }) };
     }
     if (action === 'createLocalSkill') {
       return { reqId, result: createLocalSkill(payload) };
@@ -1977,7 +2294,7 @@ async function handleProjectRpcRequest(rawPayload) {
     }
     if (action === 'openAgentsDir') {
       fs.mkdirSync(GLOBAL_AGENTS_DIR, { recursive: true });
-      return { reqId, result: revealLocalPath(GLOBAL_AGENTS_DIR) };
+      return { reqId, result: revealLocalPath(GLOBAL_AGENTS_DIR, { openFolderContents: true }) };
     }
     if (action === 'createLocalAgent') {
       return { reqId, result: createLocalAgent(payload) };
@@ -1987,7 +2304,21 @@ async function handleProjectRpcRequest(rawPayload) {
       return { reqId, result: res };
     }
     if (action === 'revealFile') {
-      return { reqId, result: revealLocalPath(payload.targetPath) };
+      const rawTarget = typeof payload?.targetPath === 'string' ? payload.targetPath.trim() : '';
+      if (!rawTarget) return { reqId, result: { ok: false, error: 'missing_path' } };
+      const absTarget = path.resolve(rawTarget);
+      const explicitProj = resolveLocalProjectDir(payload?.dirPath);
+      const allowedRoots = [
+        ...(explicitProj ? [explicitProj] : []),
+        ...getRegisteredProjectDirs(),
+        GLOBAL_SKILLS_DIR,
+        GLOBAL_AGENTS_DIR
+      ];
+      const authorized = allowedRoots.some((root) => absTarget === root || isPathInsideDir(root, absTarget));
+      if (!authorized) {
+        return { reqId, result: { ok: false, error: 'path_outside_project' } };
+      }
+      return { reqId, result: revealLocalPath(absTarget, { openFolderContents: false }) };
     }
     return { reqId, result: { ok: false, error: `unknown_action:${action}` } };
   } catch (err) {
@@ -2004,10 +2335,13 @@ const skippedNonHostTargets = new Map();
 const targetThemeModes = new Map();
 const fallbackBackoffUntil = new Map();
 
-function isAllowedOrigin(rawUrl) {
+export function isAllowedOrigin(rawUrl) {
   const s = String(rawUrl || '');
   if (!s || s === 'about:blank') return false;
-  if (s.startsWith('plugin://swarm--') || s.startsWith('vscode-file://') || s.startsWith('file://')) return true;
+  if (s.startsWith('plugin://swarm--') || s.startsWith('vscode-file://')) return true;
+  if (s.startsWith('file://')) {
+    return /\/Antigravity\.app\/|\/antigravity\/resources\/|\/workbench\.html\b|\/jetski\b/i.test(s);
+  }
   try {
     const u = new URL(s);
     return (u.protocol === 'http:' || u.protocol === 'https:') && (u.hostname === '127.0.0.1' || u.hostname === 'localhost');
@@ -2036,16 +2370,22 @@ async function fetchTargets(port) {
   }
 }
 
-const HOST_IDENTITY_PROBE_EXPR = `(function () {
-  if (location.protocol === 'plugin:' && /^swarm--/i.test(location.hostname || '')) return 'swarm';
-  if (/^plugin:\\/\\/swarm--/i.test(location.href || '')) return 'swarm';
-  if (location.protocol === 'vscode-file:') return 'host';
-  if (window.__APP_CONFIG__ && window.__APP_CONFIG__.productName === 'antigravity') return 'host';
+export const HOST_IDENTITY_PROBE_EXPR = `(function () {
+  var loc = (typeof window !== 'undefined' && window.location) || {};
+  if (loc.protocol === 'plugin:' && /^swarm--/i.test(loc.hostname || '')) return 'swarm';
+  if (/^plugin:\\/\\/swarm--/i.test(loc.href || '')) return 'swarm';
+  if (loc.protocol === 'vscode-file:') return 'host';
+  var isElectronHost = /\\bElectron\\//i.test((typeof navigator !== 'undefined' && navigator.userAgent) || '') ||
+    Boolean(typeof window !== 'undefined' && window.electronNative && typeof window.electronNative.getZoomLevel === 'function');
+  if (!isElectronHost) return 'non_host';
   if (window.electronNative && (typeof window.electronNative.getZoomLevel === 'function' || typeof window.electronNative.setTitleBarOverlay === 'function')) return 'host';
+  if (window.__APP_CONFIG__ && window.__APP_CONFIG__.productName === 'antigravity') return 'host';
   if (document.querySelector && document.querySelector('link[href*="/jetbox.css"], body[data-agy-theme], body[data-newux-theme], [id="antigravity.agentSidePanelInputBox"]')) return 'host';
   if (document.readyState === 'loading') return 'loading';
   return 'non_host';
 })()`;
+
+const NON_HOST_SKIP_TTL_MS = 15000;
 
 function resolveParentHostTheme(page) {
   if (page.parentId && targetThemeModes.has(page.parentId)) {
@@ -2057,7 +2397,7 @@ function resolveParentHostTheme(page) {
   return null;
 }
 
-async function attachTarget(page, endpoint) {
+export async function attachTarget(page, endpoint) {
   const wsUrl = String(page.webSocketDebuggerUrl || '').replace(/^ws:\/\/localhost:/i, 'ws://127.0.0.1:');
   if (!wsUrl) return;
 
@@ -2108,10 +2448,36 @@ async function attachTarget(page, endpoint) {
     ws,
     send,
     hostConfirmed: false,
+    mainFrameId: null,
+    trustedContextId: null,
+    rpcToken: '',
+    navGen: 0,
+    contextMeta: new Map(),
+    defaultContextByFrame: new Map(),
     newDocScriptId: null,
     injectedBundleHash: '',
     watchedCascadeId: '',
     lastMetricsSig: '',
+    revokeHostAuth() {
+      entry.hostConfirmed = false;
+      entry.trustedContextId = null;
+      entry.rpcToken = '';
+      entry.injectedBundleHash = '';
+    },
+    isAuthorizedBindingCaller(executionContextId) {
+      if (!entry.hostConfirmed) return false;
+      if (entry.trustedContextId !== null) {
+        return executionContextId === entry.trustedContextId;
+      }
+      if (typeof executionContextId === 'number' && entry.contextMeta.size > 0) {
+        const meta = entry.contextMeta.get(executionContextId);
+        if (!meta || !meta.isDefault) return false;
+        if (entry.mainFrameId && meta.frameId && meta.frameId !== entry.mainFrameId) return false;
+        if (meta.origin && meta.origin !== '://' && !isAllowedOrigin(meta.origin)) return false;
+        return true;
+      }
+      return entry.contextMeta.size === 0;
+    },
     updateTargetUrl(nextUrl) {
       entry.url = nextUrl;
       const m = String(nextUrl || '').match(/\/c\/([0-9a-f-]{36})/i);
@@ -2124,36 +2490,53 @@ async function attachTarget(page, endpoint) {
 
   entry.updateTargetUrl(page.url);
 
+  const evalInHostContext = (expression, returnByValue = false) => {
+    const params = { expression, returnByValue };
+    if (entry.trustedContextId !== null) params.contextId = entry.trustedContextId;
+    return send('Runtime.evaluate', params);
+  };
+
+  const probeHostKind = async (contextId = null) => {
+    let probeKind = 'non_host';
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const evalParams = { expression: HOST_IDENTITY_PROBE_EXPR, returnByValue: true };
+      if (contextId !== null) evalParams.contextId = contextId;
+      const probeRes = await send('Runtime.evaluate', evalParams).catch(() => null);
+      if (!probeRes) return 'error';
+      probeKind = probeRes?.result?.result?.value || 'non_host';
+      if (probeKind !== 'loading') break;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    return probeKind;
+  };
+
   const pushMetricsToTarget = async (cascadeId, force = false) => {
-    if (!activeConfig.enabled || activeConfig.modules.metrics === false || page.type === 'iframe') return;
+    if (!entry.hostConfirmed || !activeConfig.enabled || activeConfig.modules.metrics === false || page.type === 'iframe') return;
     const cid = cascadeId || entry.watchedCascadeId;
     if (!cid || !UUID_RE.test(cid)) return;
     const payload = parseConversationMetrics(cid, entry.endpoint.conversationsDir);
     if (!payload) return;
     if (payload.transientError) {
       if (force && payload.cachedPayload) {
-        await send('Runtime.evaluate', {
-          expression: `window.__ag_render_metrics && window.__ag_render_metrics(${JSON.stringify(payload.cachedPayload)})`,
-          returnByValue: false
-        }).catch(() => {});
+        await evalInHostContext(
+          `window.__ag_render_metrics && window.__ag_render_metrics(${JSON.stringify(payload.cachedPayload)})`,
+          false
+        ).catch(() => {});
       }
       return;
     }
     if (!force && payload.sig && payload.sig === entry.lastMetricsSig) return;
     entry.lastMetricsSig = payload.sig || '';
-    await send('Runtime.evaluate', {
-      expression: `window.__ag_render_metrics && window.__ag_render_metrics(${JSON.stringify(payload)})`,
-      returnByValue: false
-    }).catch(() => {});
+    await evalInHostContext(
+      `window.__ag_render_metrics && window.__ag_render_metrics(${JSON.stringify(payload)})`,
+      false
+    ).catch(() => {});
   };
 
   entry.syncMetricsForSession = async (force = false) => {
     if (!entry.hostConfirmed || page.type === 'iframe' || !activeConfig.enabled) return;
     if (!entry.watchedCascadeId) {
-      const r = await send('Runtime.evaluate', {
-        expression: 'window.__ag_watched_cascade_id || ""',
-        returnByValue: true
-      }).catch(() => null);
+      const r = await evalInHostContext('window.__ag_watched_cascade_id || ""', true).catch(() => null);
       const cid = r?.result?.result?.value;
       if (cid && UUID_RE.test(cid)) entry.watchedCascadeId = cid;
     }
@@ -2170,7 +2553,8 @@ async function attachTarget(page, endpoint) {
     }
     if (!activeConfig.enabled) return;
     const hostMode = page.type === 'iframe' ? resolveParentHostTheme(page) : null;
-    const scriptSource = buildRuntimeScript(hostMode);
+    /* Never embed an RPC capability token in NewDocument scripts; tokens are issued only after post-navigation host verification */
+    const scriptSource = buildRuntimeScript(hostMode, '');
     if (!scriptSource) return;
     const res = await send('Page.addScriptToEvaluateOnNewDocument', { source: scriptSource }).catch(() => null);
     entry.newDocScriptId = res?.result?.identifier || null;
@@ -2179,12 +2563,12 @@ async function attachTarget(page, endpoint) {
   entry.injectNow = async () => {
     if (!entry.hostConfirmed) return;
     const hostMode = page.type === 'iframe' ? resolveParentHostTheme(page) : null;
-    const scriptSource = buildRuntimeScript(hostMode);
+    if (page.type === 'page' && !entry.rpcToken) {
+      entry.rpcToken = crypto.randomBytes(24).toString('hex');
+    }
+    const scriptSource = buildRuntimeScript(hostMode, page.type === 'page' ? entry.rpcToken : '');
     if (!scriptSource) return;
-    const evalRes = await send('Runtime.evaluate', {
-      expression: scriptSource,
-      returnByValue: true
-    }).catch(() => null);
+    const evalRes = await evalInHostContext(scriptSource, true).catch(() => null);
     entry.injectedBundleHash = cachedBundleHash;
     const resolvedMode = evalRes?.result?.result?.value;
     if (page.type === 'page' && (resolvedMode === 'dark' || resolvedMode === 'light')) {
@@ -2199,13 +2583,48 @@ async function attachTarget(page, endpoint) {
       return;
     }
     if (!activeConfig.enabled) return;
-    const probe = await send('Runtime.evaluate', {
-      expression: 'Boolean(document.getElementById("ag-custom-fonts"))',
-      returnByValue: true
-    }).catch(() => null);
+    const needCustomJs = page.type === 'page' && activeConfig.modules.customJs !== false;
+    const probe = await evalInHostContext(
+      `Boolean(document.getElementById("ag-custom-fonts")) && (!document.body || !${needCustomJs} || Boolean(window.__ag_custom_js_mounted))`,
+      true
+    ).catch(() => null);
     if (probe?.result?.result?.value === false) {
       await entry.injectNow();
     }
+  };
+
+  entry.reverifyAfterNavigation = async (gen) => {
+    if (closed || gen !== entry.navGen) return;
+    if (!isAllowedOrigin(entry.url)) {
+      skippedNonHostTargets.set(page.id, { origin: getOriginKey(entry.url), expiresAt: Date.now() + NON_HOST_SKIP_TTL_MS });
+      try {
+        ws.close();
+      } catch {}
+      return;
+    }
+    const candidateCtxId = (entry.mainFrameId && entry.defaultContextByFrame.get(entry.mainFrameId)) || null;
+    const probeKind = await probeHostKind(candidateCtxId);
+    if (closed || gen !== entry.navGen) return;
+    if (probeKind === 'loading') {
+      setTimeout(() => entry.reverifyAfterNavigation(gen).catch(() => {}), 200).unref?.();
+      return;
+    }
+    if (probeKind !== 'host' && probeKind !== 'swarm') {
+      skippedNonHostTargets.set(page.id, { origin: getOriginKey(entry.url), expiresAt: Date.now() + NON_HOST_SKIP_TTL_MS });
+      try {
+        ws.close();
+      } catch {}
+      return;
+    }
+    entry.trustedContextId =
+      (entry.mainFrameId && entry.defaultContextByFrame.get(entry.mainFrameId)) ?? candidateCtxId ?? null;
+    entry.rpcToken = page.type === 'page' ? crypto.randomBytes(24).toString('hex') : '';
+    entry.hostConfirmed = true;
+    if (page.type === 'page' && entry.trustedContextId !== null) {
+      await send('Runtime.addBinding', { name: '__agProjectRpc', executionContextId: entry.trustedContextId }).catch(() => {});
+    }
+    await entry.injectNow();
+    await entry.syncMetricsForSession(true);
   };
 
   ws.addEventListener('message', (ev) => {
@@ -2223,9 +2642,55 @@ async function attachTarget(page, endpoint) {
       }
       return;
     }
+    if (msg.method === 'Runtime.executionContextCreated') {
+      const ctx = msg.params?.context;
+      if (ctx && typeof ctx.id === 'number') {
+        const frameId = ctx.auxData?.frameId || null;
+        const isDefault = ctx.auxData?.isDefault !== false && (!ctx.auxData?.type || ctx.auxData.type === 'default');
+        entry.contextMeta.set(ctx.id, { frameId, isDefault, origin: String(ctx.origin || '') });
+        if (isDefault && frameId) {
+          entry.defaultContextByFrame.set(frameId, ctx.id);
+          if (!entry.mainFrameId) entry.mainFrameId = frameId;
+        }
+      }
+      return;
+    }
+    if (msg.method === 'Runtime.executionContextDestroyed') {
+      const cid = msg.params?.executionContextId;
+      if (typeof cid === 'number') {
+        const meta = entry.contextMeta.get(cid);
+        if (meta?.frameId && entry.defaultContextByFrame.get(meta.frameId) === cid) {
+          entry.defaultContextByFrame.delete(meta.frameId);
+        }
+        entry.contextMeta.delete(cid);
+        if (entry.trustedContextId === cid) {
+          entry.revokeHostAuth();
+        }
+      }
+      return;
+    }
+    if (msg.method === 'Runtime.executionContextsCleared') {
+      entry.contextMeta.clear();
+      entry.defaultContextByFrame.clear();
+      entry.revokeHostAuth();
+      return;
+    }
+    if (msg.method === 'Page.frameNavigated' && !msg.params?.frame?.parentId) {
+      /* Top-level navigation: immediately revoke previous document's host & RPC authorization */
+      entry.revokeHostAuth();
+      const nextFrameId = msg.params?.frame?.id;
+      if (nextFrameId) entry.mainFrameId = nextFrameId;
+      entry.updateTargetUrl(msg.params?.frame?.url || entry.url);
+      const gen = ++entry.navGen;
+      setTimeout(() => {
+        entry.reverifyAfterNavigation(gen).catch(() => {});
+      }, 60);
+      return;
+    }
     if (!entry.hostConfirmed) return;
     if (msg.method === 'Runtime.bindingCalled') {
-      const { name, payload } = msg.params || {};
+      const { name, payload, executionContextId } = msg.params || {};
+      if (!entry.isAuthorizedBindingCaller(executionContextId)) return;
       if (name === '__agRequestMetrics' && payload && UUID_RE.test(payload)) {
         entry.watchedCascadeId = payload;
         entry.lastMetricsSig = '';
@@ -2243,22 +2708,35 @@ async function attachTarget(page, endpoint) {
           }
         }
       } else if (name === '__agProjectRpc' && payload) {
+        let parsedEnv = null;
+        try {
+          parsedEnv = JSON.parse(String(payload));
+        } catch {
+          return;
+        }
+        if (!entry.rpcToken || !parsedEnv || parsedEnv.token !== entry.rpcToken) {
+          if (parsedEnv?.reqId) {
+            evalInHostContext(
+              `window.__ag_project_rpc_resolve && window.__ag_project_rpc_resolve(${JSON.stringify(parsedEnv.reqId)}, { ok: false, error: "unauthorized_context" })`,
+              false
+            ).catch(() => {});
+          }
+          return;
+        }
+        const expectedContextId = entry.trustedContextId;
+        const expectedToken = entry.rpcToken;
         handleProjectRpcRequest(payload)
           .then((reply) => {
-            if (!reply) return;
-            return send('Runtime.evaluate', {
-              expression: `window.__ag_project_rpc_resolve && window.__ag_project_rpc_resolve(${JSON.stringify(reply.reqId)}, ${JSON.stringify(reply.result)})`,
-              returnByValue: false
-            }).catch(() => {});
+            if (!reply || !entry.hostConfirmed || entry.rpcToken !== expectedToken || entry.trustedContextId !== expectedContextId) {
+              return;
+            }
+            return evalInHostContext(
+              `window.__ag_project_rpc_resolve && window.__ag_project_rpc_resolve(${JSON.stringify(reply.reqId)}, ${JSON.stringify(reply.result)})`,
+              false
+            ).catch(() => {});
           })
           .catch(() => {});
       }
-    } else if (msg.method === 'Page.frameNavigated' && !msg.params?.frame?.parentId) {
-      entry.updateTargetUrl(msg.params?.frame?.url || entry.url);
-      setTimeout(() => {
-        entry.checkAndInject(false).catch(() => {});
-        entry.syncMetricsForSession(true).catch(() => {});
-      }, 60);
     }
   });
 
@@ -2277,36 +2755,51 @@ async function attachTarget(page, endpoint) {
       ws.addEventListener('error', () => (clearTimeout(t), reject(new Error('ws_error'))), { once: true });
     });
 
+    await send('Page.enable').catch(() => {});
+    const frameTreeRes = await send('Page.getFrameTree').catch(() => null);
+    const rootFrameId = frameTreeRes?.result?.frameTree?.frame?.id || null;
+    if (rootFrameId) entry.mainFrameId = rootFrameId;
+
     await send('Runtime.enable');
 
+    const candidateCtxId = (entry.mainFrameId && entry.defaultContextByFrame.get(entry.mainFrameId)) || null;
     /* Verify this target is actually an Antigravity host window or swarm plugin (never inject into localhost user web apps) */
-    let probeKind = 'non_host';
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const probeRes = await send('Runtime.evaluate', {
-        expression: HOST_IDENTITY_PROBE_EXPR,
-        returnByValue: true
-      });
-      probeKind = probeRes?.result?.result?.value || 'non_host';
-      if (probeKind !== 'loading') break;
-      await new Promise((r) => setTimeout(r, 150));
-    }
+    const probeKind = await probeHostKind(candidateCtxId);
 
-    if (probeKind !== 'host' && probeKind !== 'swarm') {
-      skippedNonHostTargets.set(page.id, { origin: getOriginKey(page.url) });
+    if (probeKind === 'loading') {
+      /* Still loading: do NOT add to skippedNonHostTargets so subsequent sync cycles retry cleanly */
       try {
         ws.close();
       } catch {}
       return;
     }
 
+    if (probeKind !== 'host' && probeKind !== 'swarm') {
+      skippedNonHostTargets.set(page.id, { origin: getOriginKey(page.url), expiresAt: Date.now() + NON_HOST_SKIP_TTL_MS });
+      try {
+        ws.close();
+      } catch {}
+      return;
+    }
+
+    entry.trustedContextId =
+      (entry.mainFrameId && entry.defaultContextByFrame.get(entry.mainFrameId)) ?? candidateCtxId ?? null;
+    entry.rpcToken = page.type === 'page' ? crypto.randomBytes(24).toString('hex') : '';
     entry.hostConfirmed = true;
     attachedTargets.set(page.id, entry);
 
-    await send('Page.enable').catch(() => {});
     if (page.type === 'page') {
-      await send('Runtime.addBinding', { name: '__agRequestMetrics' }).catch(() => {});
-      await send('Runtime.addBinding', { name: '__agSyncHostThemeMode' }).catch(() => {});
-      await send('Runtime.addBinding', { name: '__agProjectRpc' }).catch(() => {});
+      const bindParams = (name) =>
+        entry.trustedContextId !== null ? { name, executionContextId: entry.trustedContextId } : { name };
+      await send('Runtime.addBinding', bindParams('__agRequestMetrics')).catch(() =>
+        send('Runtime.addBinding', { name: '__agRequestMetrics' }).catch(() => {})
+      );
+      await send('Runtime.addBinding', bindParams('__agSyncHostThemeMode')).catch(() =>
+        send('Runtime.addBinding', { name: '__agSyncHostThemeMode' }).catch(() => {})
+      );
+      await send('Runtime.addBinding', bindParams('__agProjectRpc')).catch(() =>
+        send('Runtime.addBinding', { name: '__agProjectRpc' }).catch(() => {})
+      );
     }
 
     await entry.updateNewDocScript();
@@ -2376,7 +2869,12 @@ async function sync() {
         if (!t?.id) continue;
         seenRawTargetIds.add(t.id);
         const skipped = skippedNonHostTargets.get(t.id);
-        if (skipped && (!isAllowedOrigin(t.url) || getOriginKey(t.url) !== skipped.origin)) {
+        if (
+          skipped &&
+          (!isAllowedOrigin(t.url) ||
+            getOriginKey(t.url) !== skipped.origin ||
+            (typeof skipped.expiresAt === 'number' && nowMs >= skipped.expiresAt))
+        ) {
           skippedNonHostTargets.delete(t.id);
         }
       }
@@ -2500,22 +2998,34 @@ async function runVerifyOnce() {
   process.exit(ok ? 0 : 1);
 }
 
-claimPidFile();
-startMacCdpBootstrap();
+export { attachedTargets, skippedNonHostTargets, sync, rebuildBundleIfNeeded };
 
-if (VERIFY_ONCE) {
-  await runVerifyOnce();
-} else if (RUN_ONCE) {
-  await sync();
-  for (const [, entry] of attachedTargets.entries()) {
-    try {
-      entry.ws.close();
-    } catch {}
+const isMainModule = (() => {
+  try {
+    return Boolean(process.argv[1]) && fs.realpathSync(process.argv[1]) === fs.realpathSync(__filename);
+  } catch {
+    return false;
   }
-  process.exit(0);
-} else {
-  rebuildBundleIfNeeded();
-  console.log(`[Anti-Claude Daemon] Started (${cachedVersion}) | userDir=${USER_DIR} | sqlite=${Boolean(DatabaseSync)}`);
-  await sync();
-  setInterval(sync, 2500);
+})();
+
+if (isMainModule) {
+  claimPidFile();
+  startMacCdpBootstrap();
+
+  if (VERIFY_ONCE) {
+    await runVerifyOnce();
+  } else if (RUN_ONCE) {
+    await sync();
+    for (const [, entry] of attachedTargets.entries()) {
+      try {
+        entry.ws.close();
+      } catch {}
+    }
+    process.exit(0);
+  } else {
+    rebuildBundleIfNeeded();
+    console.log(`[Anti-Claude Daemon] Started (${cachedVersion}) | userDir=${USER_DIR} | sqlite=${Boolean(DatabaseSync)}`);
+    await sync();
+    setInterval(sync, 2500);
+  }
 }
