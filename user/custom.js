@@ -44,7 +44,9 @@
     modelMenu: effectiveModBool('claudeUxModelMenu', true),
     inlineUndo: effectiveModBool('claudeUxInlineUndo', true),
     folderStatus: effectiveModBool('claudeUxFolderStatus', true),
-    recentSection: effectiveModBool('claudeUxRecentSection', true)
+    recentSection: effectiveModBool('claudeUxRecentSection', false),
+    projects: effectiveModBool('claudeUxProjects', true),
+    hideSidebarProjects: effectiveModBool('claudeUxHideSidebarProjects', true)
   };
   const L = (zh, en) => (FEAT.i18n ? zh : en);
 
@@ -1252,6 +1254,7 @@
     }
     syncModelTriggerDisplay();
     syncSidebarEnhancements();
+    syncProjectsWorkspace();
     reconcileSettingsPanel();
   }
 
@@ -1273,6 +1276,7 @@
     '</svg>';
   let cachedQuotaSvc = null;
   let cachedUserTierName = '';
+  let cachedUserAccountKey = '';
   let cachedQuotaGroups = null;
   let lastQuotaFetchTs = 0;
   let quotaFetchInFlight = null;
@@ -2093,23 +2097,29 @@
   }
   ensureMetricsWrapped();
 
-  function discoverQuotaService() {
-    if (cachedQuotaSvc) return cachedQuotaSvc;
+  function discoverQuotaService(refreshAccount = false) {
+    if (!refreshAccount && cachedQuotaSvc && cachedUserTierName) return cachedQuotaSvc;
     const inputBox = document.getElementById('antigravity.agentSidePanelInputBox');
-    if (!inputBox) return null;
+    if (!inputBox) return cachedQuotaSvc;
     const fk = Object.keys(inputBox).find((k) => k.startsWith('__reactFiber$'));
     let f = fk ? inputBox[fk] : null;
     const seen = new Set();
+    let foundSvc = null;
+    let foundTierName = '';
+    let foundTierId = '';
+    let foundEmail = '';
 
     const walkObj = (obj, depth) => {
       if (!obj || typeof obj !== 'object' || depth > 4 || seen.has(obj)) return;
       seen.add(obj);
       try {
-        if (!cachedQuotaSvc && typeof obj.retrieveUserQuotaSummary === 'function') {
-          cachedQuotaSvc = obj;
+        if (!foundSvc && typeof obj.retrieveUserQuotaSummary === 'function') {
+          foundSvc = obj;
         }
-        if (!cachedUserTierName && obj.userTier && typeof obj.userTier.name === 'string') {
-          cachedUserTierName = obj.userTier.name;
+        if (!foundTierName && obj.userTier && typeof obj.userTier.name === 'string' && obj.userTier.name.trim()) {
+          foundTierName = obj.userTier.name.trim();
+          foundTierId = typeof obj.userTier.id === 'string' ? obj.userTier.id.trim() : '';
+          foundEmail = typeof obj.email === 'string' ? obj.email : typeof obj.userEmail === 'string' ? obj.userEmail : '';
         }
       } catch {}
       let keys = [];
@@ -2132,21 +2142,53 @@
         walkObj(dep.memoizedValue, 0);
         dep = dep.next;
       }
-      if (cachedQuotaSvc && cachedUserTierName) break;
+      if ((!foundSvc || !foundTierName) && f.alternate) {
+        walkObj(f.alternate.memoizedProps, 0);
+        walkObj(f.alternate.memoizedState, 0);
+        let altDep = f.alternate.dependencies ? f.alternate.dependencies.firstContext : null;
+        while (altDep) {
+          walkObj(altDep.memoizedValue, 0);
+          altDep = altDep.next;
+        }
+      }
+      if (foundSvc && foundTierName) break;
+    }
+
+    if (foundSvc) cachedQuotaSvc = foundSvc;
+    if (foundTierName) {
+      const nextAccountKey = `${foundEmail}|${foundTierId}|${foundTierName}`;
+      if (cachedUserAccountKey && cachedUserAccountKey !== nextAccountKey) {
+        cachedQuotaGroups = null;
+        lastQuotaFetchTs = 0;
+        selectedQuotaGroupIdx = -1;
+      }
+      cachedUserTierName = foundTierName;
+      cachedUserAccountKey = nextAccountKey;
     }
     return cachedQuotaSvc;
+  }
+
+  function invokeQuotaSummaryRpc(svc, forceRefresh) {
+    const fn = svc && svc.retrieveUserQuotaSummary;
+    if (typeof fn !== 'function') return Promise.resolve(null);
+    let wantsBool = false;
+    try {
+      wantsBool = fn.length === 1 && /forceRefresh/.test(Function.prototype.toString.call(fn));
+    } catch {}
+    const arg = wantsBool ? Boolean(forceRefresh) : { forceRefresh: Boolean(forceRefresh) };
+    return new Promise((resolve) => resolve(svc.retrieveUserQuotaSummary(arg)));
   }
 
   function fetchQuotaSummary(forceRefresh = false) {
     const svc = discoverQuotaService();
     if (!svc) return Promise.resolve(cachedQuotaGroups || []);
     const now = Date.now();
-    if (!forceRefresh && cachedQuotaGroups && now - lastQuotaFetchTs < 15000) {
+    if (!forceRefresh && cachedQuotaGroups && now - lastQuotaFetchTs < 5000) {
       return Promise.resolve(cachedQuotaGroups);
     }
     if (quotaFetchInFlight) return quotaFetchInFlight;
 
-    quotaFetchInFlight = new Promise((resolve) => resolve(svc.retrieveUserQuotaSummary(Boolean(forceRefresh))))
+    quotaFetchInFlight = invokeQuotaSummaryRpc(svc, forceRefresh)
       .then((res) => {
         if (disposed) return [];
         const rawGroups = (res && res.response && res.response.groups) || (res && res.groups) || [];
@@ -2201,21 +2243,33 @@
 
   function localizeGroupShortName(name) {
     const s = String(name || '').trim();
-    if (/gemini/i.test(s)) return L('Gemini 模型', 'Gemini');
+    if (!s) return L('全部模型', 'All models');
+    if (/^gemini(?:\s+models?)?$/i.test(s)) return L('Gemini 模型', 'Gemini');
     if (/claude/i.test(s) && /gpt/i.test(s)) return 'Claude / GPT';
-    if (/claude/i.test(s)) return L('Claude 模型', 'Claude');
-    return s || L('全部模型', 'All models');
+    if (/^claude(?:\s+models?)?$/i.test(s)) return L('Claude 模型', 'Claude');
+    return s;
   }
 
   function detectDefaultGroupIndex(groups) {
     if (!groups || groups.length <= 1) return 0;
     const inputBox = document.getElementById('antigravity.agentSidePanelInputBox');
-    const txt = inputBox ? inputBox.textContent || '' : '';
+    const trigger = inputBox && inputBox.querySelector('button[data-testid="model-selector-trigger"]');
+    const txt = ((trigger ? trigger.textContent : inputBox ? inputBox.textContent : '') || '').trim().toLowerCase();
+    const specificIdx = groups.findIndex((g) => {
+      const dn = String(g.displayName || '').trim().toLowerCase();
+      return dn && !/^gemini(?:\s+models?)?$/.test(dn) && !(/claude/.test(dn) && /gpt/.test(dn)) && txt.includes(dn);
+    });
+    if (specificIdx >= 0) return specificIdx;
     const want3p = /claude|sonnet|opus|gpt/i.test(txt);
-    const idx = groups.findIndex((g) =>
+    const exactFamilyIdx = groups.findIndex((g) => {
+      const dn = String(g.displayName || '').trim();
+      return want3p ? /claude|gpt/i.test(dn) : /^gemini(?:\s+models?)?$/i.test(dn);
+    });
+    if (exactFamilyIdx >= 0) return exactFamilyIdx;
+    const broadIdx = groups.findIndex((g) =>
       want3p ? /claude|gpt/i.test(g.displayName || '') : /gemini/i.test(g.displayName || '')
     );
-    return idx >= 0 ? idx : 0;
+    return broadIdx >= 0 ? broadIdx : 0;
   }
 
   function barColorForPct(pct, warnAt = 70, critAt = 85) {
@@ -2337,10 +2391,11 @@
     discoverQuotaService();
     const tierShort = cachedUserTierName
       ? cachedUserTierName.replace(/^Google\s+AI\s+/i, '').trim() || cachedUserTierName
-      : 'Pro';
+      : '';
+    const tierSuffix = tierShort ? ` · ${escapeHtml(tierShort)}` : '';
 
     const groups = cachedQuotaGroups || [];
-    if (selectedQuotaGroupIdx < 0 || selectedQuotaGroupIdx >= groups.length) {
+    if (groups.length > 0 && (selectedQuotaGroupIdx < 0 || selectedQuotaGroupIdx >= groups.length)) {
       selectedQuotaGroupIdx = detectDefaultGroupIndex(groups);
     }
 
@@ -2402,7 +2457,7 @@
 
     pop.innerHTML = `
       <div class="ag-qp-hdr">
-        <span class="ag-qp-tier">${L('套餐使用限额', 'Plan usage')} · ${escapeHtml(tierShort)}</span>
+        <span class="ag-qp-tier">${L('套餐使用限额', 'Plan usage')}${tierSuffix}</span>
         <button type="button" class="ag-qp-all" data-ag-quota-view-all="true">
           <span>${L('查看全部', 'View all')}</span>
           <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 8h9m0 0L8.8 4.3M12.5 8l-3.7 3.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -2431,15 +2486,15 @@
     }
     quotaPopoverOpen = true;
     selectedQuotaGroupIdx = -1;
+    discoverQuotaService(true);
     const ring = document.getElementById('ag-claude-ctx-ring');
     if (ring) ring.setAttribute('data-open', 'true');
     const pop = ensureQuotaPopover();
     renderQuotaPopoverBody();
     pop.setAttribute('data-open', 'true');
     positionQuotaPopover();
-    fetchQuotaSummary(false).then(() => {
-      if (Date.now() - lastQuotaFetchTs > 12000) fetchQuotaSummary(true);
-    });
+    const needForce = !cachedQuotaGroups || Date.now() - lastQuotaFetchTs > 5000;
+    fetchQuotaSummary(needForce);
   }
 
   function closeQuotaPopover() {
@@ -2671,18 +2726,185 @@
     }
   }
 
+  function buildReduxModelSelectorApi() {
+    try {
+      const { store } = resolveProjectsStoreAndBindings();
+      if (!store || typeof store.getState !== 'function') return null;
+      const st = store.getState();
+      const rawCfgs =
+        (st && st.userStatus && st.userStatus.cascadeModelConfigData && st.userStatus.cascadeModelConfigData.clientModelConfigs) || [];
+      if (!Array.isArray(rawCfgs) || rawCfgs.length === 0) return null;
+      const modelOptions = [];
+      for (const c of rawCfgs) {
+        if (!c || !c.label) continue;
+        const val = c.modelOrAlias && c.modelOrAlias.choice ? c.modelOrAlias.choice.value : c.value;
+        modelOptions.push({
+          label: c.label,
+          value: val,
+          modelId: c.modelId || '',
+          disabled: Boolean(c.disabled)
+        });
+      }
+      if (!modelOptions.length) return null;
+      const rawCustom =
+        st && st.customModels && Array.isArray(st.customModels.models)
+          ? st.customModels.models
+          : Array.isArray(st && st.customModels)
+            ? st.customModels
+            : [];
+      const customModels = rawCustom
+        .filter((c) => c && c.label)
+        .map((c) => ({
+          label: c.label,
+          value: c.value,
+          modelId: c.modelId || '',
+          customLabel: c.label,
+          disabled: Boolean(c.disabled)
+        }));
+      const def = (st && st.modelSelection && st.modelSelection.default) || null;
+      const defVal = def && def.model;
+      const selectedModel =
+        (def && def.customLabel ? customModels.find((m) => m.value === defVal && m.label === def.customLabel) : null) ||
+        modelOptions.find((m) => m.value === defVal) ||
+        customModels.find((m) => m.value === defVal) ||
+        modelOptions.find((m) => !m.disabled) ||
+        modelOptions[0];
+      return {
+        modelOptions,
+        customModels,
+        selectedModel,
+        open: false,
+        setIsOpen: () => {},
+        setSelectedModel: (opt) => {
+          if (!opt || opt.value === undefined || typeof store.dispatch !== 'function') return;
+          store.dispatch({
+            type: 'modelSelection/modelPicked',
+            payload: {
+              model: opt.value,
+              ...(opt.customLabel ? { customLabel: opt.customLabel } : {})
+            }
+          });
+        }
+      };
+    } catch {
+      return null;
+    }
+  }
+
   function discoverModelSelectorApi(btnEl) {
-    const btn = btnEl || findModelTriggerBtn();
-    if (!btn) return null;
-    const fk = Object.keys(btn).find((k) => k.startsWith('__reactFiber$'));
-    let f = fk ? btn[fk] : null;
-    for (let i = 0; i < 26 && f; i++, f = f.return) {
-      const p = f.memoizedProps;
-      if (p && typeof p.setSelectedModel === 'function' && Array.isArray(p.modelOptions) && p.modelOptions.length > 0) {
-        return p;
+    const isProjectTrigger = Boolean(
+      (btnEl && btnEl.hasAttribute && btnEl.hasAttribute('data-ag-pd-model-trigger')) ||
+      (!btnEl && activeModelTriggerBtn && activeModelTriggerBtn.hasAttribute && activeModelTriggerBtn.hasAttribute('data-ag-pd-model-trigger'))
+    );
+    const nativeBtn = document.querySelector('button[data-testid="model-selector-trigger"]');
+    const readNativeApi = (btn) => {
+      if (!btn) return null;
+      const fk = Object.keys(btn).find((k) => k.startsWith('__reactFiber$'));
+      let f = fk ? btn[fk] : null;
+      for (let i = 0; i < 26 && f; i++, f = f.return) {
+        const p = f.memoizedProps;
+        if (p && typeof p.setSelectedModel === 'function' && Array.isArray(p.modelOptions) && p.modelOptions.length > 0) {
+          return p;
+        }
+      }
+      return null;
+    };
+
+    if (isProjectTrigger) {
+      const reduxApi = buildReduxModelSelectorApi();
+      const nativeApi = readNativeApi(nativeBtn);
+      if (reduxApi) {
+        if (nativeApi) {
+          return {
+            ...reduxApi,
+            setSelectedModel: (opt) => {
+              reduxApi.setSelectedModel(opt);
+              const match = nativeApi.modelOptions.find(
+                (o) => o && ((opt.value !== undefined && o.value === opt.value) || o.label === opt.label)
+              );
+              try {
+                nativeApi.setSelectedModel(match || opt);
+              } catch {}
+            }
+          };
+        }
+        return reduxApi;
+      }
+      if (nativeApi) return nativeApi;
+      return null;
+    }
+
+    const candidates = [];
+    if (btnEl) candidates.push(btnEl);
+    if (nativeBtn && !candidates.includes(nativeBtn)) candidates.push(nativeBtn);
+    const activeBtn = findModelTriggerBtn();
+    if (activeBtn && !activeBtn.hasAttribute('data-ag-pd-model-trigger') && !candidates.includes(activeBtn)) {
+      candidates.push(activeBtn);
+    }
+    for (const btn of candidates) {
+      const api = readNativeApi(btn);
+      if (api) return api;
+    }
+    return buildReduxModelSelectorApi();
+  }
+
+  function formatProjectComposerModelParts(api) {
+    const resolvedApi = api || buildReduxModelSelectorApi() || discoverModelSelectorApi();
+    if (resolvedApi) {
+      const cat = buildModelCatalog(resolvedApi);
+      if (cat.activeFamily) {
+        const name = cat.activeFamily.baseName;
+        const eff = cat.activeVariant && cat.activeVariant.effort ? displayEffortLabel(cat.activeVariant.effort) : '';
+        return { name, effort: eff };
       }
     }
-    return null;
+    const nativeBtn = document.querySelector('button[data-testid="model-selector-trigger"]');
+    const raw = nativeBtn ? (nativeBtn.textContent || '').trim().replace(/\s+/g, ' ') : '';
+    if (!raw) return { name: L('默认模型', 'Default model'), effort: '' };
+    const m = raw.match(/^(.*?)\s+(Low|Medium|High|Extra High|XHigh|Extra|Minimal)$/i);
+    if (m) return { name: m[1].trim(), effort: displayEffortLabel(EFFORT_NORM[m[2].toLowerCase()] || m[2]) };
+    return { name: raw, effort: '' };
+  }
+
+  function syncProjectDetailModelTrigger() {
+    const pdBtn = document.getElementById('ag-pd-model-btn');
+    if (!pdBtn) return;
+    const api = discoverModelSelectorApi(pdBtn);
+    const parts = formatProjectComposerModelParts(api);
+    const nameEl = pdBtn.querySelector('.ag-pd-model-name');
+    const effEl = pdBtn.querySelector('.ag-pd-model-effort');
+    if (nameEl) nameEl.textContent = parts.name;
+    if (effEl) {
+      effEl.textContent = parts.effort;
+      effEl.style.display = parts.effort ? '' : 'none';
+    }
+  }
+
+  function applyModelSelectionOption(api, targetOpt) {
+    if (!targetOpt) return;
+    if (api && typeof api.setSelectedModel === 'function') {
+      try {
+        api.setSelectedModel(targetOpt);
+      } catch {}
+    }
+    if (targetOpt.value !== undefined) {
+      try {
+        const { store } = resolveProjectsStoreAndBindings();
+        if (store && typeof store.dispatch === 'function') {
+          store.dispatch({
+            type: 'modelSelection/modelPicked',
+            payload: {
+              model: targetOpt.value,
+              ...(targetOpt.customLabel ? { customLabel: targetOpt.customLabel } : {})
+            }
+          });
+        }
+      } catch {}
+    }
+    later(() => {
+      syncModelTriggerDisplay();
+      syncProjectDetailModelTrigger();
+    }, 30);
   }
 
   function buildModelCatalog(api) {
@@ -2820,7 +3042,7 @@
             const cat = buildModelCatalog(api);
             const fam = cat.primaryFamilies.find((f) => f.baseName === baseName);
             const targetOpt = pickVariantForFamily(fam, lastPreferredEffort);
-            if (targetOpt) api.setSelectedModel(targetOpt);
+            if (targetOpt) applyModelSelectionOption(api, targetOpt);
           }
           closeClaudeModelPopover();
           return;
@@ -2854,7 +3076,7 @@
               const v = cat.activeFamily.variants.find((x) => x.effort === eff);
               if (v && v.opt) {
                 lastPreferredEffort = eff;
-                api.setSelectedModel(v.opt);
+                applyModelSelectionOption(api, v.opt);
               }
             }
           }
@@ -2869,7 +3091,7 @@
             const cat = buildModelCatalog(api);
             const entry = cat.moreFamilies.find((x) => x.fam.baseName === baseName);
             const targetOpt = entry ? pickVariantForFamily(entry.fam, lastPreferredEffort) : null;
-            if (targetOpt) api.setSelectedModel(targetOpt);
+            if (targetOpt) applyModelSelectionOption(api, targetOpt);
           }
           closeClaudeModelPopover();
         }
@@ -2888,10 +3110,21 @@
 
     const r = btn.getBoundingClientRect();
     const mainW = 254;
-    const left = Math.max(12, Math.min(Math.round(r.left), window.innerWidth - mainW - 14));
-    const bottom = Math.max(12, Math.round(window.innerHeight - r.top + 8));
+    const openBelow = btn.hasAttribute('data-ag-pd-model-trigger') || r.top < 320;
+    const rawLeft = openBelow ? Math.round(r.right - mainW) : Math.round(r.left);
+    const left = Math.max(12, Math.min(rawLeft, window.innerWidth - mainW - 14));
     mainPop.style.left = `${left}px`;
-    mainPop.style.bottom = `${bottom}px`;
+    if (openBelow) {
+      const top = Math.max(12, Math.min(Math.round(r.bottom + 8), window.innerHeight - 280));
+      mainPop.style.top = `${top}px`;
+      mainPop.style.bottom = 'auto';
+      mainPop.style.transformOrigin = 'top right';
+    } else {
+      const bottom = Math.max(12, Math.round(window.innerHeight - r.top + 8));
+      mainPop.style.top = 'auto';
+      mainPop.style.bottom = `${bottom}px`;
+      mainPop.style.transformOrigin = 'bottom left';
+    }
 
     if (subPop && subPop.getAttribute('data-open') === 'true') {
       const mr = mainPop.getBoundingClientRect();
@@ -2901,7 +3134,13 @@
         subLeft = Math.max(10, Math.round(mr.left - subW - 6));
       }
       subPop.style.left = `${subLeft}px`;
-      subPop.style.bottom = `${bottom}px`;
+      if (openBelow) {
+        subPop.style.top = mainPop.style.top;
+        subPop.style.bottom = 'auto';
+      } else {
+        subPop.style.top = 'auto';
+        subPop.style.bottom = mainPop.style.bottom;
+      }
     }
   }
 
@@ -3139,7 +3378,7 @@
     return openClaudeModelPopover(btnEl, opts);
   }
 
-  const TRIGGER_SEL = 'button[data-testid="model-selector-trigger"]';
+  const TRIGGER_SEL = 'button[data-testid="model-selector-trigger"], button[data-ag-pd-model-trigger="true"]';
 
   const onModelTriggerPointerDown = (e) => {
     if (!FEAT.modelMenu) return;
@@ -3272,7 +3511,7 @@
         if (fam) {
           stop();
           const targetOpt = pickVariantForFamily(fam, lastPreferredEffort);
-          if (targetOpt) api.setSelectedModel(targetOpt);
+          if (targetOpt) applyModelSelectionOption(api, targetOpt);
           closeClaudeModelPopover({ returnFocus: true });
         }
       }
@@ -3726,15 +3965,42 @@
     '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="7" width="9" height="6" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>';
   const PENDING_BELL_SVG =
     '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.5 6.5a3.5 3.5 0 1 0-7 0c0 3.2-1.3 4.3-1.3 4.3h9.6s-1.3-1.1-1.3-4.3"/><path d="M6.8 13a1.3 1.3 0 0 0 2.4 0"/></svg>';
+  const RECENT_PLUS_SVG =
+    '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>';
+  const RECENT_PIN_SVG =
+    '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.7 2.8l3.5 3.5-1.4 1.4-.9-.3-2.6 2.6.4 1.6-1.1 1.1-2.5-2.5-2.6 2.6-.7-.7 2.6-2.6-2.5-2.5 1.1-1.1 1.6.4 2.6-2.6-.3-.9z"/></svg>';
+  const RECENT_MORE_SVG =
+    '<svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="12.5" cy="8" r="1.2"/></svg>';
+  const RECENT_FOLDER_SVG =
+    '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.2 4.4A1.2 1.2 0 0 1 3.4 3.2h3.1l1.2 1.3h4.9a1.2 1.2 0 0 1 1.2 1.2v6.1a1.2 1.2 0 0 1-1.2 1.2H3.4a1.2 1.2 0 0 1-1.2-1.2V4.4z"/></svg>';
+  const RECENT_RENAME_SVG =
+    '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.3 2.7l2 2-7.8 7.8-2.6.6.6-2.6 7.8-7.8z"/></svg>';
+  const RECENT_ARCHIVE_SVG =
+    '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.2" y="3" width="11.6" height="2.8" rx="0.8"/><path d="M3.2 5.8v6.4a1 1 0 0 0 1 1h7.6a1 1 0 0 0 1-1V5.8"/><path d="M6.4 8.8h3.2"/></svg>';
+  const RECENT_TRASH_SVG =
+    '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4.5h10M6 4.5V3.3a.8.8 0 0 1 .8-.8h2.4a.8.8 0 0 1 .8.8v1.2"/><path d="M4.2 4.5l.7 8.1a1 1 0 0 0 1 .9h4.2a1 1 0 0 0 1-.9l.7-8.1"/></svg>';
 
   let sidebarStoreRef = null;
   let sidebarStoreUnsub = null;
   let sidebarSyncTimer = 0;
+  let cachedSidebarActionsCtx = null;
   let recentExpanded = false;
+  let recentPageLimit = 50;
   let recentLastSig = '';
+  let recentRenamingId = '';
+  let recentMenuState = null;
+  let recentMenuDocBound = false;
+  let recentItemsById = new Map();
   let recentCollapsed = (() => {
     try {
       return typeof localStorage === 'object' && localStorage && localStorage.getItem('ag_claude_ux_recent_collapsed') === '1';
+    } catch {
+      return false;
+    }
+  })();
+  let unifiedRecentCollapsed = (() => {
+    try {
+      return typeof localStorage === 'object' && localStorage && localStorage.getItem('ag_claude_ux_unified_recents_collapsed') === '1';
     } catch {
       return false;
     }
@@ -3876,61 +4142,87 @@
     let store = null;
     let router = null;
     let stepHandler = null;
+    let actionsCtx = cachedSidebarActionsCtx;
     const groupsById = new Map();
     const projectLabels = new Map();
 
-    for (let d = 0; f && d < 36; d++, f = f.return) {
-      const p = f.memoizedProps;
-      if (p && p.sidebarStore && !store) store = p.sidebarStore;
-      if (p && p.sidebarRouter && !router) router = p.sidebarRouter;
-      if (p && Array.isArray(p.sidebarGroups) && !groupsById.size) {
-        for (const g of p.sidebarGroups) {
-          if (g && g.id) {
-            groupsById.set(g.id, g.conversationIds || []);
-            if (g.label || g.name) projectLabels.set(g.id, g.label || g.name);
-          }
-        }
-      }
-      if (!groupsById.size) {
-        for (let s = f.memoizedState; s; s = s.next) {
-          const v = s.memoizedState;
-          if (Array.isArray(v) && v.length && v[0] && Array.isArray(v[0].conversationIds)) {
-            for (const g of v) {
-              if (g && g.id) {
-                groupsById.set(g.id, g.conversationIds || []);
-                const lbl = g.label || g.name || g.title;
-                if (lbl) projectLabels.set(g.id, lbl);
-              }
+    const scanFiber = (startFiber, maxDepth) => {
+      for (let cur = startFiber, d = 0; cur && d < maxDepth; d++, cur = cur.return) {
+        const p = cur.memoizedProps;
+        if (p && p.sidebarStore && !store) store = p.sidebarStore;
+        if (p && p.sidebarRouter && !router) router = p.sidebarRouter;
+        if (p && p.sidebarActions && !actionsCtx) actionsCtx = p.sidebarActions;
+        if (p && Array.isArray(p.sidebarGroups) && !groupsById.size) {
+          for (const g of p.sidebarGroups) {
+            if (g && g.id) {
+              groupsById.set(g.id, g.conversationIds || []);
+              if (g.label || g.name) projectLabels.set(g.id, g.label || g.name);
             }
-            if (groupsById.size) break;
           }
         }
-      }
-      for (let dep = f.dependencies && f.dependencies.firstContext; dep; dep = dep.next) {
-        const mv = dep.memoizedValue;
-        if (!store && mv && mv.store && typeof mv.store.getState === 'function') {
-          const st = mv.store.getState();
-          if (st && st.trajectorySummaries && st.trajectorySummaries.summaries) {
-            store = mv.store;
+        if (!groupsById.size) {
+          for (let s = cur.memoizedState; s; s = s.next) {
+            const v = s.memoizedState;
+            if (Array.isArray(v) && v.length && v[0] && Array.isArray(v[0].conversationIds)) {
+              for (const g of v) {
+                if (g && g.id) {
+                  groupsById.set(g.id, g.conversationIds || []);
+                  const lbl = g.label || g.name || g.title;
+                  if (lbl) projectLabels.set(g.id, lbl);
+                }
+              }
+              if (groupsById.size) break;
+            }
           }
         }
-        if (!router && mv && typeof mv.navigate === 'function' && mv.state && mv.state.location) {
-          router = mv;
+        for (let dep = cur.dependencies && cur.dependencies.firstContext; dep; dep = dep.next) {
+          const mv = dep.memoizedValue;
+          if (!store && mv && mv.store && typeof mv.store.getState === 'function') {
+            const st = mv.store.getState();
+            if (st && st.trajectorySummaries && st.trajectorySummaries.summaries) {
+              store = mv.store;
+            }
+          }
+          if (!router && mv && typeof mv.navigate === 'function' && mv.state && mv.state.location) {
+            router = mv;
+          }
+          if (!stepHandler && mv && mv.stepHandler && typeof mv.stepHandler.openConversation === 'function') {
+            stepHandler = mv.stepHandler;
+          }
+          if (
+            !actionsCtx &&
+            mv &&
+            (typeof mv.updateConversationAnnotations === 'function' || typeof mv.deleteCascadeTrajectory === 'function')
+          ) {
+            actionsCtx = mv;
+          }
         }
-        if (!stepHandler && mv && mv.stepHandler && typeof mv.stepHandler.openConversation === 'function') {
-          stepHandler = mv.stepHandler;
-        }
+        if (store && router && actionsCtx && groupsById.size) break;
       }
-      if (store && router && groupsById.size) break;
+    };
+
+    scanFiber(f, 36);
+    if (!actionsCtx) {
+      const anyRow = sidebar.querySelector('[data-testid="conversation-row-sidebar"]');
+      if (anyRow) scanFiber(activeReactFiber(anyRow), 36);
     }
     if (!store) return null;
+    if (actionsCtx) cachedSidebarActionsCtx = actionsCtx;
+
+    const st = store.getState && store.getState();
+    const rawProjects = (st && st.sidebarProjects && st.sidebarProjects.projects) || [];
+    for (const p of rawProjects) {
+      if (!p || !p.id || p.id === 'outside-of-project') continue;
+      const lbl = p.id === 'default-cli-project' ? L('CLI 项目', 'CLI Project') : String(p.name || '').trim();
+      if (lbl && !projectLabels.has(p.id)) projectLabels.set(p.id, lbl);
+    }
     for (const hdr of sidebar.querySelectorAll('button[data-testid="project-header"]')) {
       const drop = hdr.closest('[data-sidebar-section-drop-id]');
       const pid = drop && drop.getAttribute('data-sidebar-section-drop-id');
       const lbl = hdr.getAttribute('data-project-label') || (hdr.textContent || '').trim();
       if (pid && lbl && !projectLabels.has(pid)) projectLabels.set(pid, lbl);
     }
-    return { sidebar, store, router, stepHandler, groupsById, projectLabels };
+    return { sidebar, store, router, stepHandler, actionsCtx, groupsById, projectLabels };
   }
 
   function resolveProjectHeaderId(btn) {
@@ -4071,12 +4363,44 @@
     return `${Math.floor(diff / 86400)}d`;
   }
 
-  function resolveSummaryProjectLabel(summary, projectLabels) {
-    const pid = summary && summary.trajectoryMetadata && summary.trajectoryMetadata.projectId;
-    if (!pid || pid === 'outside-of-project') return '';
-    if (projectLabels && projectLabels.has(pid)) return projectLabels.get(pid);
-    const uri = (summary.trajectoryMetadata && summary.trajectoryMetadata.workspaceUris && summary.trajectoryMetadata.workspaceUris[0]) || '';
-    return decodeURIComponent(String(uri).split('/').filter(Boolean).pop() || '');
+  function getSidebarListHost(sidebar) {
+    if (!sidebar) return { host: null, container: null };
+    const p = sidebar.parentElement;
+    const isDedicatedWrap = Boolean(
+      p &&
+        p !== document.body &&
+        !p.classList.contains('bg-sidebar') &&
+        !p.querySelector('[data-testid="automations-button"], [data-testid="new-conversation-button"]')
+    );
+    const host = isDedicatedWrap ? p : sidebar;
+    return { host, container: host && host.parentElement };
+  }
+
+  function resolveSummaryProjectInfo(summary, projectLabels, state) {
+    const meta = (summary && summary.trajectoryMetadata) || {};
+    const pid = String(meta.projectId || (summary && summary.projectId) || '');
+    if (pid && pid !== 'outside-of-project') {
+      if (projectLabels && projectLabels.has(pid)) return { id: pid, name: projectLabels.get(pid) };
+      const rawProjects = (state && state.sidebarProjects && state.sidebarProjects.projects) || [];
+      const found = rawProjects.find((p) => p && p.id === pid);
+      if (found) {
+        const nm = found.id === 'default-cli-project' ? L('CLI 项目', 'CLI Project') : String(found.name || '').trim();
+        if (nm) return { id: pid, name: nm };
+      }
+      const uri = (meta.workspaceUris && meta.workspaceUris[0]) || '';
+      const fallback = decodeURIComponent(String(uri).split('/').filter(Boolean).pop() || '');
+      return { id: pid, name: fallback };
+    }
+    const wsUri = (meta.workspaceUris && meta.workspaceUris[0]) || '';
+    if (wsUri) {
+      const rawProjects = (state && state.sidebarProjects && state.sidebarProjects.projects) || [];
+      const found = rawProjects.find((p) => p && Array.isArray(p.folderUris) && p.folderUris.includes(wsUri));
+      if (found && found.id && found.id !== 'outside-of-project') {
+        const nm = found.id === 'default-cli-project' ? L('CLI 项目', 'CLI Project') : String(found.name || '').trim();
+        if (nm) return { id: found.id, name: nm };
+      }
+    }
+    return { id: '', name: '' };
   }
 
   function navigateSidebarConversation(id, bindings) {
@@ -4104,19 +4428,232 @@
     }
   }
 
+  function triggerNewConversationFromSidebar(bindings) {
+    const newBtn = document.querySelector('[data-testid="new-conversation-button"], a[href="/"]');
+    if (newBtn && typeof newBtn.click === 'function') {
+      try {
+        newBtn.click();
+        return;
+      } catch {}
+    }
+    if (bindings && bindings.router && typeof bindings.router.navigate === 'function') {
+      try {
+        bindings.router.navigate({ to: '/' });
+        return;
+      } catch {}
+    }
+    if (typeof history === 'object' && typeof history.pushState === 'function') {
+      history.pushState(null, '', '/');
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    }
+  }
+
+  function getSidebarActionsCtx(bindings) {
+    return (bindings && bindings.actionsCtx) || cachedSidebarActionsCtx || null;
+  }
+
+  async function mutateRecentConversationAnnotation(id, patch, bindings) {
+    const act = getSidebarActionsCtx(bindings);
+    if (!id || !act || typeof act.updateConversationAnnotations !== 'function') return false;
+    try {
+      await act.updateConversationAnnotations(id, patch, true);
+      recentLastSig = '';
+      scheduleSidebarSync();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function deleteRecentConversation(id, bindings) {
+    const act = getSidebarActionsCtx(bindings);
+    if (!id || !act || typeof act.deleteCascadeTrajectory !== 'function') return false;
+    try {
+      const wasActive = getActiveCascadeId() === id;
+      await act.deleteCascadeTrajectory(id);
+      if (wasActive) triggerNewConversationFromSidebar(bindings);
+      recentLastSig = '';
+      scheduleSidebarSync();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function closeRecentRowMenu() {
+    recentMenuState = null;
+    const menu = document.getElementById('ag-recent-row-menu');
+    if (menu) menu.remove();
+    if (recentMenuDocBound) {
+      document.removeEventListener('mousedown', onRecentMenuDocDown, true);
+      document.removeEventListener('keydown', onRecentMenuDocKey, true);
+      window.removeEventListener('resize', closeRecentRowMenu);
+      recentMenuDocBound = false;
+    }
+  }
+
+  function onRecentMenuDocDown(ev) {
+    const t = ev && ev.target;
+    if (t && t.closest && t.closest('#ag-recent-row-menu, [data-ag-recent-menu]')) return;
+    closeRecentRowMenu();
+  }
+
+  function onRecentMenuDocKey(ev) {
+    if (ev && ev.key === 'Escape') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      closeRecentRowMenu();
+    }
+  }
+
+  function startRecentInlineRename(id) {
+    if (!id) return;
+    closeRecentRowMenu();
+    recentRenamingId = id;
+    recentLastSig = '';
+    syncSidebarEnhancements();
+    frame(() => {
+      const input = document.querySelector('#ag-claude-recent-section [data-ag-recent-rename-input]');
+      if (input) {
+        input.focus();
+        try {
+          input.select();
+        } catch {}
+      }
+    });
+  }
+
+  function commitRecentInlineRename(input, commit) {
+    if (!input) return;
+    const id = input.getAttribute('data-ag-recent-rename-input') || recentRenamingId;
+    const orig = input.getAttribute('data-orig-title') || '';
+    const nextVal = String(input.value || '').trim();
+    recentRenamingId = '';
+    recentLastSig = '';
+    if (commit && id && nextVal && nextVal !== orig) {
+      mutateRecentConversationAnnotation(id, { title: nextVal }, findSidebarBindings());
+    }
+    syncSidebarEnhancements();
+  }
+
+  function renderRecentRowMenu() {
+    const st = recentMenuState;
+    if (!st) {
+      closeRecentRowMenu();
+      return;
+    }
+    let menu = document.getElementById('ag-recent-row-menu');
+    if (!menu) {
+      menu = document.createElement('div');
+      menu.id = 'ag-recent-row-menu';
+      menu.setAttribute('role', 'menu');
+      menu.setAttribute('data-ag-i18n-ignore', '1');
+      menu.addEventListener('click', (ev) => {
+        const btn = ev.target && ev.target.closest && ev.target.closest('[data-ag-rm-act]');
+        if (!btn || !recentMenuState) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        const act = btn.getAttribute('data-ag-rm-act');
+        const cur = recentMenuState;
+        const bindings = findSidebarBindings();
+        if (act === 'open-project' && cur.projectId) {
+          closeRecentRowMenu();
+          if (FEAT.projects) openProjectsView(cur.projectId);
+          return;
+        }
+        if (act === 'pin') {
+          closeRecentRowMenu();
+          mutateRecentConversationAnnotation(cur.id, { pinned: true }, bindings);
+          return;
+        }
+        if (act === 'rename') {
+          startRecentInlineRename(cur.id);
+          return;
+        }
+        if (act === 'archive') {
+          closeRecentRowMenu();
+          mutateRecentConversationAnnotation(cur.id, { archived: true }, bindings);
+          return;
+        }
+        if (act === 'delete') {
+          if (!cur.confirmDelete) {
+            cur.confirmDelete = true;
+            renderRecentRowMenu();
+            return;
+          }
+          closeRecentRowMenu();
+          deleteRecentConversation(cur.id, bindings);
+        }
+      });
+      document.body.appendChild(menu);
+    }
+
+    const canMutate = Boolean(getSidebarActionsCtx(findSidebarBindings()));
+    const projPart =
+      st.projectName && st.projectId && FEAT.projects
+        ? `<button type="button" class="ag-rm-item ag-rm-project" data-ag-rm-act="open-project" title="${escapeHtml(L('打开所属项目', 'Open project'))}">${RECENT_FOLDER_SVG}<span class="ag-rm-label">${escapeHtml(st.projectName)}</span></button><div class="ag-rm-sep"></div>`
+        : st.projectName
+          ? `<div class="ag-rm-meta">${RECENT_FOLDER_SVG}<span class="ag-rm-label">${escapeHtml(st.projectName)}</span></div><div class="ag-rm-sep"></div>`
+          : '';
+    const delLabel = st.confirmDelete ? L('确认删除？', 'Confirm delete?') : L('删除', 'Delete');
+    menu.innerHTML =
+      projPart +
+      `<button type="button" class="ag-rm-item" data-ag-rm-act="pin"${canMutate ? '' : ' disabled'}>${RECENT_PIN_SVG}<span class="ag-rm-label">${escapeHtml(L('置顶对话', 'Pin'))}</span></button>` +
+      `<button type="button" class="ag-rm-item" data-ag-rm-act="rename"${canMutate ? '' : ' disabled'}>${RECENT_RENAME_SVG}<span class="ag-rm-label">${escapeHtml(L('重命名', 'Rename'))}</span></button>` +
+      `<button type="button" class="ag-rm-item" data-ag-rm-act="archive"${canMutate ? '' : ' disabled'}>${RECENT_ARCHIVE_SVG}<span class="ag-rm-label">${escapeHtml(L('归档', 'Archive'))}</span></button>` +
+      `<div class="ag-rm-sep"></div>` +
+      `<button type="button" class="ag-rm-item ag-rm-danger" data-ag-rm-act="delete" data-confirm="${st.confirmDelete ? '1' : '0'}"${canMutate ? '' : ' disabled'}>${RECENT_TRASH_SVG}<span class="ag-rm-label">${escapeHtml(delLabel)}</span></button>`;
+
+    const menuW = 196;
+    const menuH = Math.max(152, menu.offsetHeight || 176);
+    const vw = window.innerWidth || 1200;
+    const vh = window.innerHeight || 800;
+    const left = Math.min(Math.max(8, st.x), Math.max(8, vw - menuW - 8));
+    const top = st.y + menuH > vh - 8 ? Math.max(8, st.y - menuH) : Math.max(8, st.y);
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+
+    if (!recentMenuDocBound) {
+      document.addEventListener('mousedown', onRecentMenuDocDown, true);
+      document.addEventListener('keydown', onRecentMenuDocKey, true);
+      window.addEventListener('resize', closeRecentRowMenu);
+      recentMenuDocBound = true;
+    }
+  }
+
+  function openRecentRowMenu(item, x, y) {
+    if (!item || !item.id) return;
+    if (recentMenuState && recentMenuState.id === item.id) {
+      closeRecentRowMenu();
+      return;
+    }
+    recentMenuState = {
+      id: item.id,
+      title: item.title,
+      projectId: item.projectId || '',
+      projectName: item.project || '',
+      x,
+      y,
+      confirmDelete: false
+    };
+    renderRecentRowMenu();
+  }
+
   function removeRecentSection() {
+    closeRecentRowMenu();
+    recentRenamingId = '';
     const el = document.getElementById('ag-claude-recent-section');
     if (el) el.remove();
     recentLastSig = '';
   }
 
   function syncRecentSection(bindings, state, activeId, hasFocus) {
-    if (!FEAT.recentSection || !bindings) {
+    const isUnified = Boolean(FEAT.hideSidebarProjects);
+    if ((!isUnified && !FEAT.recentSection) || !bindings) {
       removeRecentSection();
       return;
     }
-    const sbParent = bindings.sidebar.parentElement;
-    const sbGrand = sbParent && sbParent.parentElement;
+    const { host: sbParent, container: sbGrand } = getSidebarListHost(bindings.sidebar);
     if (!sbParent || !sbGrand) return;
 
     const summaries = (state && state.trajectorySummaries && state.trajectorySummaries.summaries) || {};
@@ -4130,93 +4667,224 @@
       const updatedAt = Math.max(protoSeconds(summary.lastModifiedTime), protoSeconds(summary.createdTime));
       const status = classifySidebarConversation(id, summary, state, activeId, hasFocus);
       const priority = status && status.kind === 'pending' ? 3 : status && status.kind === 'running' ? 2 : 1;
+      const projInfo = resolveSummaryProjectInfo(summary, bindings.projectLabels, state);
       list.push({
         id,
         title,
-        project: resolveSummaryProjectLabel(summary, bindings.projectLabels),
+        project: projInfo.name,
+        projectId: projInfo.id,
         updatedAt,
         status,
         priority
       });
     }
-    if (!list.length) {
+    if (!list.length && !isUnified) {
       removeRecentSection();
       return;
     }
     list.sort((a, b) => b.priority - a.priority || b.updatedAt - a.updatedAt);
-    const limit = recentExpanded ? 8 : 4;
+    recentItemsById = new Map(list.map((it) => [it.id, it]));
+    const limit = isUnified ? recentPageLimit : recentExpanded ? 8 : 4;
     const items = list.slice(0, limit);
     const total = list.length;
     const nowBucket = Math.floor(Date.now() / 30000);
     const nowSec = Math.floor(Date.now() / 1000);
+    const mode = isUnified ? 'unified' : 'compact';
 
     let sec = document.getElementById('ag-claude-recent-section');
-    if (!sec || sec.parentElement !== sbGrand) {
+    const desiredRef = isUnified ? sbParent.nextSibling : sbParent;
+    const wrongParent = !sec || sec.parentElement !== sbGrand;
+    const wrongPosition =
+      sec &&
+      sec.parentElement === sbGrand &&
+      (isUnified ? sec.previousSibling !== sbParent : sec.nextSibling !== sbParent);
+
+    if (wrongParent) {
       if (sec) sec.remove();
       sec = document.createElement('section');
       sec.id = 'ag-claude-recent-section';
       sec.setAttribute('data-ag-i18n-ignore', '1');
       sec.setAttribute('aria-label', L('最近对话', 'Recents'));
       sec.addEventListener('click', (ev) => {
+        const newBtn = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-new]');
+        if (newBtn) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          closeRecentRowMenu();
+          triggerNewConversationFromSidebar(findSidebarBindings() || bindings);
+          return;
+        }
         const hdr = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-toggle]');
         if (hdr) {
-          recentCollapsed = !recentCollapsed;
-          try {
-            localStorage.setItem('ag_claude_ux_recent_collapsed', recentCollapsed ? '1' : '0');
-          } catch {}
+          if (sec.getAttribute('data-mode') === 'unified') {
+            unifiedRecentCollapsed = !unifiedRecentCollapsed;
+            try {
+              localStorage.setItem('ag_claude_ux_unified_recents_collapsed', unifiedRecentCollapsed ? '1' : '0');
+            } catch {}
+          } else {
+            recentCollapsed = !recentCollapsed;
+            try {
+              localStorage.setItem('ag_claude_ux_recent_collapsed', recentCollapsed ? '1' : '0');
+            } catch {}
+          }
           recentLastSig = '';
           syncSidebarEnhancements();
           return;
         }
         const more = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-more]');
         if (more) {
-          recentExpanded = !recentExpanded;
+          if (sec.getAttribute('data-mode') === 'unified') {
+            recentPageLimit += 50;
+          } else {
+            recentExpanded = !recentExpanded;
+          }
           recentLastSig = '';
           syncSidebarEnhancements();
+          return;
+        }
+        const pinBtn = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-pin]');
+        if (pinBtn) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          closeRecentRowMenu();
+          const cid = pinBtn.getAttribute('data-ag-recent-pin');
+          mutateRecentConversationAnnotation(cid, { pinned: true }, findSidebarBindings() || bindings);
+          return;
+        }
+        const menuBtn = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-menu]');
+        if (menuBtn) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const cid = menuBtn.getAttribute('data-ag-recent-menu');
+          const item = recentItemsById.get(cid);
+          const r = menuBtn.getBoundingClientRect();
+          openRecentRowMenu(item, r.right + 4, r.bottom + 4);
+          return;
+        }
+        if (ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-rename-input]')) {
+          ev.stopPropagation();
           return;
         }
         const row = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-id]');
         if (row) {
           const cid = row.getAttribute('data-ag-recent-id');
+          if (recentRenamingId && recentRenamingId === cid) return;
+          closeRecentRowMenu();
           const curBindings = findSidebarBindings() || bindings;
           navigateSidebarConversation(cid, curBindings);
           scheduleSidebarSync();
         }
       });
-      sbGrand.insertBefore(sec, sbParent);
+      sec.addEventListener('contextmenu', (ev) => {
+        if (sec.getAttribute('data-mode') !== 'unified') return;
+        const row = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-id]');
+        if (!row) return;
+        const cid = row.getAttribute('data-ag-recent-id');
+        if (recentRenamingId && recentRenamingId === cid) return;
+        const item = recentItemsById.get(cid);
+        if (!item) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        openRecentRowMenu(item, ev.clientX + 2, ev.clientY + 2);
+      });
+      sec.addEventListener('keydown', (ev) => {
+        const input = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-rename-input]');
+        if (input) {
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            ev.stopPropagation();
+            commitRecentInlineRename(input, true);
+          } else if (ev.key === 'Escape') {
+            ev.preventDefault();
+            ev.stopPropagation();
+            commitRecentInlineRename(input, false);
+          }
+          return;
+        }
+        const row = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-id]');
+        if (row && (ev.key === 'Enter' || ev.key === ' ')) {
+          ev.preventDefault();
+          const cid = row.getAttribute('data-ag-recent-id');
+          navigateSidebarConversation(cid, findSidebarBindings() || bindings);
+          scheduleSidebarSync();
+        }
+      });
+      sec.addEventListener(
+        'blur',
+        (ev) => {
+          const input = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-rename-input]');
+          if (input) commitRecentInlineRename(input, true);
+        },
+        true
+      );
+      sbGrand.insertBefore(sec, desiredRef);
+      recentLastSig = '';
+    } else if (wrongPosition) {
+      sbGrand.insertBefore(sec, desiredRef);
       recentLastSig = '';
     }
 
-    const sig = `${FEAT.i18n ? 1 : 0}|${recentCollapsed ? 1 : 0}|${recentExpanded ? 1 : 0}|${activeId}|${nowBucket}|${total}|${items
+    if (sec.getAttribute('data-mode') !== mode) {
+      sec.setAttribute('data-mode', mode);
+      recentLastSig = '';
+    }
+
+    if (recentRenamingId && sec.querySelector('[data-ag-recent-rename-input]')) {
+      return;
+    }
+
+    const isCollapsed = isUnified ? unifiedRecentCollapsed : recentCollapsed;
+    const sig = `${mode}|${FEAT.i18n ? 1 : 0}|${isCollapsed ? 1 : 0}|${isUnified ? recentPageLimit : recentExpanded ? 1 : 0}|${recentRenamingId}|${activeId}|${nowBucket}|${total}|${items
       .map((it) => `${it.id}:${it.title}:${it.project}:${it.status ? `${it.status.kind}-${it.status.subkind}` : 'idle'}:${Math.floor(it.updatedAt / 60)}`)
       .join(';')}`;
     if (sig === recentLastSig) return;
     recentLastSig = sig;
     sec.setAttribute('aria-label', L('最近对话', 'Recents'));
 
-    const rowsHtml = recentCollapsed
-      ? ''
-      : `<div class="ag-recent-list">${items
-          .map((it) => {
-            const isAct = it.id === activeId;
-            const age = formatRelativeAge(it.updatedAt, nowSec);
-            let sideHtml = `<span>${escapeHtml(age)}</span>`;
-            if (it.status && it.status.kind === 'pending') {
-              sideHtml = `<span class="ag-claude-folder-badge" data-kind="pending">${pendingGlyphSvg(it.status.subkind)}</span>`;
-            } else if (it.status && it.status.kind === 'running') {
-              sideHtml = '<span class="ag-folder-orbit"></span>';
-            } else if (it.status && it.status.kind === 'unread') {
-              sideHtml = `<span class="ag-claude-unread-dot"></span>${age ? `<span>${escapeHtml(age)}</span>` : ''}`;
-            }
-            const tip = it.project ? `${it.title}\n${L('所属项目：', 'Project: ')}${it.project}` : it.title;
-            return `<button type="button" class="ag-recent-row" data-ag-recent-id="${escapeHtml(it.id)}" data-active="${isAct ? 'true' : 'false'}" title="${escapeHtml(tip)}"><div class="ag-recent-main"><div class="ag-recent-title">${escapeHtml(it.title)}</div></div><div class="ag-recent-side">${sideHtml}</div></button>`;
-          })
-          .join('')}</div>` +
-        (total > 4
-          ? `<button type="button" class="ag-recent-more" data-ag-recent-more>${recentExpanded ? L('收起', 'Show less') : L('展开更多', 'Show more')}</button>`
-          : '');
+    const headerHtml = isUnified
+      ? `<div class="ag-recent-hdr-bar"><button type="button" class="ag-recent-hdr" data-ag-recent-toggle aria-expanded="${!isCollapsed}"><span>${L('最近对话', 'Recents')}</span><span class="ag-recent-chevron">▾</span></button><button type="button" class="ag-recent-new-btn" data-ag-recent-new title="${escapeHtml(L('新建对话', 'New conversation'))}" aria-label="${escapeHtml(L('新建对话', 'New conversation'))}">${RECENT_PLUS_SVG}</button></div>`
+      : `<button type="button" class="ag-recent-hdr" data-ag-recent-toggle aria-expanded="${!isCollapsed}"><span>${L('最近对话', 'Recents')}</span><span class="ag-recent-chevron">▾</span></button>`;
 
-    sec.innerHTML = `<button type="button" class="ag-recent-hdr" data-ag-recent-toggle aria-expanded="${!recentCollapsed}"><span>${L('最近对话', 'Recents')}</span><span class="ag-recent-chevron">▾</span></button>${rowsHtml}`;
+    const moreHtml = isUnified
+      ? total > items.length
+        ? `<button type="button" class="ag-recent-more" data-ag-recent-more>${escapeHtml(
+            FEAT.i18n ? `显示更多（还有 ${total - items.length} 条）` : `Show more (${total - items.length} left)`
+          )}</button>`
+        : ''
+      : total > 4
+        ? `<button type="button" class="ag-recent-more" data-ag-recent-more>${recentExpanded ? L('收起', 'Show less') : L('展开更多', 'Show more')}</button>`
+        : '';
+
+    const rowsHtml = isCollapsed
+      ? ''
+      : items.length
+        ? `<div class="ag-recent-list">${items
+            .map((it) => {
+              const isAct = it.id === activeId;
+              const isRenaming = isUnified && recentRenamingId === it.id;
+              const age = formatRelativeAge(it.updatedAt, nowSec);
+              let sideHtml = `<span>${escapeHtml(age)}</span>`;
+              if (it.status && it.status.kind === 'pending') {
+                sideHtml = `<span class="ag-claude-folder-badge" data-kind="pending">${pendingGlyphSvg(it.status.subkind)}</span>`;
+              } else if (it.status && it.status.kind === 'running') {
+                sideHtml = '<span class="ag-folder-orbit"></span>';
+              } else if (it.status && it.status.kind === 'unread') {
+                sideHtml = `<span class="ag-claude-unread-dot"></span>${age ? `<span>${escapeHtml(age)}</span>` : ''}`;
+              }
+              const tip = it.project ? `${it.title}\n${L('所属项目：', 'Project: ')}${it.project}` : it.title;
+              const actionsHtml =
+                isUnified && !isRenaming
+                  ? `<div class="ag-recent-actions"><button type="button" class="ag-recent-act-btn" data-ag-recent-pin="${escapeHtml(it.id)}" title="${escapeHtml(L('置顶对话', 'Pin'))}" aria-label="${escapeHtml(L('置顶对话', 'Pin'))}">${RECENT_PIN_SVG}</button><button type="button" class="ag-recent-act-btn" data-ag-recent-menu="${escapeHtml(it.id)}" title="${escapeHtml(L('更多选项', 'More options'))}" aria-label="${escapeHtml(L('更多选项', 'More options'))}">${RECENT_MORE_SVG}</button></div>`
+                  : '';
+              const mainInner = isRenaming
+                ? `<input type="text" class="ag-recent-rename-input" data-ag-recent-rename-input="${escapeHtml(it.id)}" data-orig-title="${escapeHtml(it.title)}" value="${escapeHtml(it.title)}" />`
+                : `<div class="ag-recent-title">${escapeHtml(it.title)}</div>`;
+              return `<div class="ag-recent-row" role="button" tabindex="0" data-ag-recent-id="${escapeHtml(it.id)}" data-active="${isAct ? 'true' : 'false'}"${it.project ? ` data-has-project="true"` : ''}${isRenaming ? ' data-renaming="true"' : ''} title="${escapeHtml(tip)}"><div class="ag-recent-main">${mainInner}</div>${isRenaming ? '' : `<div class="ag-recent-side">${sideHtml}</div>${actionsHtml}`}</div>`;
+            })
+            .join('')}</div>` + moreHtml
+        : `<div class="ag-recent-empty">${escapeHtml(L('暂无最近对话', 'No recent conversations'))}</div>`;
+
+    sec.innerHTML = `${headerHtml}${rowsHtml}`;
   }
 
   function scheduleSidebarSync() {
@@ -4230,7 +4898,8 @@
   function syncSidebarEnhancements() {
     if (disposed) return;
     restoreLegacySidebarCjkNodes();
-    if (!FEAT.folderStatus && !FEAT.recentSection) {
+    const unifiedRecentsOn = Boolean(FEAT.hideSidebarProjects);
+    if (!FEAT.folderStatus && !FEAT.recentSection && !unifiedRecentsOn) {
       if (sidebarStoreUnsub) {
         sidebarStoreUnsub();
         sidebarStoreUnsub = null;
@@ -4246,7 +4915,10 @@
       if (sidebarStoreUnsub) sidebarStoreUnsub();
       sidebarStoreRef = bindings.store;
       if (typeof bindings.store.subscribe === 'function') {
-        sidebarStoreUnsub = bindings.store.subscribe(() => scheduleSidebarSync());
+        sidebarStoreUnsub = bindings.store.subscribe(() => {
+          scheduleSidebarSync();
+          if (FEAT.hideSidebarProjects) syncSidebarHideNativeProjects();
+        });
       } else {
         sidebarStoreUnsub = null;
       }
@@ -4270,9 +4942,9 @@
    *       text nodes & title/placeholder/aria-label attributes with zero page reload.
    * ========================================================================== */
   const UX_I18N_BASE_EXCLUDE =
-    'code, pre, kbd, samp, textarea, input, style, script, noscript, [contenteditable="true"], [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .monaco-editor, .monaco-diff-editor, .xterm, [class*="onyx-key"], .prose, .markdown, [class*="chat-message"], [class*="group/file-title"], [data-testid="conversation-row-sidebar"] a[href^="/c/"], [data-testid="conversation-row-sidebar"] span.truncate, [data-testid="conversation-navigator-turn"], .msg-body, #raw, [data-testid="swarm-raw"], #swarm-title, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, [data-testid="model-selector-trigger"], [data-testid="model-selector-menu"], [data-testid="permissions-selector-trigger"]';
+    'code, pre, kbd, samp, textarea, input, style, script, noscript, [contenteditable="true"], [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .monaco-editor, .monaco-diff-editor, .xterm, [class*="onyx-key"], .prose, .markdown, [class*="chat-message"], [class*="group/file-title"], [data-testid="conversation-row-sidebar"] a[href^="/c/"], [data-testid="conversation-row-sidebar"] span.truncate, [data-testid="conversation-navigator-turn"], .msg-body, #raw, [data-testid="swarm-raw"], #swarm-title, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, [data-testid="model-selector-trigger"], [data-testid="model-selector-menu"], [data-testid="permissions-selector-trigger"]';
   const UX_I18N_ATTR_EXCLUDE =
-    'code, pre, kbd, samp, style, script, noscript, [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .monaco-editor, .monaco-diff-editor, .xterm, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]';
+    'code, pre, kbd, samp, style, script, noscript, [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .monaco-editor, .monaco-diff-editor, .xterm, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]';
   let uxI18nObserver = null;
   let uxI18nFlushTimer = 0;
   let uxI18nDirtyRoots = new Set();
@@ -4675,12 +5347,20 @@
           'Summarizes pending, running, and unread sessions beside collapsed project folders'
         ],
         [
-          'claudeUxRecentSection',
-          'recentSection',
-          '侧边栏顶部最近对话',
-          'Top Sidebar Recents',
-          '在侧边栏顶部按活跃优先级展示非置顶最近会话，支持跨项目无刷秒切与收起',
-          'Lists active unpinned chats at the top of the sidebar with instant cross-project switching'
+          'claudeUxProjects',
+          'projects',
+          '项目工作区与本地上下文',
+          'Projects Workspace & Local Context',
+          '在「自动化任务」与「技能与自定义」之间加入 Claude 风格项目入口，纯本地管理指令（AGENTS.md）、参考文件与定时任务',
+          'Adds a Claude-style Projects nav entry between Automations and Skills to manage local AGENTS.md, context files & scheduled tasks'
+        ],
+        [
+          'claudeUxHideSidebarProjects',
+          'hideSidebarProjects',
+          '侧栏统一「最近对话」',
+          'Unified Sidebar Recents',
+          '隐藏原生「项目」与「对话」分组，保留置顶对话并在下方用全量混排的「最近对话」统一展示全部项目与普通对话（关闭即恢复原生分组）',
+          'Replaces native Projects & standalone Conversations with a single Claude-style Recents list mixing all project and standalone chats'
         ]
       ]
     }
@@ -4758,6 +5438,12 @@
       }
       recentLastSig = '';
       if (activeInlineEdit) renderInlineEditMeta(activeInlineEdit);
+      refreshProjectsLanguageUi();
+    } else if (featKey === 'projects') {
+      if (!on) teardownProjectsWorkspace();
+      else syncProjectsWorkspace();
+    } else if (featKey === 'hideSidebarProjects') {
+      syncSidebarHideNativeProjects();
     } else if (featKey === 'modelMenu' && !on) {
       closeClaudeModelPopover();
     } else if (featKey === 'contextRing') {
@@ -4907,6 +5593,1918 @@
     settingsNavBtn = btn;
   }
 
+  /* ==========================================================================
+   * 10. Claude-Style Projects Workspace & Pure-Local Context Manager
+   *     - Mounts a `Projects` (`项目`) nav entry with Claude's stacked-box icon
+   *       between `Automations` (`automations-button`) and `Skills` (`/customizations`).
+   *     - Opens a right-pane Projects card wall reading real `sidebarProjects.projects`.
+   *     - Clicking any project opens a Claude-style pure-local config modal for
+   *       `Instructions` & `Add files` (written directly to `<dir>/AGENTS.md` +
+   *       `<dir>/.anti-claude/files/` via `window.__agProjectCall`).
+   * ========================================================================== */
+  const SVG_CLAUDE_PROJECTS_ICON =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M5.25 2.75h5.5"/>' +
+    '<path d="M3.75 5.25h8.5"/>' +
+    '<path d="M2.6 7.75h10.8l-.68 4.8a1.4 1.4 0 0 1-1.39 1.2H4.67a1.4 1.4 0 0 1-1.39-1.2l-.68-4.8Z"/>' +
+    '</svg>';
+
+  const SVG_PROJ_SEARCH_ICON =
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7.2" cy="7.2" r="4.6"/><path d="M10.8 10.8l2.8 2.8"/></svg>';
+
+  const SVG_PROJ_UPLOAD_ICON =
+    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>';
+
+  let projectsViewOpen = false;
+  let activeProjectId = null; // null = Level 1 grid; string = Level 2 project detail workspace
+  let projectsSearchQuery = '';
+  let projectsSortMode = 'recent'; // 'recent' | 'name'
+  let projectsContextMap = {};
+  let projectsSidebarRo = null;
+  let projectsSidebarRoTarget = null;
+  let projectsViewEl = null;
+  let projectsModalEl = null;
+  let projectsModalState = null; // { project, dirPath, instructions, hasOtherAgentsMd, saving, error }
+  let projectsDocListenerBound = false;
+  let projectsContextBusy = false;
+  let projectFolderDropdownOpen = false;
+  let projectFolderSearch = '';
+  let projectSelectedFolderPath = '';
+
+  const SVG_PROJ_CHEVRON =
+    '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 6.2L8 9.8l3.5-3.6"/></svg>';
+
+  const SVG_PROJ_FOLDER_ADD =
+    '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.3 1.5h4.7A1.5 1.5 0 0 1 14 6v2.2M2 4.5v7A1.5 1.5 0 0 0 3.5 13H8"/><path d="M11.5 9.2v4.6M9.2 11.5h4.6"/></svg>';
+
+  const SVG_PROJ_SEND_ARROW =
+    '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 12.5V3.5M4 7.2L8 3.2l4 4"/></svg>';
+
+  const SVG_PROJ_FOLDER_OPEN =
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.3 1.5h4.7A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5v-7Z"/></svg>';
+
+  const SVG_PROJ_PLUS =
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>';
+
+  const SVG_PROJ_EDIT =
+    '<svg width="13.5" height="13.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.2 2.4a1.4 1.4 0 0 1 2 2L5.5 12.1 2.7 13l.9-2.8 7.6-7.8Z"/></svg>';
+
+  function decodeFileUriToPath(uri) {
+    const s = String(uri || '').trim();
+    if (!s) return '';
+    if (!/^file:\/\//i.test(s)) return s;
+    try {
+      let p = decodeURIComponent(new URL(s).pathname);
+      if (/^\/[A-Za-z]:/.test(p)) p = p.slice(1);
+      return p;
+    } catch {
+      return '';
+    }
+  }
+
+  function formatShortHomePath(absPath) {
+    const p = String(absPath || '').trim();
+    if (!p) return '';
+    return p.replace(/^\/Users\/[^/]+/, '~').replace(/^\/home\/[^/]+/, '~').replace(/^[A-Za-z]:\\Users\\[^\\]+/i, '~');
+  }
+
+  function formatProjectBytes(bytes) {
+    const n = Number(bytes) || 0;
+    if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${n} B`;
+  }
+
+  function formatProjectTimeAgo(sec) {
+    const s = Number(sec) || 0;
+    if (!s) return '';
+    const diff = Math.max(0, Math.floor(Date.now() / 1000) - s);
+    if (diff < 60) return L('刚刚', 'now');
+    if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+    if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+    const days = Math.floor(diff / 86400);
+    if (days < 30) return FEAT.i18n ? `${days} 天前` : `${days}d ago`;
+    const dt = new Date(s * 1000);
+    return `${dt.getMonth() + 1}/${dt.getDate()}`;
+  }
+
+  function resolveProjectsStoreAndBindings() {
+    const bindings = findSidebarBindings();
+    let store = (bindings && bindings.store) || sidebarStoreRef || null;
+    if (!store) {
+      const anchors = [
+        document.querySelector('[data-testid="project-header"]'),
+        document.querySelector('[data-testid="automations-button"]'),
+        document.querySelector('.bg-sidebar')
+      ];
+      for (const anchor of anchors) {
+        let f = anchor ? activeReactFiber(anchor) : null;
+        for (let d = 0; f && d < 36 && !store; d++, f = f.return) {
+          for (let dep = f.dependencies && f.dependencies.firstContext; dep; dep = dep.next) {
+            const mv = dep.memoizedValue;
+            if (mv && mv.store && typeof mv.store.getState === 'function') {
+              store = mv.store;
+              break;
+            }
+          }
+        }
+        if (store) break;
+      }
+    }
+    return { store, bindings };
+  }
+
+  function collectProjectConversations(project, state) {
+    if (!project || !state) return [];
+    const summaries = (state.trajectorySummaries && state.trajectorySummaries.summaries) || {};
+    const byProject = state.trajectorySummaries && state.trajectorySummaries.indexes && state.trajectorySummaries.indexes.byProject;
+    const rawIds = byProject && byProject[project.id];
+    const candidateIds = new Set();
+
+    if (rawIds) {
+      const arr =
+        typeof rawIds[Symbol.iterator] === 'function'
+          ? Array.from(rawIds)
+          : typeof rawIds === 'object'
+            ? Object.keys(rawIds)
+            : [];
+      for (const id of arr) candidateIds.add(id);
+    }
+
+    const normDir = String(project.dirPath || '').replace(/\/+$/, '');
+    for (const [cid, sum] of Object.entries(summaries)) {
+      if (!sum) continue;
+      const pid = sum.projectId || (sum.trajectoryMetadata && sum.trajectoryMetadata.projectId) || '';
+      if (pid === project.id) {
+        candidateIds.add(cid);
+        continue;
+      }
+      if (normDir) {
+        const wsList = (sum.workspaces || []).concat((sum.trajectoryMetadata && sum.trajectoryMetadata.workspaces) || []);
+        for (const ws of wsList) {
+          const rawUri = ws && (ws.workspaceFolderAbsoluteUri || ws.uri || ws);
+          const norm = typeof rawUri === 'string' ? decodeFileUriToPath(rawUri).replace(/\/+$/, '') : '';
+          if (norm && norm === normDir) {
+            candidateIds.add(cid);
+            break;
+          }
+        }
+      }
+    }
+
+    const items = [];
+    for (const cid of candidateIds) {
+      const sum = summaries[cid];
+      if (!sum || !isSidebarVisibleSummary(cid, sum, state)) continue;
+      const title = String((sum.annotations && sum.annotations.title) || sum.summary || '').trim();
+      if (!title) continue;
+      const lastSec = protoSeconds(sum.lastModifiedTime);
+      const status = sum.status ?? 0;
+      const waiting = Boolean(sum.waitingSteps && sum.waitingSteps.length);
+      const running = !sum.killed && (status === 2 || status === 3 || status === 4 || Boolean(sum.hasRunningSubagents));
+      items.push({
+        id: cid,
+        title,
+        lastSec,
+        pinned: Boolean(sum.annotations && sum.annotations.pinned),
+        waiting,
+        running
+      });
+    }
+    items.sort((a, b) => b.lastSec - a.lastSec);
+    return items;
+  }
+
+  function collectNativeProjects() {
+    const { store } = resolveProjectsStoreAndBindings();
+    const state = store ? store.getState() : null;
+    const rawProjects = (state && state.sidebarProjects && state.sidebarProjects.projects) || [];
+    const out = [];
+    for (const p of rawProjects) {
+      if (!p || !p.id) continue;
+      const rawName = String(p.name || '').trim();
+      if (!rawName || rawName === 'swarm/swarm_board' || p.id === 'outside-of-project') continue;
+      const isCliProject = p.id === 'default-cli-project';
+      const uris = Array.isArray(p.folderUris) ? p.folderUris : [];
+      if (!uris.length && !isCliProject) continue;
+      const dirPath = uris.length ? decodeFileUriToPath(uris[0]) : '';
+      const name = isCliProject ? L('CLI 项目', 'CLI Project') : rawName;
+      const base = { id: p.id, name, dirPath, shortPath: formatShortHomePath(dirPath), isVirtual: !dirPath };
+      const chats = collectProjectConversations(base, state);
+      out.push({
+        ...base,
+        chats,
+        chatCount: chats.length,
+        lastSec: chats.length ? chats[0].lastSec : 0
+      });
+    }
+    return out;
+  }
+
+  function positionProjectsOverlay() {
+    if (!projectsViewEl || !projectsViewOpen) return;
+    const sidebar = document.querySelector('.bg-sidebar');
+    let leftPx = 0;
+    if (sidebar) {
+      const r = sidebar.getBoundingClientRect();
+      if (r.width > 20 && r.right > 0 && r.right < window.innerWidth - 160) {
+        leftPx = Math.round(r.right);
+      }
+    }
+    projectsViewEl.style.left = `${leftPx}px`;
+  }
+
+  function ensureProjectsSidebarObserver() {
+    if (typeof ResizeObserver === 'undefined') return;
+    const sb = document.querySelector('.bg-sidebar');
+    if (!sb || projectsSidebarRoTarget === sb) return;
+    if (projectsSidebarRo) {
+      try {
+        projectsSidebarRo.disconnect();
+      } catch {}
+    }
+    projectsSidebarRoTarget = sb;
+    projectsSidebarRo = new ResizeObserver(() => positionProjectsOverlay());
+    try {
+      projectsSidebarRo.observe(sb);
+    } catch {}
+  }
+
+  function updateProjectsNavActiveVisual() {
+    const btn = document.getElementById('ag-claude-projects-nav-btn');
+    if (!btn) return;
+    btn.setAttribute('data-active', projectsViewOpen ? 'true' : 'false');
+    btn.setAttribute('aria-current', projectsViewOpen ? 'page' : 'false');
+    const lbl = btn.querySelector('.ag-proj-nav-label');
+    if (lbl) lbl.textContent = L('项目', 'Projects');
+  }
+
+  function closeProjectsModal() {
+    projectsModalState = null;
+    if (projectsModalEl) {
+      projectsModalEl.remove();
+      projectsModalEl = null;
+    }
+  }
+
+  function closeProjectsView() {
+    if (!projectsViewOpen && !projectsModalEl) return;
+    closeProjectsModal();
+    projectFolderDropdownOpen = false;
+    projectFolderSearch = '';
+    projectsViewOpen = false;
+    if (projectsViewEl) {
+      projectsViewEl.setAttribute('data-open', 'false');
+    }
+    updateProjectsNavActiveVisual();
+  }
+
+  function onProjectsGlobalClick(e) {
+    if (!projectsViewOpen) return;
+    const t = e.target;
+    if (!t || !t.closest) return;
+    if (projectFolderDropdownOpen && !t.closest('[data-ag-pd-folder-menu], [data-ag-pd-folder-toggle]')) {
+      projectFolderDropdownOpen = false;
+      projectFolderSearch = '';
+      renderProjectsView();
+    }
+    if (t.closest('#ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-recent-row-menu')) return;
+    if (
+      t.closest(
+        'a[href="/"], [data-testid="new-conversation-button"], [data-testid="automations-button"], a[href="/customizations"], [data-testid="settings-button"], [data-testid="conversation-row-sidebar"], #ag-claude-recent-section [data-ag-recent-new]'
+      ) ||
+      (t.closest('#ag-claude-recent-section .ag-recent-row') &&
+        !t.closest('[data-ag-recent-pin], [data-ag-recent-menu], [data-ag-recent-rename-input]'))
+    ) {
+      closeProjectsView();
+    }
+  }
+
+  function onProjectsGlobalKeyDown(e) {
+    if (e.key !== 'Escape') return;
+    if (projectsModalEl) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeProjectsModal();
+    } else if (projectFolderDropdownOpen) {
+      e.preventDefault();
+      e.stopPropagation();
+      projectFolderDropdownOpen = false;
+      projectFolderSearch = '';
+      renderProjectsView();
+    } else if (projectsViewOpen && activeProjectId) {
+      e.preventDefault();
+      e.stopPropagation();
+      activeProjectId = null;
+      projectSelectedFolderPath = '';
+      renderProjectsView();
+    } else if (projectsViewOpen) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeProjectsView();
+    }
+  }
+
+  function triggerNativeNewProject() {
+    const addBtn = document.querySelector('[data-testid="sidebar-add-project-button"]');
+    if (addBtn) {
+      closeProjectsView();
+      addBtn.click();
+    }
+  }
+
+  function openConversationFromProject(cid) {
+    const { bindings } = resolveProjectsStoreAndBindings();
+    closeProjectsView();
+    if (cid) navigateSidebarConversation(cid, bindings);
+  }
+
+  function startNewChatInProject(project, initialPrompt = '') {
+    const { store, bindings } = resolveProjectsStoreAndBindings();
+    const prompt = String(initialPrompt || '').trim();
+    const prevInputBox = document.getElementById('antigravity.agentSidePanelInputBox');
+    const prevPath =
+      bindings && bindings.router && bindings.router.state && bindings.router.state.location
+        ? bindings.router.state.location.pathname
+        : '';
+    const wasOnHome = prevPath === '/';
+
+    if (store && typeof store.dispatch === 'function' && project && project.id) {
+      try {
+        store.dispatch({ type: 'newConvoResourceSelector/setMagicWorkspaceSelected', payload: false });
+        store.dispatch({ type: 'newConvoResourceSelector/setPseudoProjectSelected', payload: false });
+        store.dispatch({ type: 'newConvoResourceSelector/setLastSelectedProject', payload: project.id });
+      } catch {}
+    }
+    if (modelPopoverOpen) closeClaudeModelPopover();
+    closeProjectsView();
+    if (bindings && bindings.router && typeof bindings.router.navigate === 'function') {
+      try {
+        bindings.router.navigate({
+          to: '/',
+          search: project && project.id ? { project: project.id } : {}
+        });
+      } catch {}
+    } else {
+      const newBtn = document.querySelector('[data-testid="new-conversation-button"]');
+      if (newBtn) newBtn.click();
+    }
+
+    if (!prompt) return;
+    let tries = 0;
+    let landedAtTry = -1;
+    const trySubmit = () => {
+      if (disposed) return;
+      const loc = bindings && bindings.router && bindings.router.state && bindings.router.state.location;
+      const atHome = !loc || loc.pathname === '/';
+      const projectMatched = !loc || !project || !project.id || (loc.search && loc.search.project === project.id);
+      const box = document.getElementById('antigravity.agentSidePanelInputBox');
+      const readyDom = Boolean(box && (wasOnHome || box !== prevInputBox || tries >= 16));
+      if (!atHome || !projectMatched || !readyDom) {
+        if (++tries < 35) later(trySubmit, 70);
+        return;
+      }
+      /* Give the newly mounted Home composer one extra tick so its project & workspace hooks settle */
+      if (landedAtTry === -1) {
+        landedAtTry = tries;
+        later(trySubmit, 140);
+        return;
+      }
+      let handleSubmit = null;
+      let f = activeReactFiber(box);
+      for (let d = 0; f && d < 36 && !handleSubmit; d++, f = f.return) {
+        if (f.memoizedProps && typeof f.memoizedProps.handleSubmit === 'function') {
+          handleSubmit = f.memoizedProps.handleSubmit;
+        }
+      }
+      if (handleSubmit) {
+        try {
+          handleSubmit([{ chunk: { case: 'text', value: prompt } }], [], true);
+        } catch {}
+        return;
+      }
+      if (++tries < 35) later(trySubmit, 70);
+    };
+    later(trySubmit, 110);
+  }
+
+  async function saveProjectContextDelta(project, mutator) {
+    if (!project || !project.dirPath || projectsContextBusy || typeof window.__agProjectCall !== 'function') return;
+    projectsContextBusy = true;
+    try {
+      let cur = projectsContextMap[project.dirPath];
+      if (!cur || !cur.ok) {
+        cur = await window.__agProjectCall('readContext', { dirPath: project.dirPath }, 8000);
+      }
+      const existingFiles = (cur && Array.isArray(cur.files) ? cur.files : []).map((f) => ({
+        action: 'keep',
+        relPath: f.relPath,
+        name: f.name,
+        absPath: f.absPath
+      }));
+      const existingFolders = (cur && Array.isArray(cur.extraFolders) ? cur.extraFolders : []).map((f) => ({
+        name: f.name,
+        absPath: f.absPath
+      }));
+      const draft = {
+        instructions: (cur && cur.instructions) || '',
+        files: existingFiles,
+        extraFolders: existingFolders
+      };
+      const updated = mutator(draft);
+      if (!updated) return;
+      const saved = await window.__agProjectCall(
+        'saveContext',
+        {
+          dirPath: project.dirPath,
+          instructions: updated.instructions,
+          files: updated.files.map((x) =>
+            x.action === 'keep'
+              ? { action: 'keep', relPath: x.relPath, name: x.name }
+              : x.action === 'add'
+                ? { action: 'add', sourcePath: x.sourcePath, name: x.name }
+                : { action: 'addContent', name: x.name, base64: x.base64 }
+          ),
+          extraFolders: updated.extraFolders
+        },
+        30000
+      );
+      if (!disposed && saved && saved.ok) {
+        projectsContextMap[project.dirPath] = saved;
+        if (projectsViewOpen) renderProjectsView();
+      }
+    } finally {
+      projectsContextBusy = false;
+    }
+  }
+
+  async function saveFilesDeltaForProject(project, mutator) {
+    return saveProjectContextDelta(project, (draft) => {
+      const nextFiles = mutator(draft.files);
+      if (!nextFiles) return null;
+      return Object.assign({}, draft, { files: nextFiles });
+    });
+  }
+
+  async function pickAndAddFolderToProject(project) {
+    if (!project || !project.dirPath || typeof window.__agProjectCall !== 'function') return;
+    const picked = await window.__agProjectCall('pickFolder', {}, 120000);
+    if (disposed || !picked || !picked.ok || picked.canceled || !picked.folderPath) return;
+    const fp = picked.folderPath;
+    if (fp === project.dirPath) {
+      projectSelectedFolderPath = fp;
+      projectFolderDropdownOpen = false;
+      if (projectsViewOpen) renderProjectsView();
+      return;
+    }
+    await saveProjectContextDelta(project, (draft) => {
+      const next = draft.extraFolders.slice();
+      if (!next.some((f) => f.absPath === fp)) {
+        next.push({ name: picked.name || fp.split(/[\\/]/).pop() || fp, absPath: fp });
+      }
+      return Object.assign({}, draft, { extraFolders: next });
+    });
+    projectSelectedFolderPath = fp;
+    projectFolderDropdownOpen = false;
+    if (projectsViewOpen) renderProjectsView();
+  }
+
+  async function removeExtraFolderFromProject(project, absPath) {
+    if (!project || !absPath) return;
+    if (projectSelectedFolderPath === absPath) projectSelectedFolderPath = project.dirPath;
+    await saveProjectContextDelta(project, (draft) =>
+      Object.assign({}, draft, { extraFolders: draft.extraFolders.filter((f) => f.absPath !== absPath) })
+    );
+  }
+
+  async function pickAndAddFilesToProject(project) {
+    if (!project || !project.dirPath || typeof window.__agProjectCall !== 'function') return;
+    const picked = await window.__agProjectCall('pickFiles', {}, 120000);
+    if (disposed || !picked || !picked.ok || !Array.isArray(picked.paths) || !picked.paths.length) return;
+    await saveFilesDeltaForProject(project, (ops) => {
+      const next = ops.slice();
+      for (const p of picked.paths) {
+        if (!next.some((x) => x.absPath === p || x.sourcePath === p)) {
+          next.push({ action: 'add', sourcePath: p, name: p.split(/[\\/]/).pop() || p });
+        }
+      }
+      return next;
+    });
+  }
+
+  async function addDroppedFilesToProject(project, fileList) {
+    if (!project || !project.dirPath || !fileList || !fileList.length) return;
+    const en = window.electronNative;
+    const additions = [];
+    for (const f of Array.from(fileList)) {
+      if (!f) continue;
+      let realPath = '';
+      if (en && typeof en.getPathForFile === 'function') {
+        try {
+          realPath = en.getPathForFile(f) || '';
+        } catch {}
+      }
+      if (!realPath && typeof f.path === 'string' && f.path) realPath = f.path;
+      if (realPath) {
+        additions.push({ action: 'add', sourcePath: realPath, name: f.name || realPath.split(/[\\/]/).pop() });
+      } else if (typeof FileReader !== 'undefined' && f.size <= 25 * 1024 * 1024) {
+        const b64 = await new Promise((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const s = String(reader.result || '');
+            const i = s.indexOf(',');
+            resolve(i >= 0 ? s.slice(i + 1) : '');
+          };
+          reader.onerror = () => resolve('');
+          reader.readAsDataURL(f);
+        });
+        if (b64) additions.push({ action: 'addContent', name: f.name, base64: b64 });
+      }
+    }
+    if (!additions.length) return;
+    await saveFilesDeltaForProject(project, (ops) => ops.concat(additions));
+  }
+
+  async function removeFileFromProject(project, relPath) {
+    if (!project || !relPath) return;
+    await saveFilesDeltaForProject(project, (ops) => ops.filter((x) => x.relPath !== relPath));
+  }
+
+  async function refreshProjectsContexts(projects) {
+    if (typeof window.__agProjectCall !== 'function') return;
+    const paths = projects.map((p) => p.dirPath).filter(Boolean);
+    if (!paths.length) return;
+    const res = await window.__agProjectCall('listContexts', { paths }, 8000);
+    if (disposed || !res || !res.ok || !res.contexts) return;
+    projectsContextMap = Object.assign({}, projectsContextMap, res.contexts);
+    if (projectsViewOpen) renderProjectsView();
+  }
+
+  function ensureProjectsViewEl() {
+    if (projectsViewEl && projectsViewEl.isConnected) return projectsViewEl;
+    const el = document.createElement('section');
+    el.id = 'ag-claude-projects-view';
+    el.setAttribute('data-ag-i18n-ignore', '1');
+    el.setAttribute('data-open', 'false');
+    el.setAttribute('aria-label', L('项目工作区', 'Projects Workspace'));
+    document.body.appendChild(el);
+    projectsViewEl = el;
+    return el;
+  }
+
+  function renderProjectDetailView(el, project) {
+    const hasLocalDir = Boolean(project.dirPath);
+    const ctx = hasLocalDir ? projectsContextMap[project.dirPath] : null;
+    const instructions = ctx && typeof ctx.instructions === 'string' ? ctx.instructions.trim() : '';
+    const files = ctx && Array.isArray(ctx.files) ? ctx.files : [];
+    const extraFolders = ctx && Array.isArray(ctx.extraFolders) ? ctx.extraFolders : [];
+    const allFolders = hasLocalDir
+      ? [
+          { name: project.name, absPath: project.dirPath, primary: true },
+          ...extraFolders.map((f) => ({ name: f.name || f.absPath.split(/[\\/]/).pop(), absPath: f.absPath, primary: false }))
+        ]
+      : [];
+    const activeFolder = allFolders.length
+      ? allFolders.find((f) => f.absPath === projectSelectedFolderPath) || allFolders[0]
+      : { name: project.name, absPath: '', primary: true };
+    const folderTriggerLabel =
+      extraFolders.length > 0 && activeFolder.primary
+        ? FEAT.i18n
+          ? `${activeFolder.name}（+${extraFolders.length} 个文件夹）`
+          : `${activeFolder.name} (+${extraFolders.length})`
+        : activeFolder.name;
+
+    const modelParts = formatProjectComposerModelParts(buildReduxModelSelectorApi() || discoverModelSelectorApi());
+
+    const chatsHtml = project.chats.length
+      ? project.chats
+          .map((c) => {
+            const statusDot = c.waiting
+              ? `<span class="ag-pd-dot ag-pd-dot-wait" title="${escapeHtml(L('待确认', 'Waiting'))}"></span>`
+              : c.running
+                ? `<span class="ag-pd-dot ag-pd-dot-run" title="${escapeHtml(L('运行中', 'Running'))}"></span>`
+                : '';
+            const timeTxt = c.lastSec ? formatProjectTimeAgo(c.lastSec) : '';
+            return `<button type="button" class="ag-pd-chat-row" data-ag-pd-chat="${escapeHtml(c.id)}">
+              <div class="ag-pd-chat-main">
+                <span class="ag-pd-chat-title">${statusDot}${escapeHtml(c.title)}</span>
+              </div>
+              <span class="ag-pd-chat-time">${escapeHtml(timeTxt)}</span>
+            </button>`;
+          })
+          .join('')
+      : `<div class="ag-pd-chat-empty">${L(
+          '这个项目下还没有历史对话，在上方输入内容即可直接开始第一场对话。',
+          'No conversations in this project yet. Start one above.'
+        )}</div>`;
+
+    const instBodyHtml = instructions
+      ? `<div class="ag-pd-inst-preview">${escapeHtml(instructions)}</div>`
+      : `<div class="ag-pd-card-muted">${L(
+          '添加项目指令，定制 AI 在本项目中的工作方式与背景约束',
+          'Add instructions to tailor responses in this project'
+        )}</div>`;
+
+    const filesBodyHtml = files.length
+      ? `<div class="ag-pd-file-list">${files
+          .map((f) => {
+            const modeTag = f.inlined
+              ? `<span class="ag-pm-tag ag-pm-tag-inline">${L('自动内联', 'Inline')}</span>`
+              : `<span class="ag-pm-tag">${L('按需读取', 'On-demand')}</span>`;
+            return `<div class="ag-pd-file-row">
+              <button type="button" class="ag-pd-file-name" data-ag-pd-reveal-file="${escapeHtml(f.absPath || '')}" title="${escapeHtml(f.absPath || f.name)}">${escapeHtml(f.name)}</button>
+              <span class="ag-pd-file-meta">${modeTag}<span>${escapeHtml(f.sizeText || '')}</span></span>
+              <button type="button" class="ag-pd-file-del" data-ag-pd-rm-file="${escapeHtml(f.relPath)}" aria-label="${escapeHtml(L('移除文件', 'Remove file'))}">×</button>
+            </div>`;
+          })
+          .join('')}</div>`
+      : `<div class="ag-pd-card-muted">${L(
+          '尚未添加参考文件。点右上角 + 或直接把文件拖到这里。',
+          'No context added yet. Click + or drop files here.'
+        )}</div>`;
+
+    const scheduledTasks = ctx && Array.isArray(ctx.scheduledTasks) ? ctx.scheduledTasks : [];
+    const formatSchedFreq = (t) => {
+      const f = String((t && t.frequency) || 'manual');
+      if (f === 'manual') return L('手动', 'Manual');
+      if (f === 'hourly') return `${L('每小时', 'Hourly')} :${String(t.minute || 0).padStart(2, '0')}`;
+      if (f === 'daily') return `${L('每天', 'Daily')} ${t.time || '09:00'}`;
+      if (f === 'weekdays') return `${L('工作日', 'Weekdays')} ${t.time || '09:00'}`;
+      if (f === 'weekly') {
+        const dowsZh = ['日', '一', '二', '三', '四', '五', '六'];
+        const dowsEn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        const idx = Math.min(6, Math.max(0, Number(t.dayOfWeek) || 1));
+        return `${L(`每周${dowsZh[idx]}`, `Weekly ${dowsEn[idx]}`)} ${t.time || '09:00'}`;
+      }
+      return t.customCron || 'Cron';
+    };
+    const hasSyncedCron = scheduledTasks.some((t) => t && t.frequency !== 'manual');
+    const scheduledBodyHtml = scheduledTasks.length
+      ? `<div class="ag-pd-sched-list">${scheduledTasks
+          .map((t) => {
+            const freqLabel = formatSchedFreq(t);
+            const isAuto = t.frequency && t.frequency !== 'manual';
+            return `<div class="ag-pd-sched-row" data-ag-pd-sched-id="${escapeHtml(t.id)}">
+              <button type="button" class="ag-pd-sched-main" data-ag-pd-edit-sched="${escapeHtml(t.id)}" title="${escapeHtml(t.description || t.name)}">
+                <div class="ag-pd-sched-top">
+                  <span class="ag-pd-sched-name">${escapeHtml(t.name)}</span>
+                  <span class="ag-pm-tag${isAuto ? ' ag-pm-tag-inline' : ''}">${escapeHtml(freqLabel)}</span>
+                </div>
+                ${t.description ? `<div class="ag-pd-sched-desc">${escapeHtml(t.description)}</div>` : ''}
+              </button>
+              <button type="button" class="ag-pd-sched-run" data-ag-pd-run-sched="${escapeHtml(t.id)}" title="${escapeHtml(L('立即运行一次', 'Run now'))}" aria-label="${escapeHtml(L('立即运行', 'Run now'))}">▶</button>
+              <button type="button" class="ag-pd-file-del" data-ag-pd-del-sched="${escapeHtml(t.id)}" aria-label="${escapeHtml(L('删除定时任务', 'Delete scheduled task'))}">×</button>
+            </div>`;
+          })
+          .join('')}</div>${
+          hasSyncedCron
+            ? `<button type="button" class="ag-pd-sched-auto-link" data-ag-pd-open-automations="true">${L(
+                '在「自动化任务」中启用与管理 ↗',
+                'Enable & manage in Automations ↗'
+              )}</button>`
+            : ''
+        }`
+      : `<div class="ag-pd-card-muted">${L(
+          '为这个项目设置定期自动执行的任务。',
+          'Set up recurring tasks for this project.'
+        )}</div>`;
+
+    const fq = projectFolderSearch.trim().toLowerCase();
+    const filteredFolders = allFolders.filter(
+      (f) => !fq || f.name.toLowerCase().includes(fq) || f.absPath.toLowerCase().includes(fq)
+    );
+    const folderMenuHtml = projectFolderDropdownOpen
+      ? `<div class="ag-pd-folder-menu" data-ag-pd-folder-menu="true">
+          <div class="ag-pd-fm-search">
+            ${SVG_PROJ_SEARCH_ICON}
+            <input id="ag-pd-fm-search-input" type="search" value="${escapeHtml(projectFolderSearch)}" placeholder="${escapeHtml(L('搜索文件夹…', 'Search folders…'))}" />
+          </div>
+          <div class="ag-pd-fm-list">${filteredFolders
+            .map((fld) => {
+              const isSelected = fld.absPath === activeFolder.absPath;
+              return `<div class="ag-pd-fm-item" data-selected="${isSelected ? 'true' : 'false'}" data-ag-pd-select-folder="${escapeHtml(fld.absPath)}">
+                <span class="ag-pd-fm-icon">${SVG_PROJ_FOLDER_OPEN}</span>
+                <div class="ag-pd-fm-text">
+                  <div class="ag-pd-fm-name">${escapeHtml(fld.name)}${fld.primary ? ` <span class="ag-pd-fm-badge">${L('主目录', 'Primary')}</span>` : ''}</div>
+                  <div class="ag-pd-fm-path">${escapeHtml(fld.absPath)}</div>
+                </div>
+                ${
+                  fld.primary
+                    ? ''
+                    : `<button type="button" class="ag-pd-file-del" data-ag-pd-rm-folder="${escapeHtml(fld.absPath)}" aria-label="${escapeHtml(L('移除文件夹', 'Remove folder'))}">×</button>`
+                }
+              </div>`;
+            })
+            .join('')}</div>
+          <div class="ag-pd-fm-divider"></div>
+          <button type="button" class="ag-pd-fm-add" data-ag-pd-add-folder="true">
+            ${SVG_PROJ_FOLDER_ADD}
+            <span>${L('添加文件夹', 'Add folder')}</span>
+          </button>
+        </div>`
+      : '';
+
+    const prevFmSearch = el.querySelector('#ag-pd-fm-search-input');
+    const hadFmFocus = prevFmSearch && document.activeElement === prevFmSearch;
+    const fmSelStart = hadFmFocus ? prevFmSearch.selectionStart : null;
+
+    el.innerHTML = `
+      <div class="ag-pd-topbar">
+        <nav class="ag-pd-breadcrumb" aria-label="Breadcrumb">
+          <button type="button" class="ag-pd-crumb-root" data-ag-pd-back="true">${L('项目', 'Projects')}</button>
+          <span class="ag-pd-crumb-sep">/</span>
+          <span class="ag-pd-crumb-cur">${escapeHtml(project.name)}</span>
+        </nav>
+      </div>
+      <div class="ag-pd-shell">
+        <div class="ag-pd-title-row">
+          <h1 class="ag-pd-title">${escapeHtml(project.name)}</h1>
+        </div>
+        <div class="ag-pd-columns">
+          <div class="ag-pd-left">
+            <div class="ag-pd-composer-anchor">
+              <div class="ag-pd-composer-wrap">
+                <div class="ag-pd-composer-box">
+                  <textarea id="ag-pd-composer-input" class="ag-pd-composer-input" rows="2" placeholder="${escapeHtml(
+                    L('想在这个项目里处理什么？', 'What would you like to work on in this project?')
+                  )}"></textarea>
+                  <div class="ag-pd-composer-foot">
+                    ${
+                      hasLocalDir
+                        ? `<button type="button" class="ag-pd-composer-add" data-ag-pd-composer-add="true" title="${escapeHtml(L('添加参考文件到本项目', 'Add context files to project'))}" aria-label="${escapeHtml(L('添加参考文件', 'Add files'))}">${SVG_PROJ_PLUS}</button>`
+                        : '<span></span>'
+                    }
+                    <div class="ag-pd-composer-right">
+                      <button type="button" id="ag-pd-model-btn" class="ag-pd-model-btn" data-ag-pd-model-trigger="true" aria-haspopup="menu" aria-expanded="false">
+                        <span class="ag-pd-model-name">${escapeHtml(modelParts.name)}</span>
+                        <span class="ag-pd-model-effort"${modelParts.effort ? '' : ' style="display:none"'}>${escapeHtml(modelParts.effort)}</span>
+                        <span class="ag-pd-model-chev">${SVG_PROJ_CHEVRON}</span>
+                      </button>
+                      <button type="button" class="ag-pd-send-btn" data-ag-pd-send="true" aria-label="${escapeHtml(L('发送', 'Send'))}" disabled>${SVG_PROJ_SEND_ARROW}</button>
+                    </div>
+                  </div>
+                </div>
+                ${
+                  hasLocalDir
+                    ? `<div class="ag-pd-folder-bar">
+                        <button type="button" class="ag-pd-folder-trigger" data-ag-pd-folder-toggle="true" data-open="${projectFolderDropdownOpen ? 'true' : 'false'}" title="${escapeHtml(activeFolder.absPath)}">
+                          <span class="ag-pd-folder-strip-icon">${SVG_CLAUDE_PROJECTS_ICON}</span>
+                          <span class="ag-pd-folder-strip-path">${escapeHtml(folderTriggerLabel)}</span>
+                          <span class="ag-pd-folder-chevron">${SVG_PROJ_CHEVRON}</span>
+                        </button>
+                      </div>`
+                    : `<div class="ag-pd-folder-bar">
+                        <span class="ag-pd-virtual-note">${SVG_CLAUDE_PROJECTS_ICON}<span>${L('终端 CLI 会话分组（未绑定本地文件夹）', 'CLI session container (no local folder)')}</span></span>
+                      </div>`
+                }
+              </div>
+              ${hasLocalDir ? folderMenuHtml : ''}
+            </div>
+
+            <div class="ag-pd-recents">
+              <div class="ag-pd-recents-hdr">${L('最近对话', 'Recents')}</div>
+              <div class="ag-pd-chat-list">${chatsHtml}</div>
+            </div>
+          </div>
+
+          <aside class="ag-pd-right">
+            <div class="ag-pd-sidecard">
+              <div class="ag-pd-section"${hasLocalDir ? ' data-ag-pd-inst-sec="true"' : ''}>
+                <div class="ag-pd-sec-hdr">
+                  <span class="ag-pd-sec-title">${L('项目指令', 'Instructions')}</span>
+                  ${
+                    hasLocalDir
+                      ? `<button type="button" class="ag-pd-sec-btn" data-ag-pd-edit-inst="true" aria-label="${escapeHtml(L('编辑项目指令', 'Edit instructions'))}">${
+                          instructions ? SVG_PROJ_EDIT : SVG_PROJ_PLUS
+                        }</button>`
+                      : ''
+                  }
+                </div>
+                ${
+                  hasLocalDir
+                    ? instBodyHtml
+                    : `<div class="ag-pd-card-muted">${L('该分组无对应本地文件夹，暂不支持写入项目级 AGENTS.md。', 'Virtual container without a local folder.')}</div>`
+                }
+              </div>
+
+              <div class="ag-pd-section${hasLocalDir ? ' ag-pd-drop-sec' : ''}"${hasLocalDir ? ' data-ag-pd-ctx-drop="true"' : ''}>
+                <div class="ag-pd-sec-hdr">
+                  <span class="ag-pd-sec-title">${L('参考文件', 'Context')}</span>
+                  ${
+                    hasLocalDir
+                      ? `<button type="button" class="ag-pd-sec-btn" data-ag-pd-add-files="true" aria-label="${escapeHtml(L('添加参考文件', 'Add context files'))}">${SVG_PROJ_PLUS}</button>`
+                      : ''
+                  }
+                </div>
+                ${
+                  hasLocalDir
+                    ? filesBodyHtml
+                    : `<div class="ag-pd-card-muted">${L('仅绑定本地文件夹的项目支持添加参考文件。', 'Available for projects linked to a local folder.')}</div>`
+                }
+              </div>
+
+              <div class="ag-pd-section" data-ag-pd-sched-sec="true">
+                <div class="ag-pd-sec-hdr">
+                  <span class="ag-pd-sec-title">${L('定时任务', 'Scheduled')}</span>
+                  ${
+                    hasLocalDir
+                      ? `<button type="button" class="ag-pd-sec-btn" data-ag-pd-add-sched="true" aria-label="${escapeHtml(L('创建定时任务', 'Create scheduled task'))}">${SVG_PROJ_PLUS}</button>`
+                      : ''
+                  }
+                </div>
+                ${
+                  hasLocalDir
+                    ? scheduledBodyHtml
+                    : `<div class="ag-pd-card-muted">${L('仅绑定本地文件夹的项目支持创建项目定时任务。', 'Available for projects linked to a local folder.')}</div>`
+                }
+              </div>
+            </div>
+          </aside>
+        </div>
+      </div>
+    `;
+
+    const backBtn = el.querySelector('[data-ag-pd-back]');
+    if (backBtn) {
+      backBtn.addEventListener('click', () => {
+        activeProjectId = null;
+        projectFolderDropdownOpen = false;
+        projectFolderSearch = '';
+        projectSelectedFolderPath = '';
+        renderProjectsView();
+      });
+    }
+
+    const folderToggleBtn = el.querySelector('[data-ag-pd-folder-toggle]');
+    if (folderToggleBtn) {
+      folderToggleBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        projectFolderDropdownOpen = !projectFolderDropdownOpen;
+        if (!projectFolderDropdownOpen) projectFolderSearch = '';
+        renderProjectsView();
+      });
+    }
+
+    const fmSearchInput = el.querySelector('#ag-pd-fm-search-input');
+    if (fmSearchInput) {
+      if (hadFmFocus) {
+        fmSearchInput.focus();
+        if (typeof fmSelStart === 'number') {
+          try {
+            fmSearchInput.setSelectionRange(fmSelStart, fmSelStart);
+          } catch {}
+        }
+      }
+      fmSearchInput.addEventListener('input', () => {
+        projectFolderSearch = fmSearchInput.value || '';
+        renderProjectsView();
+      });
+    }
+
+    el.querySelectorAll('[data-ag-pd-select-folder]').forEach((item) => {
+      item.addEventListener('click', (e) => {
+        if (e.target.closest('button')) return;
+        projectSelectedFolderPath = item.getAttribute('data-ag-pd-select-folder') || project.dirPath;
+        projectFolderDropdownOpen = false;
+        projectFolderSearch = '';
+        renderProjectsView();
+      });
+    });
+
+    el.querySelectorAll('[data-ag-pd-add-folder]').forEach((b) => {
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        pickAndAddFolderToProject(project);
+      });
+    });
+
+    el.querySelectorAll('[data-ag-pd-rm-folder]').forEach((b) => {
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        removeExtraFolderFromProject(project, b.getAttribute('data-ag-pd-rm-folder'));
+      });
+    });
+
+    const compAddBtn = el.querySelector('[data-ag-pd-composer-add]');
+    if (compAddBtn) {
+      compAddBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        pickAndAddFilesToProject(project);
+      });
+    }
+
+    const compInput = el.querySelector('#ag-pd-composer-input');
+    const sendBtn = el.querySelector('[data-ag-pd-send]');
+    const dispatchPrompt = () => {
+      const raw = (compInput && compInput.value || '').trim();
+      if (!raw) return;
+      const finalPrompt =
+        activeFolder && !activeFolder.primary && activeFolder.absPath
+          ? `[${L('关联文件夹', 'Linked folder')}: ${activeFolder.absPath}]\n${raw}`
+          : raw;
+      startNewChatInProject(project, finalPrompt);
+    };
+    if (compInput && sendBtn) {
+      const syncSend = () => {
+        sendBtn.disabled = !compInput.value.trim();
+        compInput.style.height = 'auto';
+        compInput.style.height = `${Math.min(180, Math.max(48, compInput.scrollHeight))}px`;
+      };
+      compInput.addEventListener('input', syncSend);
+      compInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && compInput.value.trim()) {
+          e.preventDefault();
+          dispatchPrompt();
+        }
+      });
+      sendBtn.addEventListener('click', dispatchPrompt);
+    }
+
+    el.querySelectorAll('[data-ag-pd-chat]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        openConversationFromProject(btn.getAttribute('data-ag-pd-chat'));
+      });
+    });
+
+    const editInstBtn = el.querySelector('[data-ag-pd-edit-inst]');
+    const instSec = el.querySelector('[data-ag-pd-inst-sec]');
+    const openInst = () => openProjectInstructionsModal(project);
+    if (editInstBtn) editInstBtn.addEventListener('click', (e) => (e.stopPropagation(), openInst()));
+    if (instSec) {
+      instSec.addEventListener('click', (e) => {
+        if (!e.target.closest('button')) openInst();
+      });
+    }
+
+    const addFilesBtn = el.querySelector('[data-ag-pd-add-files]');
+    if (addFilesBtn) {
+      addFilesBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        pickAndAddFilesToProject(project);
+      });
+    }
+
+    const dropSec = el.querySelector('[data-ag-pd-ctx-drop]');
+    if (dropSec) {
+      dropSec.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropSec.setAttribute('data-drag', 'true');
+      });
+      dropSec.addEventListener('dragleave', () => dropSec.removeAttribute('data-drag'));
+      dropSec.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropSec.removeAttribute('data-drag');
+        if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) {
+          addDroppedFilesToProject(project, e.dataTransfer.files);
+        }
+      });
+    }
+
+    el.querySelectorAll('[data-ag-pd-reveal-file]').forEach((b) => {
+      b.addEventListener('click', () => {
+        const p = b.getAttribute('data-ag-pd-reveal-file');
+        if (p && typeof window.__agProjectCall === 'function') {
+          window.__agProjectCall('revealFile', { targetPath: p }, 5000);
+        }
+      });
+    });
+
+    el.querySelectorAll('[data-ag-pd-rm-file]').forEach((b) => {
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        removeFileFromProject(project, b.getAttribute('data-ag-pd-rm-file'));
+      });
+    });
+
+    const addSchedBtn = el.querySelector('[data-ag-pd-add-sched]');
+    if (addSchedBtn) {
+      addSchedBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openProjectScheduledModal(project, null);
+      });
+    }
+
+    const schedById = new Map(scheduledTasks.map((t) => [t.id, t]));
+    el.querySelectorAll('[data-ag-pd-edit-sched]').forEach((b) => {
+      b.addEventListener('click', () => {
+        const task = schedById.get(b.getAttribute('data-ag-pd-edit-sched'));
+        if (task) openProjectScheduledModal(project, task);
+      });
+    });
+
+    el.querySelectorAll('[data-ag-pd-run-sched]').forEach((b) => {
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const task = schedById.get(b.getAttribute('data-ag-pd-run-sched'));
+        if (task) runProjectScheduledTask(project, task);
+      });
+    });
+
+    el.querySelectorAll('[data-ag-pd-del-sched]').forEach((b) => {
+      b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const task = schedById.get(b.getAttribute('data-ag-pd-del-sched'));
+        if (task) deleteProjectScheduledTaskFromUi(project, task);
+      });
+    });
+
+    const openAutoBtn = el.querySelector('[data-ag-pd-open-automations]');
+    if (openAutoBtn) {
+      openAutoBtn.addEventListener('click', () => {
+        closeProjectsView();
+        const autoNav = document.querySelector('[data-testid="automations-button"]');
+        if (autoNav) autoNav.click();
+      });
+    }
+  }
+
+  function renderProjectsView() {
+    const el = ensureProjectsViewEl();
+    const allProjects = collectNativeProjects();
+    if (activeProjectId) {
+      const target = allProjects.find((p) => p.id === activeProjectId);
+      if (target) {
+        renderProjectDetailView(el, target);
+        return;
+      }
+      activeProjectId = null;
+    }
+
+    const q = projectsSearchQuery.trim().toLowerCase();
+    const filtered = allProjects
+      .filter((p) => !q || p.name.toLowerCase().includes(q) || p.shortPath.toLowerCase().includes(q))
+      .sort((a, b) => {
+        if (projectsSortMode === 'name') return a.name.localeCompare(b.name, 'zh-Hans-CN');
+        const ctxA = a.dirPath ? projectsContextMap[a.dirPath] : null;
+        const ctxB = b.dirPath ? projectsContextMap[b.dirPath] : null;
+        const tA = Math.max(a.lastSec * 1000, ctxA ? ctxA.lastModifiedMs || 0 : 0);
+        const tB = Math.max(b.lastSec * 1000, ctxB ? ctxB.lastModifiedMs || 0 : 0);
+        return tB - tA || a.name.localeCompare(b.name, 'zh-Hans-CN');
+      });
+
+    const cardsHtml = filtered.length
+      ? filtered
+          .map((p) => {
+            const ctx = p.dirPath ? projectsContextMap[p.dirPath] : null;
+            const hasInst = Boolean(ctx && ctx.instructions && ctx.instructions.trim());
+            const fileCount = ctx && Array.isArray(ctx.files) ? ctx.files.length : 0;
+            const metaParts = [];
+            if (p.lastSec) metaParts.push(formatProjectTimeAgo(p.lastSec));
+            if (p.chatCount > 0) {
+              metaParts.push(FEAT.i18n ? `${p.chatCount} 个对话` : `${p.chatCount} ${p.chatCount === 1 ? 'chat' : 'chats'}`);
+            }
+            const badges = [];
+            if (hasInst) badges.push(`<span class="ag-proj-badge ag-proj-badge-accent">${L('已设指令', 'Instructions')}</span>`);
+            if (fileCount > 0) {
+              badges.push(
+                `<span class="ag-proj-badge">${FEAT.i18n ? `${fileCount} 个文件` : `${fileCount} ${fileCount === 1 ? 'file' : 'files'}`}</span>`
+              );
+            }
+            return `<article class="ag-proj-card" data-ag-proj-id="${escapeHtml(p.id)}" tabindex="0">
+              <div class="ag-proj-card-title">${escapeHtml(p.name)}</div>
+              <div class="ag-proj-card-foot">
+                <span class="ag-proj-card-meta">${escapeHtml(metaParts.join(' · ') || p.shortPath)}</span>
+                ${badges.length ? `<div class="ag-proj-card-badges">${badges.join('')}</div>` : ''}
+              </div>
+            </article>`;
+          })
+          .join('')
+      : `<div class="ag-proj-empty">${
+          q
+            ? L(`没有匹配「${projectsSearchQuery}」的项目`, `No projects matching "${projectsSearchQuery}"`)
+            : L('还没有本地项目文件夹，点击右上角「新建项目」添加一个吧。', 'No local project folders yet. Click "New project" to add one.')
+        }</div>`;
+
+    const sortLabel = projectsSortMode === 'recent' ? L('最近活跃', 'Recent') : L('按名称', 'Name');
+    const prevSearchEl = el.querySelector('#ag-proj-search-input');
+    const hadSearchFocus = prevSearchEl && document.activeElement === prevSearchEl;
+    const selStart = hadSearchFocus ? prevSearchEl.selectionStart : null;
+
+    el.innerHTML = `
+      <div class="ag-proj-shell">
+        <header class="ag-proj-header">
+          <h1 class="ag-proj-heading">${L('项目', 'Projects')}</h1>
+          <div class="ag-proj-header-controls">
+            <label class="ag-proj-search-wrap">
+              ${SVG_PROJ_SEARCH_ICON}
+              <input id="ag-proj-search-input" type="search" value="${escapeHtml(projectsSearchQuery)}" placeholder="${escapeHtml(L('搜索项目…', 'Search projects…'))}" />
+            </label>
+            <button type="button" class="ag-proj-sort-btn" data-ag-proj-sort="true" title="${escapeHtml(L('切换排序方式', 'Toggle sort order'))}">⇅ ${escapeHtml(sortLabel)}</button>
+            <button type="button" class="ag-proj-new-btn" data-ag-proj-new="true">${L('新建项目', 'New project')}</button>
+          </div>
+        </header>
+        <div class="ag-proj-grid">${cardsHtml}</div>
+      </div>
+    `;
+
+    const searchInput = el.querySelector('#ag-proj-search-input');
+    if (searchInput) {
+      if (hadSearchFocus) {
+        searchInput.focus();
+        if (typeof selStart === 'number') {
+          try {
+            searchInput.setSelectionRange(selStart, selStart);
+          } catch {}
+        }
+      }
+      searchInput.addEventListener('input', () => {
+        projectsSearchQuery = searchInput.value || '';
+        renderProjectsView();
+      });
+    }
+
+    const sortBtn = el.querySelector('[data-ag-proj-sort]');
+    if (sortBtn) {
+      sortBtn.addEventListener('click', () => {
+        projectsSortMode = projectsSortMode === 'recent' ? 'name' : 'recent';
+        renderProjectsView();
+      });
+    }
+
+    const newBtn = el.querySelector('[data-ag-proj-new]');
+    if (newBtn) {
+      newBtn.addEventListener('click', () => triggerNativeNewProject());
+    }
+
+    const byId = new Map(allProjects.map((p) => [p.id, p]));
+    const enterProject = (proj) => {
+      activeProjectId = proj.id;
+      renderProjectsView();
+      if (proj.dirPath && typeof window.__agProjectCall === 'function') {
+        window.__agProjectCall('readContext', { dirPath: proj.dirPath }, 8000).then((fresh) => {
+          if (!disposed && fresh && fresh.ok) {
+            projectsContextMap[proj.dirPath] = fresh;
+            if (projectsViewOpen && activeProjectId === proj.id) renderProjectsView();
+          }
+        });
+      }
+    };
+
+    el.querySelectorAll('.ag-proj-card').forEach((card) => {
+      const proj = byId.get(card.getAttribute('data-ag-proj-id'));
+      if (!proj) return;
+      card.addEventListener('click', () => enterProject(proj));
+      card.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          enterProject(proj);
+        }
+      });
+    });
+  }
+
+  async function openProjectInstructionsModal(project) {
+    if (!project || !project.dirPath) return;
+    closeProjectsModal();
+    const cached = projectsContextMap[project.dirPath] || null;
+    projectsModalState = {
+      project,
+      dirPath: project.dirPath,
+      instructions: cached ? cached.instructions || '' : '',
+      hasOtherAgentsMd: Boolean(cached && cached.hasOtherAgentsMd),
+      saving: false,
+      error: ''
+    };
+    renderProjectContextModal();
+
+    if (typeof window.__agProjectCall === 'function') {
+      const fresh = await window.__agProjectCall('readContext', { dirPath: project.dirPath }, 8000);
+      if (disposed || !projectsModalState || projectsModalState.dirPath !== project.dirPath) return;
+      if (fresh && fresh.ok) {
+        projectsContextMap[project.dirPath] = fresh;
+        projectsModalState.instructions = fresh.instructions || '';
+        projectsModalState.hasOtherAgentsMd = Boolean(fresh.hasOtherAgentsMd);
+        renderProjectContextModal();
+      }
+    }
+  }
+
+  function renderProjectContextModal() {
+    if (!projectsModalState) return;
+    if (!projectsModalEl || !projectsModalEl.isConnected) {
+      projectsModalEl = document.createElement('div');
+      projectsModalEl.id = 'ag-claude-project-modal';
+      projectsModalEl.setAttribute('data-ag-i18n-ignore', '1');
+      projectsModalEl.addEventListener('click', (e) => {
+        if (e.target === projectsModalEl) closeProjectsModal();
+      });
+      document.body.appendChild(projectsModalEl);
+    }
+
+    const st = projectsModalState;
+    const noteHtml = st.hasOtherAgentsMd
+      ? `<div class="ag-pm-note">${L('检测到该目录已有 AGENTS.md，保存时仅更新 Anti-Claude 区块，保留你原有的全部规则。', 'Existing AGENTS.md detected — your custom rules outside the Anti-Claude block are preserved.')}</div>`
+      : '';
+    const errHtml = st.error ? `<div class="ag-pm-error">${escapeHtml(st.error)}</div>` : '';
+
+    projectsModalEl.innerHTML = `
+      <div class="ag-pm-dialog" role="dialog" aria-modal="true" aria-label="${escapeHtml(L('设置项目指令', 'Set project instructions'))}">
+        <div class="ag-pm-hdr">
+          <div class="ag-pm-title-wrap">
+            <span class="ag-pm-icon">${SVG_CLAUDE_PROJECTS_ICON}</span>
+            <h2 class="ag-pm-title">${escapeHtml(L('项目指令', 'Instructions'))} · ${escapeHtml(st.project.name)}</h2>
+          </div>
+          <button type="button" class="ag-pm-close" data-ag-pm-close="true" aria-label="${escapeHtml(L('关闭', 'Close'))}">×</button>
+        </div>
+        <p class="ag-pm-desc">${L(
+          '填写在这个项目文件夹下每场对话自动遵循的背景、角色与规范。保存后写入项目 AGENTS.md，100% 本地生效。',
+          'Define background context, style, and constraints applied automatically to every chat in this project (saved locally to AGENTS.md).'
+        )}</p>
+        <div class="ag-pm-field">
+          <textarea id="ag-pm-instructions" class="ag-pm-textarea" rows="8" placeholder="${escapeHtml(
+            L('例如：本项目是某案件卷宗/法考科目/工程报价，回答时请遵循……', 'Tell the agent how to work in this project…')
+          )}">${escapeHtml(st.instructions)}</textarea>
+          ${noteHtml}
+        </div>
+        ${errHtml}
+        <div class="ag-pm-footer">
+          <button type="button" class="ag-pm-secondary-btn" data-ag-pm-close="true">${L('取消', 'Cancel')}</button>
+          <button type="button" class="ag-pm-primary-btn" data-ag-pm-save="true" ${st.saving ? 'disabled' : ''}>${
+            st.saving ? L('保存中…', 'Saving…') : L('保存指令', 'Save instructions')
+          }</button>
+        </div>
+      </div>
+    `;
+
+    const textarea = projectsModalEl.querySelector('#ag-pm-instructions');
+    if (textarea) {
+      textarea.focus();
+      textarea.addEventListener('input', () => {
+        if (projectsModalState) projectsModalState.instructions = textarea.value;
+      });
+    }
+
+    projectsModalEl.querySelectorAll('[data-ag-pm-close]').forEach((b) => {
+      b.addEventListener('click', () => closeProjectsModal());
+    });
+
+    const saveBtn = projectsModalEl.querySelector('[data-ag-pm-save]');
+    if (saveBtn) {
+      saveBtn.addEventListener('click', async () => {
+        if (!projectsModalState || projectsModalState.saving) return;
+        if (typeof window.__agProjectCall !== 'function') {
+          projectsModalState.error = L('本地写入桥接不可用，请重启 Anti-Claude 守护进程', 'Local write bridge unavailable');
+          renderProjectContextModal();
+          return;
+        }
+        projectsModalState.saving = true;
+        projectsModalState.error = '';
+        renderProjectContextModal();
+        const cur = projectsContextMap[projectsModalState.dirPath];
+        const keepFiles = (cur && Array.isArray(cur.files) ? cur.files : []).map((f) => ({
+          action: 'keep',
+          relPath: f.relPath,
+          name: f.name
+        }));
+        const keepFolders = (cur && Array.isArray(cur.extraFolders) ? cur.extraFolders : []).map((f) => ({
+          name: f.name,
+          absPath: f.absPath
+        }));
+        const res = await window.__agProjectCall(
+          'saveContext',
+          {
+            dirPath: projectsModalState.dirPath,
+            instructions: projectsModalState.instructions,
+            files: keepFiles,
+            extraFolders: keepFolders
+          },
+          20000
+        );
+        if (disposed || !projectsModalState) return;
+        if (res && res.ok) {
+          projectsContextMap[projectsModalState.dirPath] = res;
+          closeProjectsModal();
+          if (projectsViewOpen) renderProjectsView();
+        } else {
+          projectsModalState.saving = false;
+          projectsModalState.error = L('保存失败：', 'Save failed: ') + String((res && res.error) || 'unknown');
+          renderProjectContextModal();
+        }
+      });
+    }
+  }
+
+  function runProjectScheduledTask(project, task) {
+    if (!project || !task) return;
+    const raw = String(task.instructions || '').trim();
+    if (!raw) return;
+    const normProj = String(project.dirPath || '').replace(/\/+$/, '');
+    const normTaskDir = String(task.folderPath || '').replace(/\/+$/, '');
+    const finalPrompt =
+      normTaskDir && normTaskDir !== normProj
+        ? `[${L('关联文件夹', 'Linked folder')}: ${normTaskDir}]\n${raw}`
+        : raw;
+    startNewChatInProject(project, finalPrompt);
+  }
+
+  async function deleteProjectScheduledTaskFromUi(project, task) {
+    if (!project || !project.dirPath || !task || typeof window.__agProjectCall !== 'function') return;
+    const res = await window.__agProjectCall(
+      'deleteScheduledTask',
+      { dirPath: project.dirPath, taskId: task.id, sidecarId: task.sidecarId || '' },
+      10000
+    );
+    if (!disposed && res && res.ok) {
+      projectsContextMap[project.dirPath] = res;
+      if (projectsViewOpen) renderProjectsView();
+    }
+  }
+
+  function openProjectScheduledModal(project, existingTask = null) {
+    if (!project || !project.dirPath) return;
+    closeProjectsModal();
+    const tz = (() => {
+      try {
+        return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai';
+      } catch {
+        return 'Asia/Shanghai';
+      }
+    })();
+    projectsModalState = {
+      kind: 'scheduled',
+      project,
+      dirPath: project.dirPath,
+      editingId: existingTask ? existingTask.id : '',
+      sidecarId: existingTask ? existingTask.sidecarId || '' : '',
+      name: existingTask ? existingTask.name || '' : '',
+      description: existingTask ? existingTask.description || '' : '',
+      instructions: existingTask ? existingTask.instructions || '' : '',
+      folderPath: (existingTask && existingTask.folderPath) || projectSelectedFolderPath || project.dirPath,
+      model: existingTask ? existingTask.model || '' : '',
+      frequency: existingTask ? existingTask.frequency || 'manual' : 'manual',
+      time: existingTask ? existingTask.time || '09:00' : '09:00',
+      dayOfWeek: existingTask && Number.isFinite(Number(existingTask.dayOfWeek)) ? Number(existingTask.dayOfWeek) : 1,
+      minute: existingTask && Number.isFinite(Number(existingTask.minute)) ? Number(existingTask.minute) : 0,
+      customCron: existingTask ? existingTask.customCron || '0 9 * * *' : '0 9 * * *',
+      timezone: (existingTask && existingTask.timezone) || tz,
+      saving: false,
+      error: ''
+    };
+    renderProjectScheduledModal();
+  }
+
+  function renderProjectScheduledModal() {
+    if (!projectsModalState || projectsModalState.kind !== 'scheduled') return;
+    if (!projectsModalEl || !projectsModalEl.isConnected) {
+      projectsModalEl = document.createElement('div');
+      projectsModalEl.id = 'ag-claude-project-modal';
+      projectsModalEl.setAttribute('data-ag-i18n-ignore', '1');
+      projectsModalEl.addEventListener('click', (e) => {
+        if (e.target === projectsModalEl) closeProjectsModal();
+      });
+      document.body.appendChild(projectsModalEl);
+    }
+
+    const st = projectsModalState;
+    const isEdit = Boolean(st.editingId);
+    const ctx = projectsContextMap[st.dirPath] || null;
+    const extraFolders = ctx && Array.isArray(ctx.extraFolders) ? ctx.extraFolders : [];
+    const folderOptions = [
+      { absPath: st.dirPath, label: `${st.project.name} (${L('主目录', 'Primary')})` },
+      ...extraFolders.map((f) => ({ absPath: f.absPath, label: f.name || f.absPath }))
+    ];
+    if (st.folderPath && !folderOptions.some((o) => o.absPath === st.folderPath)) {
+      const segs = st.folderPath.split('/').filter(Boolean);
+      folderOptions.push({ absPath: st.folderPath, label: segs[segs.length - 1] || st.folderPath });
+    }
+
+    const modelOptions = [
+      { value: '', label: L('默认模型', 'Default model') },
+      { value: 'gemini-4-neon-high', label: 'Gemini 4 Neon High' },
+      { value: 'gemini-4-argon-high', label: 'Gemini 4 Argon High' },
+      { value: 'gemini-4-carbon-high', label: 'Gemini 4 Carbon High' },
+      { value: 'gemini-4-hydrogen-low', label: 'Gemini 4 Hydrogen Low' }
+    ];
+    if (st.model && !modelOptions.some((m) => m.value === st.model)) {
+      modelOptions.push({ value: st.model, label: st.model });
+    }
+
+    const freqOptions = [
+      { value: 'manual', label: L('手动', 'Manual') },
+      { value: 'hourly', label: L('每小时', 'Hourly') },
+      { value: 'daily', label: L('每天', 'Daily') },
+      { value: 'weekdays', label: L('工作日（周一至周五）', 'Weekdays (Mon–Fri)') },
+      { value: 'weekly', label: L('每周', 'Weekly') },
+      { value: 'custom', label: L('自定义 Cron', 'Custom cron') }
+    ];
+
+    let freqExtraHtml = '';
+    if (st.frequency === 'hourly') {
+      const mins = [0, 15, 30, 45];
+      freqExtraHtml = `<select id="ag-sched-minute" class="ag-sched-select" aria-label="${escapeHtml(L('分钟', 'Minute'))}">${mins
+        .map((m) => `<option value="${m}"${Number(st.minute) === m ? ' selected' : ''}>:${String(m).padStart(2, '0')}</option>`)
+        .join('')}</select>`;
+    } else if (st.frequency === 'daily' || st.frequency === 'weekdays') {
+      freqExtraHtml = `<input id="ag-sched-time" class="ag-sched-time-input" type="time" value="${escapeHtml(st.time || '09:00')}" />`;
+    } else if (st.frequency === 'weekly') {
+      const days = [
+        { v: 1, l: L('周一', 'Monday') },
+        { v: 2, l: L('周二', 'Tuesday') },
+        { v: 3, l: L('周三', 'Wednesday') },
+        { v: 4, l: L('周四', 'Thursday') },
+        { v: 5, l: L('周五', 'Friday') },
+        { v: 6, l: L('周六', 'Saturday') },
+        { v: 0, l: L('周日', 'Sunday') }
+      ];
+      freqExtraHtml = `<select id="ag-sched-dow" class="ag-sched-select" aria-label="${escapeHtml(L('星期', 'Day of week'))}">${days
+        .map((d) => `<option value="${d.v}"${Number(st.dayOfWeek) === d.v ? ' selected' : ''}>${escapeHtml(d.l)}</option>`)
+        .join('')}</select><input id="ag-sched-time" class="ag-sched-time-input" type="time" value="${escapeHtml(st.time || '09:00')}" />`;
+    } else if (st.frequency === 'custom') {
+      freqExtraHtml = `<input id="ag-sched-cron" class="ag-sched-cron-input" type="text" value="${escapeHtml(st.customCron || '0 9 * * *')}" placeholder="0 9 * * *" />`;
+    }
+
+    const canSave = Boolean(st.name.trim() && st.description.trim() && st.instructions.trim() && !st.saving);
+    const errHtml = st.error ? `<div class="ag-pm-error">${escapeHtml(st.error)}</div>` : '';
+    const autoHintHtml =
+      st.frequency !== 'manual'
+        ? `<div class="ag-sched-hint">${escapeHtml(
+            L(
+              `保存后同步写入 Antigravity 原生「自动化任务」（时区 ${st.timezone}），可在左侧「自动化任务」中启用调度，或直接点 ▶ 立即试跑。`,
+              `Syncs to Antigravity Automations (${st.timezone}). Enable it in the Automations dashboard or click ▶ to run now.`
+            )
+          )}</div>`
+        : '';
+
+    projectsModalEl.innerHTML = `
+      <div class="ag-pm-dialog ag-pm-sched-dialog" role="dialog" aria-modal="true" aria-label="${escapeHtml(
+        isEdit ? L('编辑定时任务', 'Edit scheduled task') : L('创建定时任务', 'Create scheduled task')
+      )}">
+        <div class="ag-pm-hdr ag-sched-hdr">
+          <h2 class="ag-pm-title">${escapeHtml(
+            isEdit ? L('编辑定时任务', 'Edit scheduled task') : L('创建定时任务', 'Create scheduled task')
+          )}</h2>
+          <button type="button" class="ag-pm-close" data-ag-pm-close="true" aria-label="${escapeHtml(L('关闭', 'Close'))}">×</button>
+        </div>
+
+        <div class="ag-sched-field">
+          <label class="ag-sched-label" for="ag-sched-name">${L('名称', 'Name')} <span class="ag-sched-req">*</span></label>
+          <input id="ag-sched-name" class="ag-sched-input" type="text" value="${escapeHtml(st.name)}" placeholder="daily-briefing" />
+        </div>
+
+        <div class="ag-sched-field">
+          <label class="ag-sched-label" for="ag-sched-desc">${L('描述', 'Description')} <span class="ag-sched-req">*</span></label>
+          <input id="ag-sched-desc" class="ag-sched-input" type="text" value="${escapeHtml(st.description)}" placeholder="${escapeHtml(
+            L('汇总今日日程与待办事项', 'Summarize my calendar and inbox for the day')
+          )}" />
+        </div>
+
+        <div class="ag-sched-field">
+          <label class="ag-sched-label" for="ag-sched-instructions">${L('执行指令', 'Instructions')} <span class="ag-sched-req">*</span></label>
+          <div class="ag-sched-inst-box">
+            <textarea id="ag-sched-instructions" class="ag-sched-textarea" rows="5" placeholder="${escapeHtml(
+              L('汇总今日日程与未读邮件，标出需要优先处理的紧急事项。', 'Summarize my calendar and unread emails. Flag anything urgent.')
+            )}">${escapeHtml(st.instructions)}</textarea>
+            <div class="ag-sched-inst-bar">
+              <label class="ag-sched-picker-wrap">
+                <span class="ag-sched-picker-icon">${SVG_CLAUDE_PROJECTS_ICON}</span>
+                <select id="ag-sched-folder" class="ag-sched-inline-select" aria-label="${escapeHtml(L('工作文件夹', 'Work in a folder'))}">
+                  ${folderOptions
+                    .map(
+                      (o) =>
+                        `<option value="${escapeHtml(o.absPath)}"${o.absPath === st.folderPath ? ' selected' : ''}>${escapeHtml(o.label)}</option>`
+                    )
+                    .join('')}
+                  <option value="__add_folder__">${L('+ 添加文件夹…', '+ Add folder…')}</option>
+                </select>
+              </label>
+              <label class="ag-sched-picker-wrap ag-sched-picker-model">
+                <select id="ag-sched-model" class="ag-sched-inline-select" aria-label="${escapeHtml(L('模型', 'Model'))}">
+                  ${modelOptions
+                    .map(
+                      (m) =>
+                        `<option value="${escapeHtml(m.value)}"${m.value === st.model ? ' selected' : ''}>${escapeHtml(m.label)}</option>`
+                    )
+                    .join('')}
+                </select>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="ag-sched-freq-row">
+          <label class="ag-sched-label ag-sched-freq-lbl" for="ag-sched-freq">${L('执行频率', 'Frequency')}</label>
+          <div class="ag-sched-freq-controls">
+            <select id="ag-sched-freq" class="ag-sched-select">
+              ${freqOptions
+                .map(
+                  (o) =>
+                    `<option value="${escapeHtml(o.value)}"${o.value === st.frequency ? ' selected' : ''}>${escapeHtml(o.label)}</option>`
+                )
+                .join('')}
+            </select>
+            ${freqExtraHtml}
+          </div>
+        </div>
+
+        ${autoHintHtml}
+        ${errHtml}
+
+        <div class="ag-pm-footer ag-sched-footer">
+          ${
+            isEdit
+              ? `<button type="button" class="ag-sched-del-btn" data-ag-sched-del="true" ${st.saving ? 'disabled' : ''}>${L('删除任务', 'Delete')}</button>`
+              : '<span></span>'
+          }
+          <div class="ag-sched-footer-right">
+            <button type="button" class="ag-pm-secondary-btn" data-ag-pm-close="true">${L('取消', 'Cancel')}</button>
+            <button type="button" class="ag-pm-primary-btn" data-ag-sched-save="true" ${canSave ? '' : 'disabled'}>${
+              st.saving ? L('保存中…', 'Saving…') : L('保存', 'Save')
+            }</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    const nameEl = projectsModalEl.querySelector('#ag-sched-name');
+    const descEl = projectsModalEl.querySelector('#ag-sched-desc');
+    const instEl = projectsModalEl.querySelector('#ag-sched-instructions');
+    const saveBtn = projectsModalEl.querySelector('[data-ag-sched-save]');
+    const syncSaveDisabled = () => {
+      if (!saveBtn || !projectsModalState) return;
+      saveBtn.disabled = !(
+        projectsModalState.name.trim() &&
+        projectsModalState.description.trim() &&
+        projectsModalState.instructions.trim() &&
+        !projectsModalState.saving
+      );
+    };
+    if (nameEl) {
+      if (!isEdit && !st.name) nameEl.focus();
+      nameEl.addEventListener('input', () => {
+        if (!projectsModalState) return;
+        projectsModalState.name = nameEl.value;
+        syncSaveDisabled();
+      });
+    }
+    if (descEl) {
+      descEl.addEventListener('input', () => {
+        if (!projectsModalState) return;
+        projectsModalState.description = descEl.value;
+        syncSaveDisabled();
+      });
+    }
+    if (instEl) {
+      instEl.addEventListener('input', () => {
+        if (!projectsModalState) return;
+        projectsModalState.instructions = instEl.value;
+        syncSaveDisabled();
+      });
+    }
+
+    const folderSel = projectsModalEl.querySelector('#ag-sched-folder');
+    if (folderSel) {
+      folderSel.addEventListener('change', async () => {
+        if (!projectsModalState) return;
+        if (folderSel.value === '__add_folder__') {
+          if (typeof window.__agProjectCall === 'function') {
+            const picked = await window.__agProjectCall('pickFolder', {}, 120000);
+            if (!disposed && projectsModalState && picked && picked.ok && !picked.canceled && picked.folderPath) {
+              const nextPath = picked.folderPath;
+              const cur = projectsContextMap[projectsModalState.dirPath];
+              const existing = (cur && Array.isArray(cur.extraFolders) ? cur.extraFolders : []).map((f) => ({
+                name: f.name,
+                absPath: f.absPath
+              }));
+              if (nextPath !== projectsModalState.dirPath && !existing.some((f) => f.absPath === nextPath)) {
+                existing.push({ name: picked.name || nextPath, absPath: nextPath });
+                await saveProjectContextDelta(projectsModalState.project, { extraFolders: existing });
+              }
+              if (projectsModalState) projectsModalState.folderPath = nextPath;
+            }
+          }
+          renderProjectScheduledModal();
+          return;
+        }
+        projectsModalState.folderPath = folderSel.value || projectsModalState.dirPath;
+      });
+    }
+
+    const modelSel = projectsModalEl.querySelector('#ag-sched-model');
+    if (modelSel) {
+      modelSel.addEventListener('change', () => {
+        if (projectsModalState) projectsModalState.model = modelSel.value || '';
+      });
+    }
+
+    const freqSel = projectsModalEl.querySelector('#ag-sched-freq');
+    if (freqSel) {
+      freqSel.addEventListener('change', () => {
+        if (!projectsModalState) return;
+        projectsModalState.frequency = freqSel.value || 'manual';
+        renderProjectScheduledModal();
+      });
+    }
+
+    const minSel = projectsModalEl.querySelector('#ag-sched-minute');
+    if (minSel) {
+      minSel.addEventListener('change', () => {
+        if (projectsModalState) projectsModalState.minute = Number(minSel.value) || 0;
+      });
+    }
+    const timeEl = projectsModalEl.querySelector('#ag-sched-time');
+    if (timeEl) {
+      timeEl.addEventListener('input', () => {
+        if (projectsModalState) projectsModalState.time = timeEl.value || '09:00';
+      });
+    }
+    const dowSel = projectsModalEl.querySelector('#ag-sched-dow');
+    if (dowSel) {
+      dowSel.addEventListener('change', () => {
+        if (projectsModalState) projectsModalState.dayOfWeek = Number(dowSel.value);
+      });
+    }
+    const cronEl = projectsModalEl.querySelector('#ag-sched-cron');
+    if (cronEl) {
+      cronEl.addEventListener('input', () => {
+        if (projectsModalState) projectsModalState.customCron = cronEl.value;
+      });
+    }
+
+    projectsModalEl.querySelectorAll('[data-ag-pm-close]').forEach((b) => {
+      b.addEventListener('click', () => closeProjectsModal());
+    });
+
+    const delBtn = projectsModalEl.querySelector('[data-ag-sched-del]');
+    if (delBtn) {
+      delBtn.addEventListener('click', async () => {
+        if (!projectsModalState || projectsModalState.saving) return;
+        projectsModalState.saving = true;
+        renderProjectScheduledModal();
+        await deleteProjectScheduledTaskFromUi(projectsModalState.project, {
+          id: projectsModalState.editingId,
+          sidecarId: projectsModalState.sidecarId
+        });
+        if (!disposed) closeProjectsModal();
+      });
+    }
+
+    if (saveBtn) {
+      saveBtn.addEventListener('click', async () => {
+        if (!projectsModalState || projectsModalState.saving) return;
+        if (typeof window.__agProjectCall !== 'function') {
+          projectsModalState.error = L('本地写入桥接不可用，请重启 Anti-Claude 守护进程', 'Local write bridge unavailable');
+          renderProjectScheduledModal();
+          return;
+        }
+        projectsModalState.saving = true;
+        projectsModalState.error = '';
+        renderProjectScheduledModal();
+        const res = await window.__agProjectCall(
+          'saveScheduledTask',
+          {
+            dirPath: projectsModalState.dirPath,
+            task: {
+              id: projectsModalState.editingId || undefined,
+              sidecarId: projectsModalState.sidecarId || undefined,
+              name: projectsModalState.name,
+              description: projectsModalState.description,
+              instructions: projectsModalState.instructions,
+              folderPath: projectsModalState.folderPath,
+              model: projectsModalState.model,
+              frequency: projectsModalState.frequency,
+              time: projectsModalState.time,
+              dayOfWeek: projectsModalState.dayOfWeek,
+              minute: projectsModalState.minute,
+              customCron: projectsModalState.customCron,
+              timezone: projectsModalState.timezone
+            }
+          },
+          20000
+        );
+        if (disposed || !projectsModalState) return;
+        if (res && res.ok) {
+          projectsContextMap[projectsModalState.dirPath] = res;
+          closeProjectsModal();
+          if (projectsViewOpen) renderProjectsView();
+        } else {
+          projectsModalState.saving = false;
+          projectsModalState.error = L('保存失败：', 'Save failed: ') + String((res && res.error) || 'unknown');
+          renderProjectScheduledModal();
+        }
+      });
+    }
+  }
+
+  function openProjectsView(targetProjectId) {
+    projectsViewOpen = true;
+    activeProjectId = typeof targetProjectId === 'string' && targetProjectId ? targetProjectId : null;
+    projectSelectedFolderPath = '';
+    ensureProjectsSidebarObserver();
+    const el = ensureProjectsViewEl();
+    renderProjectsView();
+    positionProjectsOverlay();
+    el.setAttribute('data-open', 'true');
+    updateProjectsNavActiveVisual();
+    refreshProjectsContexts(collectNativeProjects());
+  }
+
+  function toggleProjectsView() {
+    if (projectsViewOpen && activeProjectId) {
+      activeProjectId = null;
+      renderProjectsView();
+    } else if (projectsViewOpen) {
+      closeProjectsView();
+    } else {
+      openProjectsView();
+    }
+  }
+
+  function refreshProjectsLanguageUi() {
+    updateProjectsNavActiveVisual();
+    if (projectsViewOpen) renderProjectsView();
+    if (projectsModalState) renderProjectContextModal();
+  }
+
+  let sidebarHideScrollEl = null;
+  let lastAutoCollapseProjTs = 0;
+
+  function parseVirtualTranslateY(el) {
+    if (!el) return 0;
+    const tf = String((el.style && el.style.transform) || '');
+    const m = tf.match(/translateY\(([-\d.]+)px\)/i);
+    if (m) return Number(m[1]) || 0;
+    return 0;
+  }
+
+  function clearSidebarHideNativeProjects() {
+    if (sidebarHideScrollEl) {
+      sidebarHideScrollEl.removeEventListener('scroll', onSidebarHideScroll);
+      sidebarHideScrollEl = null;
+    }
+    const scrollBox = document.querySelector('[data-testid="conversation-list-sidebar"]');
+    const { host: sbParent } = getSidebarListHost(scrollBox);
+    if (sbParent) {
+      sbParent.removeAttribute('data-ag-sb-unified');
+      sbParent.style.removeProperty('--ag-sb-pinned-height');
+    }
+    if (scrollBox && scrollBox !== sbParent) {
+      scrollBox.removeAttribute('data-ag-sb-unified');
+      scrollBox.style.removeProperty('--ag-sb-pinned-height');
+    }
+    const list = scrollBox && scrollBox.firstElementChild;
+    if (!list) return;
+    list.style.removeProperty('--ag-sb-proj-shift');
+    delete list.dataset.agProjIdx;
+    delete list.dataset.agConvIdx;
+    delete list.dataset.agProjShift;
+    delete list.dataset.agCutIdx;
+    delete list.dataset.agPinnedH;
+    for (const child of list.children) {
+      child.removeAttribute('data-ag-sb-hide-proj');
+      child.removeAttribute('data-ag-sb-shift-up');
+    }
+  }
+
+  function onSidebarHideScroll() {
+    syncSidebarHideNativeProjects();
+  }
+
+  function syncSidebarHideNativeProjects() {
+    if (disposed || !FEAT.hideSidebarProjects) {
+      clearSidebarHideNativeProjects();
+      return;
+    }
+    const scrollBox = document.querySelector('[data-testid="conversation-list-sidebar"]');
+    const { host: sbParent } = getSidebarListHost(scrollBox);
+    const list = scrollBox && scrollBox.firstElementChild;
+    if (!scrollBox || !sbParent || !list) return;
+
+    if (sidebarHideScrollEl !== scrollBox) {
+      if (sidebarHideScrollEl) sidebarHideScrollEl.removeEventListener('scroll', onSidebarHideScroll);
+      sidebarHideScrollEl = scrollBox;
+      scrollBox.addEventListener('scroll', onSidebarHideScroll, { passive: true });
+    }
+    if (scrollBox.scrollTop > 0) {
+      try {
+        scrollBox.scrollTop = 0;
+      } catch {}
+    }
+
+    const indexed = [];
+    for (const child of list.children) {
+      const rawIdx = child.getAttribute('data-index');
+      if (rawIdx === null || rawIdx === '') continue;
+      const idx = Number(rawIdx);
+      if (Number.isFinite(idx)) indexed.push({ idx, el: child });
+    }
+    if (!indexed.length) return;
+    indexed.sort((a, b) => a.idx - b.idx);
+
+    const isPinnedHdrText = (txt) => /^(pinned|置顶对话)$/i.test(String(txt || '').trim());
+    let cutItem = indexed.find((x) => Boolean(x.el.querySelector('[data-testid="sidebar-add-project-button"]')));
+    if (!cutItem) {
+      cutItem = indexed.find((x) => {
+        const sh = x.el.querySelector('[data-testid="section-header"]');
+        return Boolean(sh && !isPinnedHdrText(sh.textContent));
+      });
+    }
+
+    if (cutItem) {
+      const pinnedH = cutItem.idx === 0 ? 0 : Math.max(0, Math.round(parseVirtualTranslateY(cutItem.el)));
+      list.dataset.agCutIdx = String(cutItem.idx);
+      list.dataset.agPinnedH = String(pinnedH);
+    }
+
+    if (list.dataset.agCutIdx === undefined) {
+      // Only pinned section exists in virtual list (no native Projects/Conversations headers rendered)
+      const hasPinnedHdr = indexed.some((x) => {
+        const sh = x.el.querySelector('[data-testid="section-header"]');
+        return Boolean(sh && isPinnedHdrText(sh.textContent));
+      });
+      if (!hasPinnedHdr) return;
+      const last = indexed[indexed.length - 1];
+      const estH = Math.max(0, Math.round(parseVirtualTranslateY(last.el) + ((last.el.getBoundingClientRect && last.el.getBoundingClientRect().height) || 33) + 12));
+      sbParent.setAttribute('data-ag-sb-unified', estH > 0 ? 'pinned' : 'empty');
+      sbParent.style.setProperty('--ag-sb-pinned-height', `${estH}px`);
+      for (const { el } of indexed) {
+        el.removeAttribute('data-ag-sb-hide-proj');
+        el.removeAttribute('data-ag-sb-shift-up');
+      }
+      return;
+    }
+
+    const cutIdx = Number(list.dataset.agCutIdx);
+    const pinnedH = Number(list.dataset.agPinnedH) || 0;
+    sbParent.setAttribute('data-ag-sb-unified', pinnedH > 0 ? 'pinned' : 'empty');
+    sbParent.style.setProperty('--ag-sb-pinned-height', `${pinnedH}px`);
+    list.style.removeProperty('--ag-sb-proj-shift');
+
+    for (const { idx, el } of indexed) {
+      el.removeAttribute('data-ag-sb-shift-up');
+      if (idx >= cutIdx) {
+        el.setAttribute('data-ag-sb-hide-proj', '1');
+      } else {
+        el.removeAttribute('data-ag-sb-hide-proj');
+      }
+    }
+  }
+
+  function teardownProjectsWorkspace() {
+    closeProjectsView();
+    const btn = document.getElementById('ag-claude-projects-nav-btn');
+    if (btn) btn.remove();
+    if (projectsViewEl) {
+      projectsViewEl.remove();
+      projectsViewEl = null;
+    }
+    if (projectsSidebarRo) {
+      try {
+        projectsSidebarRo.disconnect();
+      } catch {}
+      projectsSidebarRo = null;
+      projectsSidebarRoTarget = null;
+    }
+    if (projectsDocListenerBound) {
+      document.removeEventListener('click', onProjectsGlobalClick, true);
+      document.removeEventListener('keydown', onProjectsGlobalKeyDown, true);
+      window.removeEventListener('resize', positionProjectsOverlay);
+      projectsDocListenerBound = false;
+    }
+  }
+
+  function syncProjectsWorkspace() {
+    syncSidebarHideNativeProjects();
+    if (!FEAT.projects) {
+      teardownProjectsWorkspace();
+      return;
+    }
+    const autoBtn = document.querySelector('[data-testid="automations-button"]');
+    if (!autoBtn || !autoBtn.parentElement) return;
+    let navBtn = document.getElementById('ag-claude-projects-nav-btn');
+    if (!navBtn) {
+      navBtn = document.createElement('button');
+      navBtn.type = 'button';
+      navBtn.id = 'ag-claude-projects-nav-btn';
+      navBtn.setAttribute('data-testid', 'claude-projects-nav-button');
+      navBtn.setAttribute('data-ag-i18n-ignore', '1');
+      navBtn.className = autoBtn.className;
+      navBtn.innerHTML =
+        `<span class="shrink-0 flex items-center">${SVG_CLAUDE_PROJECTS_ICON}</span>` +
+        `<span class="truncate ag-proj-nav-label">${L('项目', 'Projects')}</span>`;
+      navBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleProjectsView();
+      });
+    }
+    /* Keep positioned directly between Automations (`automations-button`) and Skills (`/customizations`) */
+    if (navBtn.previousElementSibling !== autoBtn) {
+      autoBtn.insertAdjacentElement('afterend', navBtn);
+    }
+    updateProjectsNavActiveVisual();
+    if (!projectsDocListenerBound) {
+      projectsDocListenerBound = true;
+      document.addEventListener('click', onProjectsGlobalClick, true);
+      document.addEventListener('keydown', onProjectsGlobalKeyDown, true);
+      window.addEventListener('resize', positionProjectsOverlay);
+    }
+    if (projectsViewOpen) {
+      ensureProjectsSidebarObserver();
+      positionProjectsOverlay();
+    }
+    syncSidebarHideNativeProjects();
+  }
+
   /* ---- scheduling: rAF-coalesced, throttled, and blind to our own DOM writes ---- */
   const MIN_SYNC_GAP_MS = 80;
   let throttleTimer = 0;
@@ -4925,7 +7523,7 @@
   }
 
   const OWN_SEL =
-    '.ag-claude-todo-card, .ag-claude-todo-live-dock, .ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, .ag-claude-inline-editor, .ag-claude-folder-badges, #ag-claude-recent-section, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel';
+    '.ag-claude-todo-card, .ag-claude-todo-live-dock, .ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, .ag-claude-inline-editor, .ag-claude-folder-badges, #ag-claude-recent-section, #ag-recent-row-menu, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal';
   const CLASS_WATCH_SEL =
     'ul.contains-task-list, [id="antigravity.agentSidePanelInputBox"], [data-testid="tool-group-collapsible"], [data-testid="worked-for-collapsible"], [data-testid="progress-updates-collapsible"], [data-testid="ephemeral-tool-status"]';
 
@@ -5024,6 +7622,8 @@
     closeInlineEdit(false);
     clearAllFolderBadges();
     removeRecentSection();
+    clearSidebarHideNativeProjects();
+    teardownProjectsWorkspace();
     detachSettingsPanel();
     const ttEl = document.getElementById('ag-live-metrics-tooltip');
     if (ttEl) {
