@@ -11,7 +11,8 @@
  *   node install.mjs sync-fonts
  *   node install.mjs uninstall          Idempotent: a second run is a no-op
  *
- * State lives in ~/.gemini/antigravity/claude-ux/ (outside the upstream user/ dir):
+ * State lives in ~/.gemini/antigravity/anti-claude/ (outside the upstream user/ dir;
+ * legacy ~/.gemini/antigravity/claude-ux/ installs are migrated automatically):
  *   install-state.json   ownership of every file / setting this tool changed + sync timestamps
  *   backup/              pre-install originals of user/ files
  *   base/                last deployed template copies (3-way merge base, local-edit detection)
@@ -38,7 +39,7 @@ const AGY_STATE_PBTXT = path.join(AGY_DIR, 'antigravity_state.pbtxt');
 const AGY_CONFIG_JSON = path.join(GEMINI_DIR, 'config', 'config.json');
 const AGENTS_MD = path.join(GEMINI_DIR, 'AGENTS.md');
 
-const STATE_DIR = path.join(AGY_DIR, 'claude-ux');
+const STATE_DIR = path.join(AGY_DIR, 'anti-claude');
 const STATE_FILE = path.join(STATE_DIR, 'install-state.json');
 const BACKUP_DIR = path.join(STATE_DIR, 'backup');
 const BASE_DIR = path.join(STATE_DIR, 'base');
@@ -47,33 +48,39 @@ const LOCAL_SAVE_DIR = path.join(STATE_DIR, 'local-saves');
 const SYNC_LOG_FILE = path.join(STATE_DIR, 'auto-sync.log');
 const LAUNCHD_LOG_FILE = path.join(STATE_DIR, 'launchd.log');
 
-/* v1 locations, migrated on first run of this version */
+/* Legacy locations (v1 & pre-rename claude-ux), migrated automatically on first run */
+const LEGACY_V2_STATE_DIR = path.join(AGY_DIR, 'claude-ux');
+const LEGACY_V2_STATE_FILE = path.join(LEGACY_V2_STATE_DIR, 'install-state.json');
 const LEGACY_BACKUP_DIR = path.join(THEME_USER_DIR, '.backup-before-claude-ux');
 const LEGACY_SYNC_STATE_FILE = path.join(THEME_USER_DIR, '.claude-ux-sync-state.json');
 const LEGACY_SYNC_LOG_FILE = path.join(THEME_USER_DIR, 'auto-sync.log');
 
-const AUTOSYNC_LABEL = 'com.antigravity.claude-ux.autosync';
+const AUTOSYNC_LABEL = 'com.antigravity.anti-claude.autosync';
 const AUTOSYNC_PLIST = path.join(HOME, 'Library', 'LaunchAgents', `${AUTOSYNC_LABEL}.plist`);
+const LEGACY_AUTOSYNC_LABEL = 'com.antigravity.claude-ux.autosync';
+const LEGACY_AUTOSYNC_PLIST = path.join(HOME, 'Library', 'LaunchAgents', `${LEGACY_AUTOSYNC_LABEL}.plist`);
 const THEME_DAEMON_LABEL = 'com.antigravity.theme';
 const DAEMON_WRAPPER_FILE = path.join(AGY_DIR, 'scripts', 'antigravity-font-daemon.mjs');
 const AG2_SYNC_SCRIPT = path.join(AGY_DIR, 'scripts', 'sync-antigravity-2.mjs');
 
 const UPSTREAM_REPO = 'https://github.com/Anarcadia/chuanban-antigravity-theme-patch.git';
-/* Verified upstream commit (v5.4.2). Bump deliberately after testing; override with CLAUDE_UX_UPSTREAM_REF=HEAD at your own risk. */
-const UPSTREAM_REF = process.env.CLAUDE_UX_UPSTREAM_REF || '6b3783d2a5104e863084adfffea1d61f95838ead';
+/* Verified upstream commit (v5.4.2). Bump deliberately after testing; override with ANTI_CLAUDE_UPSTREAM_REF=HEAD at your own risk. */
+const UPSTREAM_REF = process.env.ANTI_CLAUDE_UPSTREAM_REF || process.env.CLAUDE_UX_UPSTREAM_REF || '6b3783d2a5104e863084adfffea1d61f95838ead';
 const SELF_REPO = 'https://github.com/hongqi7/Anti-Claude.git';
-const RULE_BEGIN = '<!-- BEGIN antigravity-claude-ux -->';
-const RULE_END = '<!-- END antigravity-claude-ux -->';
+const RULE_BEGIN = '<!-- BEGIN anti-claude -->';
+const RULE_END = '<!-- END anti-claude -->';
+const LEGACY_RULE_BEGIN = '<!-- BEGIN antigravity-claude-ux -->';
+const LEGACY_RULE_END = '<!-- END antigravity-claude-ux -->';
 const LEGACY_HEADING = '## 执行过程同步（Claude 式边做边汇报）';
 const USER_LAYER_FILES = ['config.json', 'custom.css', 'custom.js', 'i18n.override.json'];
 const STUB_CONTENT = { 'custom.css': '/* user/custom.css */\n', 'custom.js': '/* user/custom.js */\n' };
 
 const REMOTE_CHECK_INTERVAL_MS = 11 * 3600 * 1000; // < launchd StartInterval (12h)
-const NO_NETWORK = process.env.CLAUDE_UX_NO_NETWORK === '1';
-const NO_LAUNCHD = process.env.CLAUDE_UX_NO_LAUNCHD === '1';
-const NO_CDP = process.env.CLAUDE_UX_NO_CDP === '1';
-const NO_FONTS = process.env.CLAUDE_UX_NO_FONTS === '1';
-const CDP_TIMEOUT_MS = Number(process.env.CLAUDE_UX_CDP_TIMEOUT_MS) || 5000;
+const NO_NETWORK = process.env.ANTI_CLAUDE_NO_NETWORK === '1' || process.env.CLAUDE_UX_NO_NETWORK === '1';
+const NO_LAUNCHD = process.env.ANTI_CLAUDE_NO_LAUNCHD === '1' || process.env.CLAUDE_UX_NO_LAUNCHD === '1';
+const NO_CDP = process.env.ANTI_CLAUDE_NO_CDP === '1' || process.env.CLAUDE_UX_NO_CDP === '1';
+const NO_FONTS = process.env.ANTI_CLAUDE_NO_FONTS === '1' || process.env.CLAUDE_UX_NO_FONTS === '1';
+const CDP_TIMEOUT_MS = Number(process.env.ANTI_CLAUDE_CDP_TIMEOUT_MS || process.env.CLAUDE_UX_CDP_TIMEOUT_MS) || 5000;
 const STATE_SCHEMA = 2;
 
 /* -------------------------------------------------------------------------- */
@@ -367,18 +374,39 @@ function migrateLegacyState() {
     };
   }
   const agentsRaw = readTextSafe(AGENTS_MD) || '';
-  state.agentsRule.inserted = agentsRaw.includes(RULE_BEGIN);
-  state.options.autoUpdate = fs.existsSync(AUTOSYNC_PLIST);
+  state.agentsRule.inserted = agentsRaw.includes(RULE_BEGIN) || agentsRaw.includes(LEGACY_RULE_BEGIN);
+  state.options.autoUpdate = fs.existsSync(AUTOSYNC_PLIST) || fs.existsSync(LEGACY_AUTOSYNC_PLIST);
   saveState(state);
   fs.rmSync(LEGACY_BACKUP_DIR, { recursive: true, force: true });
   fs.rmSync(LEGACY_SYNC_STATE_FILE, { force: true });
   return state;
 }
 
+function migrateLegacyV2State() {
+  const legacyState = readJsonSafe(LEGACY_V2_STATE_FILE, null);
+  if (!legacyState || legacyState.schema !== STATE_SCHEMA) return null;
+  if (!fs.existsSync(STATE_DIR)) {
+    fs.mkdirSync(path.dirname(STATE_DIR), { recursive: true });
+    try {
+      fs.renameSync(LEGACY_V2_STATE_DIR, STATE_DIR);
+    } catch {
+      fs.cpSync(LEGACY_V2_STATE_DIR, STATE_DIR, { recursive: true });
+      fs.rmSync(LEGACY_V2_STATE_DIR, { recursive: true, force: true });
+    }
+  } else {
+    fs.cpSync(LEGACY_V2_STATE_DIR, STATE_DIR, { recursive: true, force: false });
+    fs.rmSync(LEGACY_V2_STATE_DIR, { recursive: true, force: true });
+  }
+  legacyState.migratedFrom = legacyState.migratedFrom || 'claude-ux';
+  legacyState.repoUrl = SELF_REPO;
+  saveState(legacyState);
+  return legacyState;
+}
+
 function loadState() {
   const st = readJsonSafe(STATE_FILE, null);
   if (st && st.schema === STATE_SCHEMA) return st;
-  return migrateLegacyState();
+  return migrateLegacyV2State() || migrateLegacyState();
 }
 
 function saveState(state) {
@@ -671,13 +699,24 @@ async function revertStepUnlock(state) {
 /* AGENTS.md rule                                                             */
 /* -------------------------------------------------------------------------- */
 
+function findMarkedRuleSpan(text) {
+  for (const [bTag, eTag] of [
+    [RULE_BEGIN, RULE_END],
+    [LEGACY_RULE_BEGIN, LEGACY_RULE_END]
+  ]) {
+    const begin = text.indexOf(bTag);
+    const end = begin !== -1 ? text.indexOf(eTag, begin) : -1;
+    if (begin !== -1 && end > begin) return { begin, end: end + eTag.length };
+  }
+  return null;
+}
+
 function injectAgentsMdRule(state, { allowInsert }) {
   const ruleBlock = fs.readFileSync(path.join(__dirname, 'rules', 'claude-execution-sync.md'), 'utf8').trim();
   const existing = readTextSafe(AGENTS_MD) || '';
-  const begin = existing.indexOf(RULE_BEGIN);
-  const end = existing.indexOf(RULE_END);
-  if (begin !== -1 && end > begin) {
-    const next = existing.slice(0, begin) + ruleBlock + existing.slice(end + RULE_END.length);
+  const span = findMarkedRuleSpan(existing);
+  if (span) {
+    const next = existing.slice(0, span.begin) + ruleBlock + existing.slice(span.end);
     if (next !== existing) writeFileAtomic(AGENTS_MD, next);
     return next !== existing ? 'updated_marked_block' : 'unchanged';
   }
@@ -692,12 +731,11 @@ function injectAgentsMdRule(state, { allowInsert }) {
 function removeAgentsMdRule() {
   const existing = readTextSafe(AGENTS_MD);
   if (!existing) return false;
-  const begin = existing.indexOf(RULE_BEGIN);
-  const end = existing.indexOf(RULE_END);
-  if (begin === -1 || end < begin) return false;
-  let tail = existing.slice(end + RULE_END.length);
+  const span = findMarkedRuleSpan(existing);
+  if (!span) return false;
+  let tail = existing.slice(span.end);
   tail = tail.replace(/^\s*(?:---\s*)?/, '');
-  const head = existing.slice(0, begin);
+  const head = existing.slice(0, span.begin);
   writeFileAtomic(AGENTS_MD, (head + tail).replace(/^\s+/, ''));
   return true;
 }
@@ -780,7 +818,7 @@ function installUserLayer(state, { sourceRoot = __dirname, overwriteLocal = fals
 
 function restoreUserLayer(state) {
   const out = { restored: [], removed: [], stubbed: [], kept: [], savedLocalEdits: [] };
-  const saveDir = path.join(AGY_DIR, `claude-ux-uninstall-saved-${new Date().toISOString().replace(/[:.]/g, '-')}`);
+  const saveDir = path.join(AGY_DIR, `anti-claude-uninstall-saved-${new Date().toISOString().replace(/[:.]/g, '-')}`);
   for (const f of USER_LAYER_FILES) {
     const entry = state.files?.[f];
     if (!entry) continue;
@@ -1035,6 +1073,12 @@ function enableMacAutoUpdateAgent() {
 `;
   writeFileAtomic(AUTOSYNC_PLIST, plistXml);
   const uid = typeof process.getuid === 'function' ? process.getuid() : 501;
+  if (fs.existsSync(LEGACY_AUTOSYNC_PLIST)) {
+    try {
+      execFileSync('launchctl', ['bootout', `gui/${uid}`, LEGACY_AUTOSYNC_PLIST], { stdio: 'ignore' });
+    } catch {}
+    fs.rmSync(LEGACY_AUTOSYNC_PLIST, { force: true });
+  }
   try {
     execFileSync('launchctl', ['bootout', `gui/${uid}`, AUTOSYNC_PLIST], { stdio: 'ignore' });
   } catch {}
@@ -1047,25 +1091,32 @@ function enableMacAutoUpdateAgent() {
 }
 
 function disableMacAutoUpdateAgent() {
-  if (process.platform !== 'darwin' || !fs.existsSync(AUTOSYNC_PLIST)) return { removed: false };
+  if (process.platform !== 'darwin') return { removed: false };
   const uid = typeof process.getuid === 'function' ? process.getuid() : 501;
-  if (!NO_LAUNCHD) {
-    try {
-      execFileSync('launchctl', ['bootout', `gui/${uid}`, AUTOSYNC_PLIST], { stdio: 'ignore' });
-    } catch {}
+  let removed = false;
+  for (const plist of [AUTOSYNC_PLIST, LEGACY_AUTOSYNC_PLIST]) {
+    if (!fs.existsSync(plist)) continue;
+    if (!NO_LAUNCHD) {
+      try {
+        execFileSync('launchctl', ['bootout', `gui/${uid}`, plist], { stdio: 'ignore' });
+      } catch {}
+    }
+    fs.rmSync(plist, { force: true });
+    removed = true;
   }
-  fs.rmSync(AUTOSYNC_PLIST, { force: true });
-  return { removed: true, label: AUTOSYNC_LABEL };
+  return removed ? { removed: true, label: AUTOSYNC_LABEL } : { removed: false };
 }
 
 function inspectAutoUpdateAgent() {
-  const xml = readTextSafe(AUTOSYNC_PLIST);
+  const activePlist = fs.existsSync(AUTOSYNC_PLIST) ? AUTOSYNC_PLIST : fs.existsSync(LEGACY_AUTOSYNC_PLIST) ? LEGACY_AUTOSYNC_PLIST : null;
+  const xml = activePlist ? readTextSafe(activePlist) : null;
   if (!xml) return { installed: false };
   const m = xml.match(/<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]+)<\/string>\s*<string>([^<]+)<\/string>/);
   const nodePath = m ? m[1].replace(/&amp;/g, '&') : null;
   const scriptPath = m ? m[2].replace(/&amp;/g, '&') : null;
   return {
     installed: true,
+    legacyPlist: activePlist === LEGACY_AUTOSYNC_PLIST,
     nodePath,
     nodeExists: Boolean(nodePath && fs.existsSync(nodePath)),
     nodeVersionPinned: Boolean(nodePath && /\/Cellar\/|\/\.nvm\/versions\//.test(nodePath)),
@@ -1089,7 +1140,10 @@ async function cmdDoctor() {
   if (agent.installed && !agent.nodeExists) warnings.push('auto-update LaunchAgent points to a missing node binary: run auto-update-on again');
   if (agent.installed && !agent.scriptExists) warnings.push('auto-update LaunchAgent points to a missing install.mjs');
   if (incoming.length) warnings.push(`template updates held back because of local edits: ${incoming.join(', ')} (see ${INCOMING_DIR})`);
-  if (!state && fs.existsSync(LEGACY_BACKUP_DIR)) warnings.push('v1 install detected: run `install` once to migrate the install state');
+  if (!state && (fs.existsSync(LEGACY_V2_STATE_FILE) || fs.existsSync(LEGACY_BACKUP_DIR))) {
+    warnings.push('legacy claude-ux install detected: run `install` once to migrate the install state to anti-claude');
+  }
+  if (agent.legacyPlist) warnings.push('legacy claude-ux LaunchAgent detected: run `install` or `auto-update-on` to migrate to com.antigravity.anti-claude.autosync');
   return finalize(
     {
       platform: process.platform,
@@ -1105,7 +1159,7 @@ async function cmdDoctor() {
       fonts: checkFontsInstalled(),
       developerStepSkinUnlocked: pbtxt.includes('PRODUCT_SKIN_DEVELOPER'),
       verboseConversationSteps: cfg?.userSettings?.verboseConversationSteps ?? null,
-      agentsRuleConfigured: agentsRaw.includes(RULE_BEGIN) || agentsRaw.includes(LEGACY_HEADING)
+      agentsRuleConfigured: agentsRaw.includes(RULE_BEGIN) || agentsRaw.includes(LEGACY_RULE_BEGIN) || agentsRaw.includes(LEGACY_HEADING)
     },
     { warnings }
   );
@@ -1228,6 +1282,9 @@ async function cmdSyncUpgrade(flags) {
   if (appChanged && state.options.stepUnlock) stepUnlock = await applyStepUnlock(state);
   const ruleStatus = state.options.agentsRule ? injectAgentsMdRule(state, { allowInsert: false }) : 'disabled_by_option';
   const cdpBootstrap = ensureMacCdpBootstrapWrapper();
+  if (state.options.autoUpdate && process.platform === 'darwin' && !NO_LAUNCHD && fs.existsSync(LEGACY_AUTOSYNC_PLIST)) {
+    enableMacAutoUpdateAgent();
+  }
   const ag2Sync = appChanged ? syncAntigravity2IfInstalled() : { skipped: 'app_unchanged' };
   if (ag2Sync.error) warnings.push(`antigravity-2 sync: ${ag2Sync.error}`);
 
@@ -1261,6 +1318,7 @@ async function cmdUninstall() {
   if (files.savedLocalEdits.length) warnings.push(`your post-install edits were saved: ${files.savedLocalEdits.join(', ')}`);
   const ruleRemoved = removeAgentsMdRule();
   fs.rmSync(STATE_DIR, { recursive: true, force: true });
+  fs.rmSync(LEGACY_V2_STATE_DIR, { recursive: true, force: true });
   fs.rmSync(LEGACY_SYNC_LOG_FILE, { force: true });
   const verify = runUpstreamVerify();
   return finalize({ autoUpdateRemoved, wrapperRestored, settings, files, ruleRemoved, verify }, { warnings });

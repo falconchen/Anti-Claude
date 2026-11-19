@@ -170,8 +170,12 @@ div[contenteditable="true"] :is(p, span, div, li),
   line-height: 1.6 !important;
 }
 
-/* Hide redundant circular question-mark icon before ask_question header text */
+/* Hide redundant question-mark icons on active ask_question prompts and answered question summary cards */
 [data-testid="ask-question-header-icon"] {
+  display: none !important;
+}
+
+.rounded-xl.border > div.border-b > svg:has(> path[d^="M477.92-295.77"]) {
   display: none !important;
 }
 

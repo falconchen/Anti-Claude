@@ -1259,3 +1259,49 @@ test('dictation editor isolation, ask-question icon removal & Orchestrator model
   h.cleanups.forEach((fn) => fn());
   h.close();
 });
+
+test('answered ask_question card hides speech-bubble ? icon and live TodoWrite stays spinning while drafting in composer', { skip }, async () => {
+  const css = fs.readFileSync(path.join(REPO, 'user', 'custom.css'), 'utf8');
+  assert.match(css, /\.rounded-xl\.border\s*>\s*div\.border-b\s*>\s*svg:has\(>\s*path\[d\^="M477\.92-295\.77"\]\)/);
+
+  /* Active turn with `<h6>Agent working</h6>` but NO `input-cancel-button` (user drafting a queued message mid-turn) */
+  const html = `
+    <section>
+      <div data-testid="agent-response">
+        <h6 class="sr-only">Agent working</h6>
+        <div data-markdown-root="true">
+          ${ul(li('Step one', 'completed'), li('Step two', 'in_progress'), li('Step three', 'pending'))}
+        </div>
+        <p>Working on step two...</p>
+      </div>
+      <div id="antigravity.agentSidePanelInputBox">
+        <button type="button" data-testid="input-send-button">Send</button>
+      </div>
+    </section>
+  `;
+  const h = mount(html);
+  h.window.__t.syncStepStream();
+  await settle(h);
+
+  const dock = h.doc.querySelector('[data-ag-todo-dock="true"]');
+  assert.ok(dock, 'live dock stays mounted even when composer swaps cancel button for send button');
+  const card = dock.querySelector('.ag-claude-todo-card');
+  assert.ok(card && !card.hasAttribute('data-ag-todo-paused'), 'active turn is never marked Paused while Agent working');
+
+  /* Localized Chinese heading (`Agent 正在执行`) also keeps card live */
+  const h6 = h.doc.querySelector('[data-testid="agent-response"] > h6');
+  h6.textContent = 'Agent 正在执行';
+  h.window.__t.syncStepStream();
+  assert.ok(h.doc.querySelector('[data-ag-todo-dock="true"]'), 'localized Agent 正在执行 keeps dock live');
+
+  /* Once the turn finishes/cancels (`Agent said`), undock & show Paused if incomplete */
+  h6.textContent = 'Agent said';
+  h.window.__t.syncStepStream();
+  await new Promise((r) => setTimeout(r, 340));
+  h.window.__t.syncStepStream();
+  const inlineCard = h.doc.querySelector('.ag-claude-todo-card[data-ag-todo-paused="true"]');
+  assert.ok(inlineCard, 'incomplete turn becomes Paused once heading switches to Agent said');
+
+  h.cleanups.forEach((fn) => fn());
+  h.close();
+});

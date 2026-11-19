@@ -91,9 +91,10 @@ test('install then uninstall restores files, settings and AGENTS.md exactly', ()
     assert.match(h.readUser('custom.js'), /ag-claude-todo-card/);
     assert.match(h.read('.gemini/antigravity/antigravity_state.pbtxt'), /PRODUCT_SKIN_DEVELOPER/);
     assert.equal(JSON.parse(h.read('.gemini/config/config.json')).userSettings.verboseConversationSteps, true);
-    assert.match(h.read('.gemini/AGENTS.md'), /BEGIN antigravity-claude-ux/);
+    assert.match(h.read('.gemini/AGENTS.md'), /BEGIN anti-claude/);
     assert.match(h.read('.gemini/AGENTS.md'), /Execution Progress Sync/);
     assert.match(h.read('.gemini/AGENTS.md'), /same language the user is speaking/);
+    assert.match(h.read('.gemini/AGENTS.md'), /ask_question/);
 
     const un = run(h, ['uninstall']);
     assert.equal(un.status, 0, un.stderr);
@@ -106,7 +107,7 @@ test('install then uninstall restores files, settings and AGENTS.md exactly', ()
     assert.equal(cfg.userSettings.verboseConversationSteps, false);
     assert.equal(cfg.userSettings.other, 1);
     assert.equal(h.read('.gemini/AGENTS.md'), before.agents);
-    assert.equal(h.exists('.gemini/antigravity/claude-ux'), false);
+    assert.equal(h.exists('.gemini/antigravity/anti-claude'), false);
   } finally {
     h.cleanup();
   }
@@ -165,7 +166,7 @@ test('sync keeps user edits: JSON overrides survive, edited CSS is not overwritt
     const o = run(h, ['sync-upgrade', '--overwrite-local']);
     assert.equal(o.status, 0);
     assert.doesNotMatch(h.readUser('custom.css'), /my tweak/);
-    const saves = fs.readdirSync(path.join(h.home, '.gemini/antigravity/claude-ux/local-saves'));
+    const saves = fs.readdirSync(path.join(h.home, '.gemini/antigravity/anti-claude/local-saves'));
     assert.ok(saves.some((f) => f.endsWith('custom.css')));
   } finally {
     h.cleanup();
@@ -194,7 +195,7 @@ test('background sync does not re-add a removed AGENTS.md rule or re-force step 
     fs.writeFileSync(path.join(h.home, '.gemini/antigravity/antigravity_state.pbtxt'), 'product_skin: PRODUCT_SKIN_NON_TECHNICAL\n');
     const s = run(h, ['sync-upgrade']);
     assert.equal(s.out.ruleStatus, 'absent_respected');
-    assert.doesNotMatch(h.read('.gemini/AGENTS.md'), /antigravity-claude-ux/);
+    assert.doesNotMatch(h.read('.gemini/AGENTS.md'), /anti-claude|antigravity-claude-ux/);
     assert.match(h.read('.gemini/antigravity/antigravity_state.pbtxt'), /NON_TECHNICAL/);
   } finally {
     h.cleanup();
@@ -236,6 +237,34 @@ test('v1 installs are migrated and can then be uninstalled cleanly', () => {
     assert.equal(h.readUser('custom.js'), '/* my original js */\n');
     /* v1 never recorded previous settings, so they are left alone */
     assert.match(un.out.settings.note, /v1/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('legacy claude-ux v2 installs migrate automatically to anti-claude and upgrade AGENTS.md marker', () => {
+  const h = makeHome();
+  try {
+    run(h, ['install']);
+    /* Simulate a pre-rename claude-ux install on disk */
+    fs.renameSync(path.join(h.home, '.gemini/antigravity/anti-claude'), path.join(h.home, '.gemini/antigravity/claude-ux'));
+    fs.writeFileSync(
+      path.join(h.home, '.gemini/AGENTS.md'),
+      '<!-- BEGIN antigravity-claude-ux -->\nold block\n<!-- END antigravity-claude-ux -->\n\n---\n\n# my rules\n'
+    );
+    const s = run(h, ['sync-upgrade']);
+    assert.equal(s.status, 0, s.stderr);
+    assert.equal(h.exists('.gemini/antigravity/claude-ux'), false, 'old claude-ux state dir migrated away');
+    assert.equal(h.exists('.gemini/antigravity/anti-claude/install-state.json'), true, 'new anti-claude state dir created');
+    assert.match(h.read('.gemini/AGENTS.md'), /BEGIN anti-claude/);
+    assert.doesNotMatch(h.read('.gemini/AGENTS.md'), /BEGIN antigravity-claude-ux/);
+    assert.match(h.read('.gemini/AGENTS.md'), /# my rules/);
+
+    const un = run(h, ['uninstall']);
+    assert.equal(un.status, 0, un.stderr);
+    assert.equal(h.read('.gemini/AGENTS.md'), '# my rules\n');
+    assert.equal(h.readUser('custom.css'), '/* my original css */\n');
+    assert.equal(h.exists('.gemini/antigravity/anti-claude'), false);
   } finally {
     h.cleanup();
   }

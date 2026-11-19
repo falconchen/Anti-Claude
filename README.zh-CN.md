@@ -46,12 +46,12 @@ node ~/Developer/Anti-Claude/install.mjs uninstall             # 卸载并还原
 
 ## 本机改动范围
 
-安装器不触碰 `/Applications/Antigravity.app`，仅修改以下用户层文件（全部记录在 `~/.gemini/antigravity/claude-ux/install-state.json`，执行 `uninstall` 逐项还原）：
+安装器不触碰 `/Applications/Antigravity.app`，仅修改以下用户层文件（全部记录在 `~/.gemini/antigravity/anti-claude/install-state.json`，执行 `uninstall` 逐项还原）：
 
-- `~/.gemini/AGENTS.md`：写入「边做边汇报 + 隐形进度标记」协作规则（可用 `--no-agents-rule` 跳过）。
+- `~/.gemini/AGENTS.md`：写入「边做边汇报 + 隐形进度标记 + 交互式选择卡」协作规则（可用 `--no-agents-rule` 跳过）。
 - `antigravity_state.pbtxt` 与 `~/.gemini/config/config.json`：开启完整步骤详情展示（可用 `--no-step-unlock` 跳过）。
 - `~/.gemini/antigravity/theme-patch/user/`：写入样式、脚本与配置（未装 [`chuanban-antigravity-theme-patch`](https://github.com/Anarcadia/chuanban-antigravity-theme-patch) 时自动拉取；手动改过的本地文件升级时不覆盖）。
-- `~/Library/LaunchAgents/com.antigravity.claude-ux.autosync.plist`：监听客户端升级并定期同步（可用 `--no-auto-update` 跳过）。
+- `~/Library/LaunchAgents/com.antigravity.anti-claude.autosync.plist`：监听客户端升级并定期同步（可用 `--no-auto-update` 跳过）。
 
 ## 致谢与许可
 

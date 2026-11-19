@@ -341,11 +341,31 @@
     return null;
   }
 
+  const AGENT_WORKING_H6_RE = /^(?:Agent\s+working|Agent\s*正在执行|Agent\s*正在工作|正在工作)$/i;
+  function paneHasWorkingHeading(root) {
+    if (!root || !root.querySelectorAll) return false;
+    const turns = root.querySelectorAll('[data-testid="agent-response"]');
+    if (!turns.length) return false;
+    const lastTurn = turns[turns.length - 1];
+    const h6 = lastTurn.querySelector(':scope > h6.sr-only, :scope > h6');
+    if (!h6) return false;
+    const origMap = window.__ag_orig_text_map;
+    const raw =
+      (origMap && h6.firstChild && origMap.get(h6.firstChild) && origMap.get(h6.firstChild).origRaw) ||
+      h6.textContent ||
+      '';
+    return AGENT_WORKING_H6_RE.test(raw.trim());
+  }
+
   function isPaneActivelyGenerating(pane) {
     if (!pane) return false;
-    const hasCancel = Boolean(pane.inputBox.querySelector('button[data-testid="input-cancel-button"]'));
+    /* Composer replaces `input-cancel-button` with the send/queue arrow whenever the user drafts a follow-up
+       or attaches an image mid-turn, so also check the active turn's native `<h6>Agent working</h6>` heading. */
+    const isActive =
+      Boolean(pane.inputBox.querySelector('button[data-testid="input-cancel-button"]')) ||
+      paneHasWorkingHeading(pane.root);
     const now = Date.now();
-    if (hasCancel) {
+    if (isActive) {
       paneLastActiveTs.set(pane.root, now);
       const pendingTimer = paneUndockTimers.get(pane.root);
       if (pendingTimer) {
@@ -973,7 +993,9 @@
       ? Array.from(document.querySelectorAll('button[data-testid="tool-group-collapsible"], [data-testid="ephemeral-tool-status"]'))
       : [];
     const panes = panesArg || collectPanes();
-    const globalGenerating = Boolean(document.querySelector('button[data-testid="input-cancel-button"]'));
+    const globalGenerating =
+      Boolean(document.querySelector('button[data-testid="input-cancel-button"]')) ||
+      panes.some((p) => paneHasWorkingHeading(p.root));
 
     /* "last row" and "generating" are evaluated per pane, so a busy pane never lights up another one */
     const lastInPane = new Map();
@@ -987,7 +1009,11 @@
     const paneGenerating = (pane) => {
       if (!pane) return panes.length === 0 && globalGenerating;
       if (!generatingCache.has(pane)) {
-        generatingCache.set(pane, Boolean(pane.inputBox.querySelector('button[data-testid="input-cancel-button"]')));
+        generatingCache.set(
+          pane,
+          Boolean(pane.inputBox.querySelector('button[data-testid="input-cancel-button"]')) ||
+            paneHasWorkingHeading(pane.root)
+        );
       }
       return generatingCache.get(pane);
     };
@@ -2435,7 +2461,7 @@
       ring.setAttribute('data-no-drag', '');
       ring.setAttribute('data-ag-i18n-ignore', '1');
       ring.setAttribute('data-open', quotaPopoverOpen ? 'true' : 'false');
-      ring.setAttribute('aria-label', '上下文与套餐使用限额');
+      ring.setAttribute('aria-label', L('上下文与套餐使用限额', 'Context window & plan usage'));
       ring.innerHTML =
         '<svg width="15" height="15" viewBox="0 0 20 20" aria-hidden="true">' +
         '<circle class="ag-ctx-ring-track" cx="10" cy="10" r="7" fill="none" stroke-width="2.15"/>' +

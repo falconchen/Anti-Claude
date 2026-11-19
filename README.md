@@ -46,12 +46,12 @@ By default, Antigravity hides reasoning inside collapsed `thinking` blocks, runs
 
 ## Local Footprint
 
-The installer never touches `/Applications/Antigravity.app`. It only manages the following user-level files (tracked in `~/.gemini/antigravity/claude-ux/install-state.json` and cleanly restored on `uninstall`):
+The installer never touches `/Applications/Antigravity.app`. It only manages the following user-level files (tracked in `~/.gemini/antigravity/anti-claude/install-state.json` and cleanly restored on `uninstall`):
 
-- `~/.gemini/AGENTS.md`: Adds the execution-sync and `TodoWrite` collaboration rule block (skip with `--no-agents-rule`).
+- `~/.gemini/AGENTS.md`: Adds the execution-sync, `TodoWrite`, and `ask_question` collaboration rule block (skip with `--no-agents-rule`).
 - `antigravity_state.pbtxt` & `~/.gemini/config/config.json`: Enables detailed step visibility (skip with `--no-step-unlock`).
 - `~/.gemini/antigravity/theme-patch/user/`: Deploys CSS, JS, and config (auto-installs [`chuanban-antigravity-theme-patch`](https://github.com/Anarcadia/chuanban-antigravity-theme-patch) if absent; preserves local customizations via 3-way merge).
-- `~/Library/LaunchAgents/com.antigravity.claude-ux.autosync.plist`: Watches client upgrades and syncs periodically (skip with `--no-auto-update`).
+- `~/Library/LaunchAgents/com.antigravity.anti-claude.autosync.plist`: Watches client upgrades and syncs periodically (skip with `--no-auto-update`).
 
 ## Credits & License
 
