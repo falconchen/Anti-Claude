@@ -1134,3 +1134,83 @@ test('inline pill CJK hygiene, slice marker TodoWrite recovery & fractional sub-
   assert.equal(codes[0].nextSibling.nodeValue, ' ，发布 ');
   h.close();
 });
+
+test('dictation editor isolation, ask-question icon removal & Orchestrator model pass-through', { skip }, async () => {
+  const customCss = fs.readFileSync(path.join(REPO, 'user', 'custom.css'), 'utf8');
+  const configJson = JSON.parse(fs.readFileSync(path.join(REPO, 'user', 'config.json'), 'utf8'));
+  const i18nOverride = JSON.parse(fs.readFileSync(path.join(REPO, 'user', 'i18n.override.json'), 'utf8'));
+
+  /* 1. Editable Lexical / textarea / input blocks isolate from @font-face size-adjust and force no-autospace + space-all */
+  assert.match(customCss, /--font-editor-sans:/);
+  assert.match(
+    customCss,
+    /\[data-lexical-editor="true"\][\s\S]*?font-family:\s*var\(--font-editor-sans\)\s*!important[\s\S]*?text-autospace:\s*no-autospace\s*!important[\s\S]*?text-spacing-trim:\s*space-all\s*!important/
+  );
+  assert.match(customCss, /\[data-testid="ask-question-header-icon"\]\s*\{\s*display:\s*none\s*!important;\s*\}/);
+
+  /* 2. i18n config & override protect all Orchestrator model names */
+  const ex = configJson.selectors && configJson.selectors.excludeI18n;
+  for (const sel of [
+    '[data-testid="model-selector-trigger"]',
+    '[data-ag-i18n-ignore="1"]',
+    '#ag-claude-model-popover',
+    '#ag-claude-model-subpop'
+  ]) {
+    assert.ok(ex.includes(sel), `excludeI18n contains ${sel}`);
+  }
+  assert.equal(i18nOverride['Orchestrator (Neon)'], 'Orchestrator (Neon)');
+
+  /* 3. syncModelTriggerDisplay restores accidentally translated Orchestrator text and maps XHigh -> Extra */
+  const html = `
+    <section>
+      <div id="antigravity.agentSidePanelInputBox">
+        <button type="button" data-testid="model-selector-trigger"><span>编排器 (Neon)</span></button>
+      </div>
+    </section>
+  `;
+  const h = mount(html);
+  h.window.__t.syncStepStream();
+  await settle(h);
+  const btn = h.doc.querySelector('button[data-testid="model-selector-trigger"]');
+  assert.equal(btn.getAttribute('data-ag-i18n-ignore'), '1');
+  assert.equal(btn.textContent.trim(), 'Orchestrator (Neon)');
+
+  btn.querySelector('span').textContent = 'Gemini 4 Carbon Extra High';
+  h.window.__t.syncStepStream();
+  assert.equal(btn.textContent.trim(), 'Gemini 4 Carbon Extra');
+
+  /* 4. Primary list places Gemini 4 Neon above Argon (5 items) and omits Orch abbreviation on 更多模型 */
+  btn.__reactFiber$m = {
+    memoizedProps: {
+      selectedModel: { label: 'Orchestrator (Neon)', value: 'orch-neon' },
+      setSelectedModel: () => {},
+      modelOptions: [
+        { label: 'Gemini 4 Carbon (High)', value: 'c-h' },
+        { label: 'Gemini 4 Argon (High)', value: 'a-h' },
+        { label: 'Gemini 4 Hydrogen (High)', value: 'h-h' },
+        { label: 'Gemini 3.8 Flash', value: 'f' },
+        { label: 'Gemini 4 Neon (High)', value: 'n-h' },
+        { label: 'Orchestrator (Neon)', value: 'orch-neon' },
+        { label: 'Claude Opus 5.5', value: 'opus' }
+      ]
+    }
+  };
+  btn.dispatchEvent(new h.window.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+  const mainPop = h.doc.getElementById('ag-claude-model-popover');
+  const primaryNames = [...mainPop.querySelectorAll('[data-ag-cm-family]')].map((el) =>
+    el.getAttribute('data-ag-cm-family')
+  );
+  assert.deepEqual(primaryNames, [
+    'Gemini 4 Carbon',
+    'Gemini 4 Neon',
+    'Gemini 4 Argon',
+    'Gemini 4 Hydrogen',
+    'Gemini 3.8 Flash'
+  ]);
+  const moreRow = mainPop.querySelector('[data-ag-cm-subtrigger="more"]');
+  assert.ok(moreRow && moreRow.querySelector('.ag-cm-dot'), 'blue dot marks active model inside 更多模型');
+  assert.equal(moreRow.textContent.includes('Orch'), false, 'no abbreviated label shown on 更多模型 row');
+
+  h.cleanups.forEach((fn) => fn());
+  h.close();
+});

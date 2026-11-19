@@ -1149,6 +1149,7 @@
       if (oldRing) oldRing.remove();
       if (typeof closeQuotaPopover === 'function') closeQuotaPopover();
     }
+    syncModelTriggerDisplay();
     syncSidebarEnhancements();
     reconcileSettingsPanel();
   }
@@ -2513,6 +2514,25 @@
     return document.querySelector('button[data-testid="model-selector-trigger"]');
   }
 
+  function syncModelTriggerDisplay() {
+    if (disposed || !FEAT.modelMenu) return;
+    const btns = document.querySelectorAll('button[data-testid="model-selector-trigger"]');
+    for (const btn of btns) {
+      if (btn.getAttribute('data-ag-i18n-ignore') !== '1') {
+        btn.setAttribute('data-ag-i18n-ignore', '1');
+      }
+      const walker = document.createTreeWalker(btn, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        const raw = node.nodeValue;
+        if (!raw) continue;
+        let next = raw.replace(/编排器\s*\(([^)]+)\)/g, 'Orchestrator ($1)');
+        next = next.replace(/\b(?:Extra High|XHigh)\b/g, 'Extra');
+        if (next !== raw) node.nodeValue = next;
+      }
+    }
+  }
+
   function discoverModelSelectorApi(btnEl) {
     const btn = btnEl || findModelTriggerBtn();
     if (!btn) return null;
@@ -2536,8 +2556,9 @@
 
     const familyMap = new Map();
     for (const opt of allOpts) {
-      const m = String(opt.label).match(EFFORT_LABEL_RE);
-      const baseName = m ? m[1].trim() : String(opt.label).trim();
+      const normalizedLabel = String(opt.label).replace(/编排器\s*\(([^)]+)\)/g, 'Orchestrator ($1)');
+      const m = normalizedLabel.match(EFFORT_LABEL_RE);
+      const baseName = m ? m[1].trim() : normalizedLabel.trim();
       const effort = m ? EFFORT_NORM[m[2].toLowerCase()] || m[2] : null;
       let fam = familyMap.get(baseName);
       if (!fam) {
@@ -2561,16 +2582,17 @@
 
     const coreRank = (name) => {
       if (/carbon/i.test(name)) return 0;
-      if (/argon/i.test(name)) return 1;
-      if (/hydrogen/i.test(name)) return 2;
-      if (/flash/i.test(name)) return 3;
+      if (/neon/i.test(name)) return 1;
+      if (/argon/i.test(name)) return 2;
+      if (/hydrogen/i.test(name)) return 3;
+      if (/flash/i.test(name)) return 4;
       return 10;
     };
 
     const primaryFamilies = families
       .filter(isCoreGemini)
       .sort((a, b) => coreRank(a.baseName) - coreRank(b.baseName))
-      .slice(0, 4);
+      .slice(0, 5);
 
     const primarySet = new Set(primaryFamilies);
     const moreFamilies = families
@@ -2764,10 +2786,6 @@
           : '固定';
 
     const activeInMore = cat.moreFamilies.some((x) => cat.activeFamily && x.fam.baseName === cat.activeFamily.baseName);
-    const moreShortLabel =
-      activeInMore && cat.activeFamily
-        ? cat.activeFamily.baseName.replace(/^Orchestrator\s*/i, 'Orch ').replace(/^Claude\s+/i, '')
-        : '';
 
     const primaryRowsHtml = cat.primaryFamilies
       .map((fam, idx) => {
@@ -2804,7 +2822,6 @@
           ${activeInMore ? '<span class="ag-cm-dot"></span>' : ''}
         </span>
         <span class="ag-cm-right">
-          ${moreShortLabel ? `<span style="font-size:12px;">${escapeHtml(moreShortLabel)}</span>` : ''}
           ${SVG_CM_CHEVRON}
         </span>
       </button>
@@ -3107,7 +3124,7 @@
       if (t) t.focus();
       return;
     }
-    if (plain && /^[1-4]$/.test(e.key)) {
+    if (plain && /^[1-5]$/.test(e.key)) {
       const idx = Number(e.key) - 1;
       const api = discoverModelSelectorApi();
       if (api) {
