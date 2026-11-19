@@ -508,8 +508,10 @@
    */
   const PROGRESS_RE =
     /<!--\s*todo\s*:\s*(\d+)\s*\/\s*(\d+)\s*-->|〔\s*进度\s*(\d+)\s*\/\s*(\d+)\s*〕|\[\s*progress\s*(\d+)\s*\/\s*(\d+)\s*\]/gi;
+  const TODO_DONE_RE = /<!--\s*todo\s*:\s*done(?:\s*\/\s*\d+)?\s*-->/i;
   const LEGACY_MARKER_LINE_RE = /^\s*(?:〔\s*进度\s*\d+\s*\/\s*\d+\s*〕|\[\s*progress\s*\d+\s*\/\s*\d+\s*\])[^\n]*$/i;
   const turnProgressByTotal = new WeakMap();
+  const turnTodoDone = new WeakSet();
   const stepScanState = new WeakMap();
 
   function hideLegacyProgressParagraphs() {
@@ -606,6 +608,10 @@
       }
 
       const cleanText = stripAllCode(text);
+      if (TODO_DONE_RE.test(cleanText) && !turnTodoDone.has(turnEl)) {
+        turnTodoDone.add(turnEl);
+        changed = true;
+      }
       PROGRESS_RE.lastIndex = 0;
       let m;
       while ((m = PROGRESS_RE.exec(cleanText))) {
@@ -617,9 +623,31 @@
     return changed;
   }
 
+  function harvestDomTodoComments(turnEl) {
+    if (!turnEl || !document.createTreeWalker || typeof NodeFilter === 'undefined') return;
+    try {
+      const walker = document.createTreeWalker(turnEl, NodeFilter.SHOW_COMMENT);
+      let node;
+      while ((node = walker.nextNode())) {
+        const raw = `<!--${node.nodeValue || ''}-->`;
+        if (TODO_DONE_RE.test(raw)) turnTodoDone.add(turnEl);
+        PROGRESS_RE.lastIndex = 0;
+        let m;
+        while ((m = PROGRESS_RE.exec(raw))) {
+          recordProgressMarker(turnEl, Number(m[2] || m[4] || m[6]), Number(m[1] || m[3] || m[5]));
+        }
+      }
+    } catch {}
+  }
+
   function applyProgressMarker(turnEls, items) {
     if (!items || !items.length) return items;
     const list = Array.isArray(turnEls) ? turnEls : [turnEls];
+    for (const t of list) {
+      if (t && turnTodoDone.has(t)) {
+        return items.map((it) => ({ status: 'completed', html: it.html }));
+      }
+    }
     let maxN = 0;
     for (const t of list) {
       const byTotal = t && turnProgressByTotal.get(t);
@@ -632,6 +660,28 @@
       html: it.html
     }));
     return todoProgress(next) > todoProgress(items) ? next : items;
+  }
+
+  const CANCELLED_TURN_RE = /(?:^|\s)(?:cancelled|canceled|interrupted|stopped by user|已取消|已中断|已停止)(?:\s|$)/i;
+  function isFinalPhaseNaturallyDone(items, turnEls) {
+    if (!items || items.length < 2) return false;
+    const lastIdx = items.length - 1;
+    if (items[lastIdx].status !== 'in_progress') return false;
+    for (let i = 0; i < lastIdx; i++) {
+      if (items[i].status !== 'completed') return false;
+    }
+    const list = Array.isArray(turnEls) ? turnEls : [turnEls];
+    let reachedFinal = false;
+    for (const t of list) {
+      const byTotal = t && turnProgressByTotal.get(t);
+      if (byTotal && (byTotal.get(items.length) || 0) >= items.length) {
+        reachedFinal = true;
+      }
+    }
+    if (!reachedFinal) return false;
+    const lastTurn = list[list.length - 1];
+    if (lastTurn && CANCELLED_TURN_RE.test((lastTurn.textContent || '').slice(-160))) return false;
+    return true;
   }
 
   const paneSliceActiveOrigins = new WeakMap();
@@ -818,6 +868,7 @@
         harvestPaneSliceOrigins(pane);
         for (const tEl of paneTurns) {
           harvestStepChecklists(tEl, paneLive && tEl === latestPaneTurn);
+          harvestDomTodoComments(tEl);
         }
         paneMeta.set(pane, { paneLive, paneTurns, latestPaneTurn });
       }
@@ -904,17 +955,31 @@
               ? [...cluster.turnEls, latestPaneTurn]
               : cluster.turnEls;
 
-          /* Scan forward across mounted turns in case a later step / split turn recorded an all-[x] completion */
+          /* Scan forward across mounted turns in case a later step / split turn recorded completion (`all-[x]` or `<!-- todo:done -->`) */
           const firstTurnIdx = paneTurns && cluster.turnEls.length ? paneTurns.indexOf(cluster.turnEls[0]) : -1;
           const memoryScanTurns = paneTurns && firstTurnIdx >= 0 ? paneTurns.slice(firstTurnIdx) : candidateTurns;
+          const nextClusterStartTurn = i + 1 < clusters.length ? clusters[i + 1].turnEls[0] : null;
+          const progressScanTurns = [];
           for (const tEl of memoryScanTurns) {
+            if (nextClusterStartTurn && tEl === nextClusterStartTurn) break;
             const remembered = latestRememberedTodo(tEl, cluster.items);
             if (remembered) cluster.items = remembered;
+            if (
+              candidateTurns.includes(tEl) ||
+              turnTodoDone.has(tEl) ||
+              (turnProgressByTotal.get(tEl) && turnProgressByTotal.get(tEl).has(cluster.items.length))
+            ) {
+              progressScanTurns.push(tEl);
+            }
           }
-          cluster.items = applyProgressMarker(candidateTurns, cluster.items);
+          cluster.items = applyProgressMarker(progressScanTurns.length ? progressScanTurns : candidateTurns, cluster.items);
+          const completed =
+            isAllTodoCompleted(cluster.items) ||
+            (!paneLive && isFinalPhaseNaturallyDone(cluster.items, progressScanTurns.length ? progressScanTurns : candidateTurns));
 
           const isDockedLiveCluster =
             paneLive &&
+            !completed &&
             isLastCluster &&
             Boolean(latestPaneTurn) &&
             (cluster.lastTurnEl === latestPaneTurn || relayedIntoLatest);
@@ -924,11 +989,14 @@
             handledLiveTurns.add(latestPaneTurn);
             activeDocks.add(mountedDock);
             for (const ul of cluster.lists) markMergedUl(ul);
+          } else if (completed) {
+            /* Completed task: disappear cleanly (like Claude Desktop) and keep original checklist <ul> nodes hidden */
+            for (const ul of cluster.lists) markMergedUl(ul);
           } else {
-            /* finished (100%) or paused/interrupted: keep a visible card at the latest list */
+            /* Interrupted / paused mid-way: keep a visible Paused card at the latest list */
             const anchorUl = cluster.lists[cluster.lists.length - 1];
             for (let j = 0; j < cluster.lists.length - 1; j++) markMergedUl(cluster.lists[j]);
-            renderInlineTodoCard(anchorUl, cluster.items, !isAllTodoCompleted(cluster.items));
+            renderInlineTodoCard(anchorUl, cluster.items, true);
           }
         }
       }
@@ -954,8 +1022,10 @@
         }
         if (best && (hasActiveTodo(best.items) || turnScope.some((t) => turnHasActiveTodoOrigin(t, best.items)))) {
           const items = applyProgressMarker(turnScope, best.items);
-          const mountedDock = renderLiveDockedTodoCard(latestPaneTurn, items);
-          if (mountedDock) activeDocks.add(mountedDock);
+          if (!isAllTodoCompleted(items)) {
+            const mountedDock = renderLiveDockedTodoCard(latestPaneTurn, items);
+            if (mountedDock) activeDocks.add(mountedDock);
+          }
         }
       }
     }
@@ -2215,7 +2285,7 @@
   function renderQuotaPopoverBody() {
     const pop = ensureQuotaPopover();
     const curCid = getActiveCascadeId();
-    const hasCtx = Boolean((!curCid || latestCtxState.cascadeId === curCid) && latestCtxState.hasData);
+    const hasCtx = Boolean(curCid && latestCtxState.cascadeId === curCid && latestCtxState.hasData);
     const compactStatus = detectCompactStatus(curCid);
     const paneRunning = isPaneCurrentlyRunning();
     const { preUsed, limitLabel, summaryLabel, summaryPct } = extractCompactLabels(latestCtxState, curCid);
@@ -2384,7 +2454,7 @@
     const ring = document.getElementById('ag-claude-ctx-ring');
     if (!ring) return;
     const curCid = getActiveCascadeId();
-    const hasCtx = Boolean((!curCid || latestCtxState.cascadeId === curCid) && latestCtxState.hasData);
+    const hasCtx = Boolean(curCid && latestCtxState.cascadeId === curCid && latestCtxState.hasData);
     const compactStatus = detectCompactStatus(curCid);
     const { preUsed, limitLabel, summaryLabel, summaryPct } = extractCompactLabels(latestCtxState, curCid);
     const arc = ring.querySelector('.ag-ctx-ring-arc');
@@ -2443,12 +2513,28 @@
   function ensureComposerContextRing() {
     const inputBox = document.getElementById('antigravity.agentSidePanelInputBox');
     if (!inputBox) return;
-    const leftGroup = inputBox.querySelector('div.flex.min-w-0.flex-1.items-center');
-    if (!leftGroup) return;
 
-    const modelWrap = Array.from(leftGroup.children).find(
-      (ch) => ch.tagName === 'DIV' && ch.id !== 'ag-live-metrics-pill' && ch.querySelector('button')
-    );
+    /* On the Home `/` screen, the composer has a top project/location row that ALSO matches
+       `div.flex.min-w-0.flex-1.items-center`; anchor off `model-selector-trigger` first so the
+       ring always mounts beside the model picker in the bottom toolbar instead of top-right. */
+    const modelBtn = inputBox.querySelector('button[data-testid="model-selector-trigger"]');
+    let modelWrap = null;
+    if (modelBtn) {
+      const bar = modelBtn.closest('div.flex.min-w-0.flex-1.items-center') || modelBtn.parentElement;
+      if (bar) {
+        let cur = modelBtn;
+        while (cur && cur.parentElement && cur.parentElement !== bar) cur = cur.parentElement;
+        if (cur && cur.parentElement === bar) modelWrap = cur;
+      }
+    }
+    if (!modelWrap) {
+      const leftGroup = inputBox.querySelector('div.flex.min-w-0.flex-1.items-center');
+      if (leftGroup) {
+        modelWrap = Array.from(leftGroup.children).find(
+          (ch) => ch.tagName === 'DIV' && ch.id !== 'ag-live-metrics-pill' && ch.querySelector('button')
+        );
+      }
+    }
     if (!modelWrap) return;
 
     let ring = document.getElementById('ag-claude-ctx-ring');

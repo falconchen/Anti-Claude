@@ -90,7 +90,7 @@ test('interrupted execution checklist keeps a visible paused card', { skip }, ()
   h.close();
 });
 
-test('cross-turn progress merges into one card; ordinary list in a later turn is untouched', { skip }, () => {
+test('cross-turn completed progress hides TodoWrite card cleanly; ordinary list in a later turn is untouched', { skip }, () => {
   const h = mount(
     pane([
       ul(li('阶段一 读代码', 'in_progress'), li('阶段二 修复'), li('阶段三 测试')),
@@ -100,10 +100,10 @@ test('cross-turn progress merges into one card; ordinary list in a later turn is
   );
   const lists = h.doc.querySelectorAll('ul');
   assert.equal(lists[0].getAttribute('data-ag-todo-merged'), 'true');
-  assert.equal(lists[1].getAttribute('data-ag-todo-primary'), 'true');
-  assert.equal(lists[1].nextElementSibling.hasAttribute('data-ag-todo-paused'), false);
+  assert.equal(lists[1].getAttribute('data-ag-todo-merged'), 'true');
   assert.equal(lists[2].hasAttribute('data-ag-todo-merged'), false);
-  assert.equal(h.doc.querySelectorAll('.ag-claude-todo-card').length, 1);
+  assert.equal(lists[2].hasAttribute('data-ag-todo-primary'), false);
+  assert.equal(h.doc.querySelectorAll('.ag-claude-todo-card').length, 0, 'completed TodoWrite card disappears like Claude Desktop');
   h.close();
 });
 
@@ -386,7 +386,7 @@ test('follow-up live turn relays incomplete checklist and advances via <!-- todo
   h.close();
 });
 
-test('Knowledge Work mode: final all-[x] DOM <ul> still renders as TodoWrite card when container.steps had [/] origin, while ordinary checklists stay native', { skip }, async () => {
+test('Knowledge Work mode: final all-[x] DOM <ul> hides cleanly when container.steps had [/] origin, while ordinary checklists stay native', { skip }, async () => {
   const h = mount(
     pane([
       ul(li('首航体检', 'completed'), li('查更新日志', 'completed'), li('汇总报告', 'completed')),
@@ -431,9 +431,9 @@ test('Knowledge Work mode: final all-[x] DOM <ul> still renders as TodoWrite car
   await settle(h);
 
   const cards = h.doc.querySelectorAll('.ag-claude-todo-card');
-  assert.equal(cards.length, 1, 'only the execution-progress list becomes a card');
-  const cardStatuses = Array.from(cards[0].querySelectorAll('.ag-claude-todo-row')).map((r) => r.getAttribute('data-status'));
-  assert.deepEqual(cardStatuses, ['completed', 'completed', 'completed']);
+  assert.equal(cards.length, 0, 'completed execution-progress card disappears cleanly');
+  assert.equal(turns[0].querySelector('ul').getAttribute('data-ag-todo-merged'), 'true', 'completed TodoWrite <ul> stays hidden');
+  assert.equal(turns[1].querySelector('ul').hasAttribute('data-ag-todo-merged'), false, 'ordinary answer checklist untouched');
   assert.equal(turns[1].querySelector('ul').hasAttribute('data-ag-todo-primary'), false, 'ordinary answer checklist untouched');
   h.cleanups.forEach((fn) => fn());
   h.close();
@@ -484,14 +484,15 @@ test('v2.33+ virtualized scroll: follow-up turn with <!-- todo:N/M --> + all-[x]
   await settle(h);
 
   const cards = h.doc.querySelectorAll('.ag-claude-todo-card');
-  assert.equal(cards.length, 1, 'follow-up turn with matching <!-- todo:3/3 --> becomes a bordered TodoWrite card');
-  assert.equal(turns[0].querySelector('ul').getAttribute('data-ag-todo-primary'), 'true');
+  assert.equal(cards.length, 0, 'completed follow-up TodoWrite card disappears cleanly');
+  assert.equal(turns[0].querySelector('ul').getAttribute('data-ag-todo-merged'), 'true', 'completed TodoWrite <ul> stays hidden');
+  assert.equal(turns[1].querySelector('ul').hasAttribute('data-ag-todo-merged'), false, 'ordinary all-[x] list without todo marker stays native');
   assert.equal(turns[1].querySelector('ul').hasAttribute('data-ag-todo-primary'), false, 'ordinary all-[x] list without todo marker stays native');
   h.cleanups.forEach((fn) => fn());
   h.close();
 });
 
-test('v2.33+ trajectorySlice.stepsInSlice: recovers [/] origin when earlier turn DOM node was virtual-scroll unmounted', { skip }, async () => {
+test('v2.33+ trajectorySlice.stepsInSlice: hides completed all-[x] list cleanly when earlier turn DOM node was virtual-scroll unmounted', { skip }, async () => {
   const h = mount(
     pane([
       `<div data-testid="autoscroll-viewport"></div>`,
@@ -520,8 +521,8 @@ test('v2.33+ trajectorySlice.stepsInSlice: recovers [/] origin when earlier turn
   turns[1].appendChild(h.doc.createElement('span'));
   await settle(h);
 
-  const cards = h.doc.querySelectorAll('.ag-claude-todo-card');
-  assert.equal(cards.length, 1, 'final all-[x] list inherits [/] origin from trajectorySlice.stepsInSlice');
+  assert.equal(h.doc.querySelectorAll('.ag-claude-todo-card').length, 0, 'completed TodoWrite card disappears');
+  assert.equal(turns[1].querySelector('ul').getAttribute('data-ag-todo-merged'), 'true', 'completed TodoWrite <ul> stays hidden');
   h.cleanups.forEach((fn) => fn());
   h.close();
 });
@@ -910,9 +911,8 @@ test('historical incomplete or split-turn checklist never resurrects into an unr
   await settle(h);
 
   assert.equal(h.doc.querySelector('[data-ag-todo-dock]'), null, 'live dock still stays unmounted on unrelated Turn 2');
-  const statuses = Array.from(card.querySelectorAll('.ag-claude-todo-row')).map((r) => r.getAttribute('data-status'));
-  assert.deepEqual(statuses, ['completed', 'completed', 'completed', 'completed'], 'upgrades historical card via forward step scan');
-  assert.equal(card.hasAttribute('data-ag-todo-paused'), false);
+  assert.equal(h.doc.querySelectorAll('.ag-claude-todo-card').length, 0, 'completed historical card disappears cleanly once Turn 1 completes it');
+  assert.equal(turns[0].querySelector('ul').getAttribute('data-ag-todo-merged'), 'true', 'original opening <ul> stays hidden');
   h.cleanups.forEach((fn) => fn());
   h.close();
 });
@@ -1150,9 +1150,11 @@ test('inline pill CJK hygiene, slice marker TodoWrite recovery & fractional sub-
   assert.equal(codes[0].nextSibling.nodeValue, '\u2060，发布');
   assert.equal(codes[1].nextSibling.nodeValue, '\u2060。');
 
-  /* 2. Slice <!-- todo:N/M --> + all-[x] list recovers bordered TodoWrite card once without matching unrelated next list */
-  const cards = h.doc.querySelectorAll('.ag-claude-todo-card');
-  assert.equal(cards.length, 1, 'recovers bordered card for the marker-backed completed list only');
+  /* 2. Slice <!-- todo:N/M --> + all-[x] list hides completed TodoWrite list cleanly without touching unrelated next list */
+  assert.equal(h.doc.querySelectorAll('.ag-claude-todo-card').length, 0, 'completed TodoWrite card disappears cleanly');
+  const uls = h.doc.querySelectorAll('ul.contains-task-list');
+  assert.equal(uls[0].getAttribute('data-ag-todo-merged'), 'true', 'marker-backed completed TodoWrite <ul> stays hidden');
+  assert.equal(uls[1].hasAttribute('data-ag-todo-merged'), false, 'unrelated ordinary checklist stays native');
 
   /* 3. Fractional 0.3 tok/s + Hold >= 60s formatted cleanly instead of "0 tok/s · Hold 264.5s" */
   const slim = h.window.__t.parseAndSlimMetricsPayload({
@@ -1302,6 +1304,62 @@ test('answered ask_question card hides speech-bubble ? icon and live TodoWrite s
   const inlineCard = h.doc.querySelector('.ag-claude-todo-card[data-ag-todo-paused="true"]');
   assert.ok(inlineCard, 'incomplete turn becomes Paused once heading switches to Agent said');
 
+  h.cleanups.forEach((fn) => fn());
+  h.close();
+});
+
+test('Claude-style auto-hide: <!-- todo:done --> and final-phase natural finish hide the TodoWrite card cleanly', { skip }, async () => {
+  /* Case A: explicit <!-- todo:done --> hides live dock immediately and leaves opening <ul> hidden */
+  const h1 = mount(pane([ul(li('Phase 1', 'in_progress'), li('Phase 2'), li('Phase 3'))], { generating: true }));
+  attachTurnSteps(h1, ['- [/] Phase 1\n- [ ] Phase 2\n- [ ] Phase 3', 'Step 2 <!-- todo:2/3 -->']);
+  h1.doc.querySelector('[data-testid="agent-response"]').appendChild(h1.doc.createElement('span'));
+  await settle(h1);
+  assert.deepEqual(dockStatuses(h1), ['completed', 'in_progress', 'pending']);
+
+  attachTurnSteps(h1, [
+    '- [/] Phase 1\n- [ ] Phase 2\n- [ ] Phase 3',
+    'Step 2 <!-- todo:2/3 -->',
+    'All finished! <!-- todo:done -->'
+  ]);
+  h1.doc.querySelector('[data-testid="agent-response"]').appendChild(h1.doc.createElement('span'));
+  await settle(h1);
+  assert.equal(h1.doc.querySelector('[data-ag-todo-dock]'), null, 'dock disappears on <!-- todo:done -->');
+  assert.equal(h1.doc.querySelectorAll('.ag-claude-todo-card').length, 0, 'no archived card left behind');
+  assert.equal(h1.doc.querySelector('ul').getAttribute('data-ag-todo-merged'), 'true', 'opening <ul> stays hidden');
+  h1.cleanups.forEach((fn) => fn());
+  h1.close();
+
+  /* Case B: model reached final phase <!-- todo:3/3 --> and finished naturally without <!-- todo:done --> */
+  const h2 = mount(pane([ul(li('Phase 1', 'in_progress'), li('Phase 2'), li('Phase 3'))], { generating: false }));
+  attachTurnSteps(h2, ['- [/] Phase 1\n- [ ] Phase 2\n- [ ] Phase 3', 'Final verification <!-- todo:3/3 -->', 'Done!']);
+  h2.doc.querySelector('[data-testid="agent-response"]').appendChild(h2.doc.createElement('span'));
+  await settle(h2);
+  assert.equal(h2.doc.querySelectorAll('.ag-claude-todo-card').length, 0, 'card auto-hides after final phase finishes cleanly');
+  assert.equal(h2.doc.querySelector('ul').getAttribute('data-ag-todo-merged'), 'true', 'opening <ul> stays hidden');
+  h2.cleanups.forEach((fn) => fn());
+  h2.close();
+});
+
+test('Home composer with top project/location bar mounts context ring beside model picker, not top row', { skip }, async () => {
+  const html = `
+    <div id="antigravity.agentSidePanelInputBox">
+      <div id="home-top-row" class="flex min-w-0 flex-1 items-center">
+        <div><button type="button" data-testid="project-selector-trigger">Project</button></div>
+        <div><button type="button" data-testid="location-selector-trigger">Local</button></div>
+      </div>
+      <div id="home-bottom-row" class="flex min-w-0 flex-1 items-center">
+        <button type="button">+</button>
+        <div id="model-wrap"><button type="button" data-testid="model-selector-trigger">Gemini 4 Neon High</button></div>
+      </div>
+    </div>
+  `;
+  const h = mount(html);
+  h.window.__t.syncStepStream();
+  await settle(h);
+  const ring = h.doc.getElementById('ag-claude-ctx-ring');
+  assert.ok(ring, 'context ring mounted on Home composer');
+  assert.equal(ring.parentElement.id, 'home-bottom-row', 'ring mounts in bottom toolbar, not top project row');
+  assert.equal(ring.previousElementSibling.id, 'model-wrap', 'ring sits immediately after model selector wrapper');
   h.cleanups.forEach((fn) => fn());
   h.close();
 });
