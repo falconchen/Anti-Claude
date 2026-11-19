@@ -57,10 +57,10 @@ node ~/Developer/Anti-Claude/install.mjs uninstall             # 卸载并还原
 
 - `~/.gemini/AGENTS.md`：写入「边做边汇报 + 隐形进度标记 + 交互式选择卡」协作规则（可用 `--no-agents-rule` 跳过）。
 - `antigravity_state.pbtxt` 与 `~/.gemini/config/config.json`：开启完整步骤详情展示（可用 `--no-step-unlock` 跳过）。
-- `~/.gemini/antigravity/theme-patch/user/`：写入样式、脚本与配置（未装 [`chuanban-antigravity-theme-patch`](https://github.com/Anarcadia/chuanban-antigravity-theme-patch) 时自动拉取；手动改过的本地文件升级时不覆盖）。
+- `~/.gemini/antigravity/anti-claude/user/`：写入样式、脚本与配置，由仓库内置零依赖 `core/` CDP 守护进程直接驱动（升级时通过三路合并保留本地自定义改动；旧版 `theme-patch` 环境会自动迁移配置并清理退役）。
 - `~/.gemini/antigravity-cli/anti-claude-statusline.mjs` 与 `~/.gemini/antigravity-cli/settings.json`：检测到 `agy` 或传入 `--cli` / `--cli-only` 时部署终端状态栏并启用 `statusLine`（可用 `--no-cli` 或 `--no-cli-statusline` 跳过）。
-- `~/Library/LaunchAgents/com.antigravity.anti-claude.autosync.plist`：监听客户端升级并定期同步（可用 `--no-auto-update` 跳过）。
+- `~/Library/LaunchAgents/com.antigravity.anti-claude.{daemon,autosync}.plist`：运行自有 CDP 热注入与实时指标守护进程，并监听客户端升级自动重挂（`--no-auto-update` 可跳过定期远程拉取）。
 
 ## 致谢与许可
 
-底层 CDP 注入与汉化遥测内核基于 [@Anarcadia/chuanban-antigravity-theme-patch](https://github.com/Anarcadia/chuanban-antigravity-theme-patch)，部分配色思路参考了 [@AlexByoung/Claudized-Antigravity](https://github.com/AlexByoung/Claudized-Antigravity)。MIT License。
+自带零外部依赖的独立 CDP 注入与 SQLite 遥测内核，早期架构与部分配色思路曾参考 [@Anarcadia/chuanban-antigravity-theme-patch](https://github.com/Anarcadia/chuanban-antigravity-theme-patch) 与 [@AlexByoung/Claudized-Antigravity](https://github.com/AlexByoung/Claudized-Antigravity)。MIT License。

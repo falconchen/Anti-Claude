@@ -1,6 +1,6 @@
 /**
  * Installer regression tests. Zero dependencies: `node --test test/`
- * Every test runs install.mjs against a throw-away HOME with a fake upstream core.
+ * Every test runs install.mjs against a throw-away HOME using Anti-Claude's built-in core/.
  * Network, launchd, CDP and font copying are disabled through env switches.
  */
 import { test } from 'node:test';
@@ -14,23 +14,20 @@ import { fileURLToPath } from 'node:url';
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const INSTALL = path.join(REPO, 'install.mjs');
 
-function makeHome({ withAllUserFiles = true } = {}) {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-ux-test-'));
+function makeHome({ withPreExistingUserFiles = false, withAllUserFiles = true } = {}) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'anti-claude-test-'));
   const agy = path.join(home, '.gemini', 'antigravity');
-  const tp = path.join(agy, 'theme-patch');
-  fs.mkdirSync(path.join(tp, 'user'), { recursive: true });
-  fs.mkdirSync(path.join(tp, 'core'), { recursive: true });
-  fs.writeFileSync(
-    path.join(tp, 'install.mjs'),
-    "console.log('[daemon] reinject ok');\nconst ok = process.env.FAKE_VERIFY_OK === '1';\nconsole.log(JSON.stringify({ ok, themeStyle: ok, live: { reachable: ok } }, null, 2));\n"
-  );
-  fs.writeFileSync(path.join(tp, 'core', 'manifest.json'), JSON.stringify({ version: '5.3.0' }));
-  const u = (f, c) => fs.writeFileSync(path.join(tp, 'user', f), c);
-  u('custom.css', '/* my original css */\n');
-  u('config.json', JSON.stringify({ enabled: true, modules: { i18n: true } }, null, 2));
-  if (withAllUserFiles) {
-    u('custom.js', '/* my original js */\n');
-    u('i18n.override.json', '{"Hello":"你好"}\n');
+  const userDir = path.join(agy, 'anti-claude', 'user');
+  fs.mkdirSync(agy, { recursive: true });
+  if (withPreExistingUserFiles) {
+    fs.mkdirSync(userDir, { recursive: true });
+    const u = (f, c) => fs.writeFileSync(path.join(userDir, f), c);
+    u('custom.css', '/* my original css */\n');
+    u('config.json', JSON.stringify({ enabled: true, modules: { i18n: true } }, null, 2));
+    if (withAllUserFiles) {
+      u('custom.js', '/* my original js */\n');
+      u('i18n.override.json', '{"Hello":"你好"}\n');
+    }
   }
   fs.writeFileSync(path.join(agy, 'antigravity_state.pbtxt'), 'foo: 1\nproduct_skin: PRODUCT_SKIN_NON_TECHNICAL\n');
   fs.mkdirSync(path.join(home, '.gemini', 'config'), { recursive: true });
@@ -38,9 +35,9 @@ function makeHome({ withAllUserFiles = true } = {}) {
   fs.writeFileSync(path.join(home, '.gemini', 'AGENTS.md'), '# my rules\n');
   return {
     home,
-    user: (f) => path.join(tp, 'user', f),
+    user: (f) => path.join(userDir, f),
     read: (rel) => fs.readFileSync(path.join(home, rel), 'utf8'),
-    readUser: (f) => fs.readFileSync(path.join(tp, 'user', f), 'utf8'),
+    readUser: (f) => fs.readFileSync(path.join(userDir, f), 'utf8'),
     exists: (rel) => fs.existsSync(path.join(home, rel)),
     cleanup: () => fs.rmSync(home, { recursive: true, force: true })
   };
@@ -63,10 +60,10 @@ function run(h, args, env = {}) {
     env: {
       ...process.env,
       HOME: h.home,
-      CLAUDE_UX_NO_NETWORK: '1',
-      CLAUDE_UX_NO_LAUNCHD: '1',
-      CLAUDE_UX_NO_CDP: '1',
-      CLAUDE_UX_NO_FONTS: '1',
+      ANTI_CLAUDE_NO_NETWORK: '1',
+      ANTI_CLAUDE_NO_LAUNCHD: '1',
+      ANTI_CLAUDE_NO_CDP: '1',
+      ANTI_CLAUDE_NO_FONTS: '1',
       ANTI_CLAUDE_NO_CLI: '1',
       FAKE_VERIFY_OK: '1',
       ...env
@@ -75,20 +72,17 @@ function run(h, args, env = {}) {
   return { status: r.status, out: parseTrailingJson(r.stdout || ''), stdout: r.stdout, stderr: r.stderr };
 }
 
-test('install then uninstall restores files, settings and AGENTS.md exactly', () => {
-  const h = makeHome();
+test('fresh install deploys standalone user layer and uninstall removes state cleanly', () => {
+  const h = makeHome({ withPreExistingUserFiles: false });
   try {
     const before = {
-      css: h.readUser('custom.css'),
-      js: h.readUser('custom.js'),
-      cfg: h.readUser('config.json'),
-      i18n: h.readUser('i18n.override.json'),
       pbtxt: h.read('.gemini/antigravity/antigravity_state.pbtxt'),
       agents: h.read('.gemini/AGENTS.md')
     };
     const inst = run(h, ['install']);
     assert.equal(inst.status, 0, inst.stderr);
     assert.equal(inst.out.status, 'ok', JSON.stringify(inst.out));
+    assert.equal(h.exists('.gemini/antigravity/theme-patch'), false, 'no external theme-patch directory created');
     assert.match(h.readUser('custom.js'), /ag-claude-todo-card/);
     assert.match(h.read('.gemini/antigravity/antigravity_state.pbtxt'), /PRODUCT_SKIN_DEVELOPER/);
     assert.equal(JSON.parse(h.read('.gemini/config/config.json')).userSettings.verboseConversationSteps, true);
@@ -99,10 +93,6 @@ test('install then uninstall restores files, settings and AGENTS.md exactly', ()
 
     const un = run(h, ['uninstall']);
     assert.equal(un.status, 0, un.stderr);
-    assert.equal(h.readUser('custom.css'), before.css);
-    assert.equal(h.readUser('custom.js'), before.js);
-    assert.equal(h.readUser('config.json'), before.cfg);
-    assert.equal(h.readUser('i18n.override.json'), before.i18n);
     assert.equal(h.read('.gemini/antigravity/antigravity_state.pbtxt'), before.pbtxt);
     const cfg = JSON.parse(h.read('.gemini/config/config.json'));
     assert.equal(cfg.userSettings.verboseConversationSteps, false);
@@ -114,32 +104,26 @@ test('install then uninstall restores files, settings and AGENTS.md exactly', ()
   }
 });
 
-test('second uninstall is a no-op and never blanks restored files', () => {
-  const h = makeHome();
+test('pre-existing user files are backed up on install and restored on uninstall; second uninstall is a no-op', () => {
+  const h = makeHome({ withPreExistingUserFiles: true, withAllUserFiles: false });
   try {
+    const beforeCss = h.readUser('custom.css');
+    const beforeCfg = h.readUser('config.json');
     run(h, ['install']);
-    run(h, ['uninstall']);
-    const css = h.readUser('custom.css');
-    const js = h.readUser('custom.js');
+    assert.ok(fs.existsSync(h.user('custom.js')));
+
+    const un = run(h, ['uninstall']);
+    assert.equal(un.status, 0, un.stderr);
+    assert.equal(fs.existsSync(h.user('custom.js')), false);
+    assert.equal(fs.existsSync(h.user('i18n.override.json')), false);
+    assert.equal(h.readUser('custom.css'), beforeCss);
+    assert.equal(h.readUser('config.json'), beforeCfg);
+    assert.equal(h.exists('.gemini/antigravity/anti-claude/install-state.json'), false);
+
     const again = run(h, ['uninstall']);
     assert.equal(again.status, 0);
     assert.equal(again.out.noop, true);
-    assert.equal(h.readUser('custom.css'), css);
-    assert.equal(h.readUser('custom.js'), js);
-  } finally {
-    h.cleanup();
-  }
-});
-
-test('files that did not exist before install are removed on uninstall', () => {
-  const h = makeHome({ withAllUserFiles: false });
-  try {
-    run(h, ['install']);
-    assert.ok(fs.existsSync(h.user('custom.js')));
-    run(h, ['uninstall']);
-    assert.equal(fs.existsSync(h.user('custom.js')), false);
-    assert.equal(fs.existsSync(h.user('i18n.override.json')), false);
-    assert.equal(h.readUser('custom.css'), '/* my original css */\n');
+    assert.equal(h.readUser('custom.css'), beforeCss);
   } finally {
     h.cleanup();
   }
@@ -175,7 +159,7 @@ test('sync keeps user edits: JSON overrides survive, edited CSS is not overwritt
 });
 
 test('uninstall keeps post-install edits in a saved copy', () => {
-  const h = makeHome();
+  const h = makeHome({ withPreExistingUserFiles: true });
   try {
     run(h, ['install']);
     fs.appendFileSync(h.user('custom.css'), '\n/* edited after install */\n');
@@ -203,7 +187,7 @@ test('background sync does not re-add a removed AGENTS.md rule or re-force step 
   }
 });
 
-test('upstream verify ok:false is reported as partial, not success', () => {
+test('live verify ok:false is reported as partial, not success', () => {
   const h = makeHome();
   try {
     const r = run(h, ['install'], { FAKE_VERIFY_OK: '0' });
@@ -217,34 +201,87 @@ test('upstream verify ok:false is reported as partial, not success', () => {
   }
 });
 
-test('v1 installs are migrated and can then be uninstalled cleanly', () => {
-  const h = makeHome();
+test('legacy theme-patch installs migrate user overrides to anti-claude/user and retire theme-patch cleanly', () => {
+  const h = makeHome({ withPreExistingUserFiles: false });
   try {
-    /* simulate the v1 layout: legacy backup dir + deployed files + settings already flipped by v1 */
-    fs.writeFileSync(path.join(h.home, '.gemini/antigravity/antigravity_state.pbtxt'), 'product_skin: PRODUCT_SKIN_DEVELOPER\n');
+    /* Simulate <= v2.3.9 layout: state in anti-claude/, live files in theme-patch/user/, wrapper script in scripts/ */
+    const agy = path.join(h.home, '.gemini/antigravity');
+    const legacyUserDir = path.join(agy, 'theme-patch/user');
+    const stateDir = path.join(agy, 'anti-claude');
+    fs.mkdirSync(legacyUserDir, { recursive: true });
+    fs.mkdirSync(path.join(stateDir, 'base'), { recursive: true });
+    fs.mkdirSync(path.join(stateDir, 'backup'), { recursive: true });
+    fs.mkdirSync(path.join(agy, 'scripts'), { recursive: true });
+    fs.writeFileSync(path.join(agy, 'scripts/antigravity-font-daemon.mjs'), '// legacy wrapper\n');
+
+    const filesMeta = {};
+    for (const f of ['config.json', 'custom.css', 'custom.js', 'i18n.override.json']) {
+      const tmpl = fs.readFileSync(path.join(REPO, 'user', f), 'utf8');
+      fs.writeFileSync(path.join(stateDir, 'base', f), tmpl);
+      fs.writeFileSync(path.join(stateDir, 'backup', f), '/* stock upstream */\n');
+      fs.writeFileSync(path.join(legacyUserDir, f), tmpl);
+      filesMeta[f] = { existedBefore: true, deployedSha: 'legacy' };
+    }
+    /* User enabled i18n in legacy theme-patch/user/config.json */
+    const customCfg = JSON.parse(fs.readFileSync(path.join(legacyUserDir, 'config.json'), 'utf8'));
+    customCfg.modules.i18n = true;
+    fs.writeFileSync(path.join(legacyUserDir, 'config.json'), JSON.stringify(customCfg, null, 2));
+
+    fs.writeFileSync(
+      path.join(stateDir, 'install-state.json'),
+      JSON.stringify({
+        schema: 2,
+        installedAt: Date.now() - 10000,
+        options: { desktop: true, cli: false, stepUnlock: true, agentsRule: true, autoUpdate: false },
+        files: filesMeta,
+        settings: {},
+        agentsRule: { inserted: false },
+        sync: {}
+      })
+    );
+
+    const s = run(h, ['sync-upgrade']);
+    assert.equal(s.status, 0, s.stderr);
+    assert.equal(h.exists('.gemini/antigravity/theme-patch'), false, 'legacy theme-patch dir removed');
+    assert.equal(h.exists('.gemini/antigravity/scripts/antigravity-font-daemon.mjs'), false, 'legacy wrapper removed');
+    const migratedCfg = JSON.parse(h.readUser('config.json'));
+    assert.equal(migratedCfg.modules.i18n, true, 'user config override migrated from theme-patch/user');
+
+    const un = run(h, ['uninstall']);
+    assert.equal(un.status, 0, un.stderr);
+    assert.equal(h.exists('.gemini/antigravity/anti-claude'), false, 'cleanly removed on uninstall after retiring theme-patch');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('v1 installs are migrated, retire theme-patch, and uninstall cleanly', () => {
+  const h = makeHome({ withPreExistingUserFiles: false });
+  try {
+    const agy = path.join(h.home, '.gemini/antigravity');
+    const legacyUserDir = path.join(agy, 'theme-patch/user');
+    const legacyBak = path.join(legacyUserDir, '.backup-before-claude-ux');
+    fs.mkdirSync(legacyBak, { recursive: true });
+    fs.writeFileSync(path.join(agy, 'antigravity_state.pbtxt'), 'product_skin: PRODUCT_SKIN_DEVELOPER\n');
     fs.writeFileSync(path.join(h.home, '.gemini/config/config.json'), JSON.stringify({ userSettings: { verboseConversationSteps: true } }));
-    const legacy = path.join(path.dirname(h.user('x')), '.backup-before-claude-ux');
-    fs.mkdirSync(legacy);
     for (const f of ['custom.css', 'custom.js', 'config.json', 'i18n.override.json']) {
-      fs.copyFileSync(h.user(f), path.join(legacy, f));
-      fs.copyFileSync(path.join(REPO, 'user', f), h.user(f));
+      fs.writeFileSync(path.join(legacyBak, f), `/* v1 bak ${f} */\n`);
+      fs.copyFileSync(path.join(REPO, 'user', f), path.join(legacyUserDir, f));
     }
     const s = run(h, ['sync-upgrade']);
     assert.equal(s.status, 0, s.stderr);
-    assert.equal(fs.existsSync(legacy), false);
+    assert.equal(h.exists('.gemini/antigravity/theme-patch'), false);
     const un = run(h, ['uninstall']);
     assert.equal(un.status, 0);
-    assert.equal(h.readUser('custom.css'), '/* my original css */\n');
-    assert.equal(h.readUser('custom.js'), '/* my original js */\n');
-    /* v1 never recorded previous settings, so they are left alone */
     assert.match(un.out.settings.note, /v1/);
+    assert.equal(h.exists('.gemini/antigravity/anti-claude'), false);
   } finally {
     h.cleanup();
   }
 });
 
 test('legacy claude-ux v2 installs migrate automatically to anti-claude and upgrade AGENTS.md marker', () => {
-  const h = makeHome();
+  const h = makeHome({ withPreExistingUserFiles: false });
   try {
     run(h, ['install']);
     /* Simulate a pre-rename claude-ux install on disk */
@@ -264,7 +301,6 @@ test('legacy claude-ux v2 installs migrate automatically to anti-claude and upgr
     const un = run(h, ['uninstall']);
     assert.equal(un.status, 0, un.stderr);
     assert.equal(h.read('.gemini/AGENTS.md'), '# my rules\n');
-    assert.equal(h.readUser('custom.css'), '/* my original css */\n');
     assert.equal(h.exists('.gemini/antigravity/anti-claude'), false);
   } finally {
     h.cleanup();
@@ -273,7 +309,6 @@ test('legacy claude-ux v2 installs migrate automatically to anti-claude and upgr
 
 test('pure helpers: scheduling, 3-way merge, trailing JSON, semver', async () => {
   const m = await import(INSTALL);
-  /* 12-hour runs over 96 hours: every run after the first must check the remote again */
   let now = 1_700_000_000_000;
   const sync = {};
   let checks = 0;

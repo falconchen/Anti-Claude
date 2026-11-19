@@ -41,16 +41,7 @@ function makeCliHome({ withSettings = true, settingsContent = null, withDesktop 
 
   if (withDesktop) {
     const agy = path.join(home, '.gemini', 'antigravity');
-    const tp = path.join(agy, 'theme-patch');
-    fs.mkdirSync(path.join(tp, 'user'), { recursive: true });
-    fs.mkdirSync(path.join(tp, 'core'), { recursive: true });
-    fs.writeFileSync(
-      path.join(tp, 'install.mjs'),
-      "console.log(JSON.stringify({ ok: true, themeStyle: true, live: { reachable: true } }, null, 2));\n"
-    );
-    fs.writeFileSync(path.join(tp, 'core', 'manifest.json'), JSON.stringify({ version: '5.4.2' }));
-    fs.writeFileSync(path.join(tp, 'user', 'custom.css'), '/* orig css */\n');
-    fs.writeFileSync(path.join(tp, 'user', 'config.json'), JSON.stringify({ enabled: true, modules: { i18n: false } }));
+    fs.mkdirSync(agy, { recursive: true });
     fs.writeFileSync(path.join(agy, 'antigravity_state.pbtxt'), 'product_skin: PRODUCT_SKIN_NON_TECHNICAL\n');
     fs.mkdirSync(path.join(home, '.gemini', 'config'), { recursive: true });
     fs.writeFileSync(path.join(home, '.gemini', 'config', 'config.json'), JSON.stringify({ userSettings: { verboseConversationSteps: false } }));
