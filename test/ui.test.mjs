@@ -754,7 +754,7 @@ test('native Settings -> UI Enhancements panel: defaults to English and live-tog
       <span id="p-working">Working</span>
     </div>
   `,
-    { dict: { General: '常规', Appearance: '外观', Working: '正在工作' } }
+      { dict: { General: '常规', Appearance: '外观', Working: '正在工作', 'Knowledge Work': '知识工作', 'Software Engineering': '软件工程' } }
   );
   await settle(h);
 
@@ -788,6 +788,18 @@ test('native Settings -> UI Enhancements panel: defaults to English and live-tog
   assert.equal(h.doc.getElementById('p-working').textContent, '正在工作');
   assert.match(panel.textContent, /中文界面汉化/);
   assert.match(h.window.localStorage.getItem('ag_claude_ux_modules_v1') || '', /"i18n":true/);
+
+  /* Newly rendered React nodes (e.g. Knowledge Work / Software Engineering toggle) must translate synchronously in the microtask before Frame 0 paints (zero 40ms English flash) */
+  const modeWrap = h.doc.createElement('div');
+  modeWrap.innerHTML = '<button id="kw-btn"><span>Knowledge Work</span></button><button id="se-btn"><span>Software Engineering</span></button>';
+  h.doc.body.appendChild(modeWrap);
+  await Promise.resolve();
+  assert.equal(h.doc.getElementById('kw-btn').textContent, '知识工作', 'translates newly mounted node in microtask before first paint');
+  assert.equal(h.doc.getElementById('se-btn').textContent, '软件工程', 'translates sibling node in microtask before first paint');
+  h.doc.getElementById('kw-btn').firstChild.firstChild.nodeValue = 'Knowledge Work';
+  await Promise.resolve();
+  assert.equal(h.doc.getElementById('kw-btn').textContent, '知识工作', 'translates characterData update in microtask before first paint');
+  modeWrap.remove();
 
   /* Toggle Chinese UI localization back OFF -> restores native English UI & enhancement panel live */
   panel.querySelector('[data-ag-cux-switch="i18n"]').click();
@@ -857,6 +869,30 @@ test('native Settings -> UI Enhancements panel: defaults to English and live-tog
 
   h.doc.querySelector('button[data-testid="settings-nav-item-General"]').click();
   assert.equal(rightHost.hasAttribute('data-ag-claude-settings-open'), false, 'clicking native nav item restores native settings pane');
+
+  /* Closing and reopening Settings must mount collapsed Stats synchronously in the microtask (0-frame FOUC check) */
+  const splitRootEl = h.doc.querySelector('[data-split-root="true"]');
+  const savedHtml = splitRootEl.outerHTML;
+  splitRootEl.remove();
+  await Promise.resolve();
+  const reopenHost = h.doc.createElement('div');
+  reopenHost.innerHTML = savedHtml;
+  const freshSplit = reopenHost.firstElementChild;
+  freshSplit.querySelectorAll('#ag-claude-ux-settings-nav, #ag-settings-stats-wrap, .ag-settings-subhdr-chev').forEach((n) => n.remove());
+  freshSplit.querySelectorAll('[data-ag-stats-hidden], [data-ag-stats-subhdr], [data-ag-stats-list]').forEach((n) => {
+    n.removeAttribute('data-ag-stats-hidden');
+    n.removeAttribute('data-ag-stats-subhdr');
+    n.removeAttribute('data-ag-stats-list');
+  });
+  h.doc.body.appendChild(freshSplit);
+  await Promise.resolve();
+  const reopenedToggle = h.doc.getElementById('ag-settings-stats-toggle');
+  const reopenedProj = [...h.doc.querySelectorAll('[data-testid="settings-sidebar"] h2')].find((el) => el.textContent.trim() === 'Projects');
+  assert.ok(reopenedToggle, 'Stats button mounted in microtask before first paint');
+  assert.equal(reopenedToggle.getAttribute('aria-expanded'), 'false', 'reopening Settings resets Stats to collapsed');
+  assert.equal(reopenedProj.parentElement.getAttribute('data-ag-stats-hidden'), '1', 'Projects hidden before Frame 0 paint');
+  assert.equal(reopenedProj.parentElement.nextElementSibling.getAttribute('data-ag-stats-hidden'), '1', 'project list hidden before Frame 0 paint');
+
   h.cleanups.forEach((fn) => fn());
   assert.equal(h.doc.documentElement.hasAttribute('data-ag-cjk-scale'), false, 'dispose removes data-ag-cjk-scale');
   h.close();
@@ -1478,7 +1514,10 @@ test('quota popover: refreshes userTier after account switch and preserves speci
   ];
 
   ring.click(); // reopen on new account
+  assert.equal(pop.getAttribute('data-loading-hold'), 'true', 'holds visibility until uncached account quota resolves');
+  assert.doesNotMatch(pop.textContent, /No plan usage data available|暂无可用套餐限额数据/, 'never flashes empty state before RPC returns');
   await h.microtasks();
+  assert.equal(pop.hasAttribute('data-loading-hold'), false, 'releases loading hold immediately when RPC resolves');
   assert.match(pop.querySelector('.ag-qp-tier').textContent, /Pro/, 'updates tier immediately to Pro on account switch');
   assert.doesNotMatch(pop.querySelector('.ag-qp-tier').textContent, /Ultra/, 'no stale Ultra tier');
   assert.ok(fetchCount >= 2, 'account switch invalidates stale quota cache and refetches');
@@ -1490,6 +1529,7 @@ test('quota popover: refreshes userTier after account switch and preserves speci
   );
   const activeTab = pop.querySelector('.ag-qp-tab[data-active="true"]');
   assert.equal(activeTab.textContent.trim(), 'Gemini 4 Argon', 'selects dedicated Argon tab when Gemini 4 Argon is active');
+  assert.match(h.window.localStorage.getItem('ag_claude_ux_quota_cache_v1') || '', /Gemini 4 Argon/, 'persists SWR quota snapshot for 0ms next-boot open');
 
   h.cleanups.forEach((fn) => fn());
   h.close();

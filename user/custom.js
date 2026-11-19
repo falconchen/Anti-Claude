@@ -1286,14 +1286,67 @@
     '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
     '<path d="M3.5 8.3L6.6 11.4L12.6 4.8" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/>' +
     '</svg>';
+  const QUOTA_CACHE_STORAGE_KEY = 'ag_claude_ux_quota_cache_v1';
+  function loadPersistedQuotaSnapshot() {
+    try {
+      const raw = typeof localStorage === 'object' && localStorage ? localStorage.getItem(QUOTA_CACHE_STORAGE_KEY) : null;
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.groups) || parsed.groups.length === 0) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+  function serializeQuotaGroups(groups) {
+    if (!Array.isArray(groups)) return [];
+    return groups.map((g) => ({
+      displayName: String(g.displayName || ''),
+      buckets: Array.isArray(g.buckets)
+        ? g.buckets.map((b) => ({
+            displayName: b && b.displayName ? String(b.displayName) : '',
+            window: b && b.window ? String(b.window) : '',
+            description: b && b.description ? String(b.description) : '',
+            remainingFraction:
+              b && b.remaining && b.remaining.case === 'remainingFraction' && typeof b.remaining.value === 'number'
+                ? b.remaining.value
+                : b && typeof b.remainingFraction === 'number'
+                  ? b.remainingFraction
+                  : 1,
+            resetTime:
+              b && b.resetTime && b.resetTime.seconds !== undefined
+                ? { seconds: String(b.resetTime.seconds) }
+                : undefined
+          }))
+        : []
+    }));
+  }
+  const initialQuotaSnap = loadPersistedQuotaSnapshot();
   let cachedQuotaSvc = null;
-  let cachedUserTierName = '';
-  let cachedUserAccountKey = '';
-  let cachedQuotaGroups = null;
+  let cachedUserTierName = initialQuotaSnap ? String(initialQuotaSnap.tierName || '') : '';
+  let cachedUserAccountKey = initialQuotaSnap ? String(initialQuotaSnap.accountKey || '') : '';
+  let cachedQuotaGroups = initialQuotaSnap ? initialQuotaSnap.groups : null;
   let lastQuotaFetchTs = 0;
   let quotaFetchInFlight = null;
+  let quotaHoldTimer = 0;
+  let quotaWarmupDone = false;
   let quotaPopoverOpen = false;
   let selectedQuotaGroupIdx = -1;
+  function persistQuotaSnapshot() {
+    if (!Array.isArray(cachedQuotaGroups) || cachedQuotaGroups.length === 0) return;
+    try {
+      if (typeof localStorage === 'object' && localStorage) {
+        localStorage.setItem(
+          QUOTA_CACHE_STORAGE_KEY,
+          JSON.stringify({
+            accountKey: cachedUserAccountKey || '',
+            tierName: cachedUserTierName || '',
+            ts: Date.now(),
+            groups: serializeQuotaGroups(cachedQuotaGroups)
+          })
+        );
+      }
+    } catch {}
+  }
   let latestCtxState = { pct: 0, ratioText: '', outText: '', hasData: false, cascadeId: '' };
   let manualCompactPending = { cascadeId: '', startedAt: 0 };
   let compactedStaleSigByCid = new Map();
@@ -2110,7 +2163,7 @@
   ensureMetricsWrapped();
 
   function discoverQuotaService(refreshAccount = false) {
-    if (!refreshAccount && cachedQuotaSvc && cachedUserTierName) return cachedQuotaSvc;
+    if (!refreshAccount && cachedQuotaSvc && cachedUserTierName && cachedUserAccountKey) return cachedQuotaSvc;
     const inputBox = document.getElementById('antigravity.agentSidePanelInputBox');
     if (!inputBox) return cachedQuotaSvc;
     const fk = Object.keys(inputBox).find((k) => k.startsWith('__reactFiber$'));
@@ -2206,11 +2259,24 @@
         const rawGroups = (res && res.response && res.response.groups) || (res && res.groups) || [];
         cachedQuotaGroups = rawGroups.filter((g) => g && Array.isArray(g.buckets) && g.buckets.length > 0);
         lastQuotaFetchTs = Date.now();
+        persistQuotaSnapshot();
+        if (quotaHoldTimer) {
+          cancelLater(quotaHoldTimer);
+          quotaHoldTimer = 0;
+        }
+        const popEl = document.getElementById('ag-claude-quota-popover');
+        if (popEl) popEl.removeAttribute('data-loading-hold');
         if (quotaPopoverOpen) renderQuotaPopoverBody();
         return cachedQuotaGroups;
       })
       .catch(() => {
         cachedQuotaSvc = null; /* service object may belong to an unmounted tree: rediscover next time */
+        if (quotaHoldTimer) {
+          cancelLater(quotaHoldTimer);
+          quotaHoldTimer = 0;
+        }
+        const popEl = document.getElementById('ag-claude-quota-popover');
+        if (popEl) popEl.removeAttribute('data-loading-hold');
         return cachedQuotaGroups || [];
       })
       .finally(() => {
@@ -2499,22 +2565,37 @@
     quotaPopoverOpen = true;
     selectedQuotaGroupIdx = -1;
     discoverQuotaService(true);
+    const needForce = !cachedQuotaGroups || Date.now() - lastQuotaFetchTs > 5000;
+    fetchQuotaSummary(needForce);
     const ring = document.getElementById('ag-claude-ctx-ring');
     if (ring) ring.setAttribute('data-open', 'true');
     const pop = ensureQuotaPopover();
+    if (!cachedQuotaGroups && quotaFetchInFlight) {
+      pop.setAttribute('data-loading-hold', 'true');
+      cancelLater(quotaHoldTimer);
+      quotaHoldTimer = later(() => {
+        quotaHoldTimer = 0;
+        pop.removeAttribute('data-loading-hold');
+      }, 90);
+    } else {
+      pop.removeAttribute('data-loading-hold');
+    }
     renderQuotaPopoverBody();
     pop.setAttribute('data-open', 'true');
     positionQuotaPopover();
-    const needForce = !cachedQuotaGroups || Date.now() - lastQuotaFetchTs > 5000;
-    fetchQuotaSummary(needForce);
   }
 
   function closeQuotaPopover() {
     quotaPopoverOpen = false;
+    cancelLater(quotaHoldTimer);
+    quotaHoldTimer = 0;
     const ring = document.getElementById('ag-claude-ctx-ring');
     if (ring) ring.setAttribute('data-open', 'false');
     const pop = document.getElementById('ag-claude-quota-popover');
-    if (pop) pop.setAttribute('data-open', 'false');
+    if (pop) {
+      pop.removeAttribute('data-loading-hold');
+      pop.setAttribute('data-open', 'false');
+    }
   }
 
   function updateComposerRingVisuals() {
@@ -2622,6 +2703,11 @@
           2
         )}" stroke-dashoffset="${RING_CIRC.toFixed(2)}"/>` +
         '</svg>';
+      ring.addEventListener('pointerenter', () => {
+        if (!quotaPopoverOpen && (!cachedQuotaGroups || Date.now() - lastQuotaFetchTs > 12000)) {
+          fetchQuotaSummary(false);
+        }
+      });
       ring.addEventListener('click', (e) => {
         e.stopPropagation();
         if (quotaPopoverOpen) {
@@ -2638,6 +2724,15 @@
     }
 
     updateComposerRingVisuals();
+
+    if (!quotaWarmupDone && discoverQuotaService(false)) {
+      quotaWarmupDone = true;
+      later(() => {
+        if (!disposed && FEAT.contextRing && (!cachedQuotaGroups || Date.now() - lastQuotaFetchTs > 15000)) {
+          fetchQuotaSummary(false);
+        }
+      }, 120);
+    }
 
     if (newlyInserted && typeof window.__ag_ensure_metrics_pill_fn === 'function') {
       frame(() => {
@@ -5167,6 +5262,7 @@
         translateText(root);
         return;
       }
+      if (root.nodeType === 1 && isExcluded(root)) return;
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
       let node;
       while ((node = walker.nextNode())) translateText(node);
@@ -5237,28 +5333,41 @@
       if (!uxI18nObserver && typeof MutationObserver !== 'undefined') {
         uxI18nObserver = new MutationObserver((mutations) => {
           if (disposed || !FEAT.i18n) return;
+          const roots = new Set();
           for (const m of mutations) {
             if (m.type === 'characterData' && m.target) {
-              uxI18nDirtyRoots.add(m.target);
+              roots.add(m.target);
             } else if (m.type === 'childList') {
               for (const n of m.addedNodes) {
-                if (n.nodeType === 1 || n.nodeType === 3) uxI18nDirtyRoots.add(n);
+                if (n.nodeType === 1 || n.nodeType === 3) roots.add(n);
               }
+            } else if (m.type === 'attributes' && m.target && m.target.nodeType === 1) {
+              roots.add(m.target);
             }
           }
-          if (uxI18nDirtyRoots.size && !uxI18nFlushTimer) {
-            uxI18nFlushTimer = later(() => {
-              uxI18nFlushTimer = 0;
-              if (disposed || !FEAT.i18n) return;
-              const batch = Array.from(uxI18nDirtyRoots);
-              uxI18nDirtyRoots.clear();
-              for (const r of batch) {
-                if (r && r.isConnected) uxTranslateSubtree(r);
+          if (!roots.size) return;
+          for (const r of roots) {
+            if (!r || !r.isConnected) continue;
+            let covered = false;
+            let p = r.parentElement;
+            while (p && p !== document.body) {
+              if (roots.has(p)) {
+                covered = true;
+                break;
               }
-            }, 40);
+              p = p.parentElement;
+            }
+            if (!covered) uxTranslateSubtree(r);
           }
+          if (uxI18nObserver) uxI18nObserver.takeRecords();
         });
-        uxI18nObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+        uxI18nObserver.observe(document.body, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+          attributes: true,
+          attributeFilter: ['title', 'placeholder', 'aria-label']
+        });
       }
     }
   }
@@ -5639,12 +5748,12 @@
   function cleanupSettingsStatsGroup(sb) {
     if (settingsStatsBtnWrap && settingsStatsBtnWrap.parentNode) settingsStatsBtnWrap.remove();
     settingsStatsBtnWrap = null;
-    const root = sb || settingsSidebarRef || document.querySelector('[data-testid="settings-sidebar"]');
+    const root = sb || null;
     if (!root) return;
     root.querySelectorAll('.ag-settings-subhdr-chev').forEach((el) => el.remove());
     root
       .querySelectorAll(
-        '[data-ag-stats-hidden], [data-ag-stats-subhdr], [data-ag-stats-list], [data-ag-stats-open], [data-ag-stats-active]'
+        '[data-ag-stats-hidden], [data-ag-stats-subhdr], [data-ag-stats-list], [data-ag-stats-open], [data-ag-stats-active], [data-ag-stats-passthrough]'
       )
       .forEach((el) => {
         el.removeAttribute('data-ag-stats-hidden');
@@ -5652,6 +5761,7 @@
         el.removeAttribute('data-ag-stats-list');
         el.removeAttribute('data-ag-stats-open');
         el.removeAttribute('data-ag-stats-active');
+        el.removeAttribute('data-ag-stats-passthrough');
         el.removeAttribute('role');
         el.removeAttribute('tabindex');
         el.removeAttribute('aria-expanded');
@@ -5672,13 +5782,25 @@
       const wrap = h2.parentElement;
       if (!wrap || wrap === sidebar) continue;
       if (!projHdr && /^(Projects|项目)$/i.test(txt)) {
+        wrap.removeAttribute('data-ag-stats-passthrough');
         projHdr = wrap;
         const next = wrap.nextElementSibling;
-        if (next && !next.querySelector('h2')) projList = next;
+        if (next && !next.querySelector('h2')) {
+          next.removeAttribute('data-ag-stats-passthrough');
+          projList = next;
+        }
       } else if (!unlinkedHdr && /^(Not in Project|Outside of Project|未关联项目)$/i.test(txt)) {
+        wrap.removeAttribute('data-ag-stats-passthrough');
         unlinkedHdr = wrap;
         const next = wrap.nextElementSibling;
-        if (next && !next.querySelector('h2')) unlinkedList = next;
+        if (next && !next.querySelector('h2')) {
+          next.removeAttribute('data-ag-stats-passthrough');
+          unlinkedList = next;
+        }
+      } else {
+        wrap.setAttribute('data-ag-stats-passthrough', '1');
+        const next = wrap.nextElementSibling;
+        if (next && !next.querySelector('h2')) next.setAttribute('data-ag-stats-passthrough', '1');
       }
     }
 
@@ -5788,7 +5910,7 @@
 
   function detachSettingsPanel() {
     closeClaudeUxSettingsPane();
-    cleanupSettingsStatsGroup(settingsSidebarRef);
+    cleanupSettingsStatsGroup(settingsSidebarRef || document.querySelector('[data-testid="settings-sidebar"]'));
     if (settingsSidebarRef) {
       settingsSidebarRef.removeEventListener('click', onNativeSettingsNavClick, true);
     }
@@ -5805,21 +5927,33 @@
     if (disposed) return;
     const sb = document.querySelector('[data-testid="settings-sidebar"]');
     if (!sb) {
-      if (settingsSidebarRef) detachSettingsPanel();
+      if (settingsSidebarRef || settingsStatsBtnWrap) {
+        settingsStatsOpen = false;
+        settingsStatsProjOpen = false;
+        settingsStatsUnlinkedOpen = false;
+        detachSettingsPanel();
+      }
       return;
     }
-    syncSettingsStatsGroup(sb);
-    if (settingsNavWrap && settingsNavWrap.isConnected && settingsSidebarRef === sb) return;
-    detachSettingsPanel();
+    if (settingsNavWrap && settingsNavWrap.isConnected && settingsSidebarRef === sb) {
+      syncSettingsStatsGroup(sb);
+      return;
+    }
+    if (settingsSidebarRef && settingsSidebarRef !== sb) {
+      detachSettingsPanel();
+    }
 
     const anchorBtn =
       sb.querySelector('button[data-testid="settings-nav-item-Appearance"]') ||
       sb.querySelector('button[data-testid="settings-nav-item-General"]') ||
-      sb.querySelector('button[data-testid^="settings-nav-item-"]');
+      sb.querySelector('button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-Stats"])');
     const splitRoot = sb.closest('[data-split-root="true"], [data-split-root]') || (sb.parentElement && sb.parentElement.parentElement && sb.parentElement.parentElement.parentElement);
     const rightOuter = splitRoot && splitRoot.children && splitRoot.children.length >= 2 ? splitRoot.children[splitRoot.children.length - 1] : null;
     const rightContent = (rightOuter && rightOuter.firstElementChild) || rightOuter;
-    if (!anchorBtn || !anchorBtn.parentElement || !anchorBtn.parentElement.parentElement || !rightContent) return;
+    if (!anchorBtn || !anchorBtn.parentElement || !anchorBtn.parentElement.parentElement || !rightContent) {
+      syncSettingsStatsGroup(sb);
+      return;
+    }
 
     settingsSidebarRef = sb;
     settingsRightRef = rightContent;
@@ -5840,6 +5974,7 @@
     sb.addEventListener('click', onNativeSettingsNavClick, true);
     settingsNavWrap = navWrap;
     settingsNavBtn = btn;
+    syncSettingsStatsGroup(sb);
   }
 
   /* ==========================================================================
@@ -8597,7 +8732,7 @@
   }
 
   const OWN_SEL =
-    '.ag-claude-todo-card, .ag-claude-todo-live-dock, .ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, .ag-claude-inline-editor, .ag-claude-folder-badges, #ag-claude-recent-section, #ag-recent-row-menu, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal';
+    '.ag-claude-todo-card, .ag-claude-todo-live-dock, .ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, .ag-claude-inline-editor, .ag-claude-folder-badges, #ag-claude-recent-section, #ag-recent-row-menu, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-settings-stats-wrap, .ag-settings-subhdr-chev, #ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal';
   const CLASS_WATCH_SEL =
     'ul.contains-task-list, [id="antigravity.agentSidePanelInputBox"], [data-testid="tool-group-collapsible"], [data-testid="worked-for-collapsible"], [data-testid="progress-updates-collapsible"], [data-testid="ephemeral-tool-status"]';
 
@@ -8618,6 +8753,7 @@
   const observer = new MutationObserver((mutations) => {
     if (disposed) return;
     let needSync = false;
+    let sawChildList = false;
     for (const m of mutations) {
       if (m.type === 'attributes') {
         const t = m.target;
@@ -8636,7 +8772,21 @@
           if (!isOwnNode(t) && t.closest && t.closest(CLASS_WATCH_SEL)) needSync = true;
         }
       } else if (m.type === 'childList') {
-        if (!isOwnChildListMutation(m)) needSync = true;
+        if (!isOwnChildListMutation(m)) {
+          needSync = true;
+          sawChildList = true;
+        }
+      }
+    }
+    /* Synchronously translate & reconcile Settings in the microtask BEFORE Frame 0 paints so nothing ever flashes */
+    if (sawChildList) {
+      const sbNow = document.querySelector('[data-testid="settings-sidebar"]');
+      if (sbNow !== settingsSidebarRef || sbNow) {
+        if (FEAT.i18n && sbNow) {
+          const dlgRoot = sbNow.closest('[role="dialog"]') || sbNow.closest('[data-split-root]') || sbNow.parentElement || sbNow;
+          uxTranslateSubtree(dlgRoot);
+        }
+        reconcileSettingsPanel();
       }
     }
     if (needSync) scheduleSync();
