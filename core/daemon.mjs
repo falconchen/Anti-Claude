@@ -238,16 +238,20 @@ function hasRecentConversationWalActivity(conversationsDir, withinMs = 15000) {
 /**
  * Antigravity 2.33.0+ stopped appending `--remote-debugging-port=0` by default in C++.
  * Modifying `/Applications/Antigravity.app` breaks Google's Developer ID code signature
- * and blocks Squirrel.Mac auto-updates. Instead, when a brand-new cold launch (`<= 25s` old)
+ * and blocks Squirrel.Mac auto-updates. Instead, when a fresh cold launch or in-app restart (`<= 35s` old)
  * starts without `--remote-debugging-port`, gracefully relaunch it with `--args --remote-debugging-port=0`.
  */
 function startMacCdpBootstrap() {
   if (process.platform !== 'darwin' || RUN_ONCE || NO_CDP_BOOTSTRAP) return;
-  const portFile = path.join(HOME, 'Library', 'Application Support', 'Antigravity', 'DevToolsActivePort');
+  const appDataDir = path.join(HOME, 'Library', 'Application Support', 'Antigravity');
+  const portFile = path.join(appDataDir, 'DevToolsActivePort');
+  const singletonLock = path.join(appDataDir, 'SingletonLock');
   const convDir = path.join(HOME, '.gemini', 'antigravity', 'conversations');
   const mainBin = '/Applications/Antigravity.app/Contents/MacOS/Antigravity';
   let busy = false;
-  let lastRelaunchAt = 0;
+  let lastAttemptAt = 0;
+  const attemptedPids = new Map();
+  let recentAttempts = [];
 
   const parseEtimeSec = (raw) => {
     const s = String(raw || '').trim();
@@ -264,60 +268,137 @@ function startMacCdpBootstrap() {
     return Infinity;
   };
 
+  const parseMainProcesses = (stdout) => {
+    const list = [];
+    for (const line of String(stdout || '').split('\n')) {
+      const m = line.trim().match(/^(\d+)\s+(\S+)\s+(.+)$/);
+      if (!m) continue;
+      const pid = Number(m[1]);
+      const age = parseEtimeSec(m[2]);
+      const cmd = m[3];
+      if (cmd === mainBin || cmd.startsWith(mainBin + ' ')) {
+        list.push({ pid, age, hasCdp: cmd.includes('--remote-debugging-port') });
+      }
+    }
+    return list;
+  };
+
+  const hasSingletonLock = () => {
+    try {
+      fs.lstatSync(singletonLock);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const waitPortAndSync = (triesLeft = 40) => {
+    if (readPort(portFile) > 0) {
+      sync().catch(() => {});
+      return;
+    }
+    if (triesLeft > 0) {
+      setTimeout(() => waitPortAndSync(triesLeft - 1), 150).unref();
+    }
+  };
+
   const checkFreshLaunch = () => {
-    if (busy || fs.existsSync(portFile) || Date.now() - lastRelaunchAt < 60000) return;
+    if (busy) return;
+    const now = Date.now();
+    if (now - lastAttemptAt < 2500) return;
+
+    for (const [pid, ts] of attemptedPids.entries()) {
+      if (now - ts > 120000) attemptedPids.delete(pid);
+    }
+    recentAttempts = recentAttempts.filter((ts) => now - ts < 45000);
+    if (recentAttempts.length >= 3) return;
+
     busy = true;
     execFile('ps', ['-axo', 'pid=,etime=,command='], { timeout: 2500 }, (err, stdout) => {
       if (err || !stdout) {
         busy = false;
         return;
       }
-      let targetPid = 0;
-      let targetAge = Infinity;
-      for (const line of String(stdout).split('\n')) {
-        const m = line.trim().match(/^(\d+)\s+(\S+)\s+(.+)$/);
-        if (!m) continue;
-        const pid = Number(m[1]);
-        const age = parseEtimeSec(m[2]);
-        const cmd = m[3];
-        if ((cmd === mainBin || cmd.startsWith(mainBin + ' ')) && !cmd.includes('--remote-debugging-port')) {
-          targetPid = pid;
-          targetAge = age;
-          break;
+      const procs = parseMainProcesses(stdout);
+      if (procs.some((p) => p.hasCdp)) {
+        if (readPort(portFile) > 0 && attachedTargets.size === 0) {
+          sync().catch(() => {});
         }
-      }
-      if (!targetPid || targetAge > 25 || hasRecentConversationWalActivity(convDir, 15000)) {
         busy = false;
         return;
       }
-      lastRelaunchAt = Date.now();
-      console.log(`[Anti-Claude Daemon] Relaunching fresh Antigravity (PID ${targetPid}, age=${targetAge}s) with --remote-debugging-port=0`);
+
+      const candidate = procs.find((p) => !p.hasCdp && !attemptedPids.has(p.pid) && p.age <= 35);
+      if (!candidate) {
+        busy = false;
+        return;
+      }
+      if (candidate.age > 15 && hasRecentConversationWalActivity(convDir, 8000)) {
+        busy = false;
+        return;
+      }
+
+      const targetPid = candidate.pid;
+      const startTs = Date.now();
+      lastAttemptAt = startTs;
+      attemptedPids.set(targetPid, startTs);
+      recentAttempts.push(startTs);
+      console.log(
+        `[Anti-Claude Daemon] Relaunching fresh Antigravity (PID ${targetPid}, age=${candidate.age}s) with --remote-debugging-port=0`
+      );
+
       try {
         process.kill(targetPid, 'SIGTERM');
       } catch {
         busy = false;
         return;
       }
-      const deadline = Date.now() + 4500;
+
+      const deadline = Date.now() + 8000;
       const waitExit = () => {
         let alive = false;
         try {
           process.kill(targetPid, 0);
           alive = true;
         } catch {}
-        if (alive && Date.now() < deadline) {
-          setTimeout(waitExit, 120);
+        if (alive) {
+          if (Date.now() < deadline) {
+            setTimeout(waitExit, 120);
+          } else {
+            console.warn(`[Anti-Claude Daemon] PID ${targetPid} did not exit within 8s; skipping relaunch`);
+            busy = false;
+          }
           return;
         }
-        execFile('/usr/bin/open', ['-a', '/Applications/Antigravity.app', '--args', '--remote-debugging-port=0'], () => {
-          busy = false;
-        });
+
+        /* Wait 350ms for SingletonLock & macOS launchservicesd ASN teardown, then re-verify no new instance raced in */
+        setTimeout(() => {
+          execFile('ps', ['-axo', 'pid=,etime=,command='], { timeout: 2000 }, (psErr, psOut) => {
+            const afterProcs = !psErr && psOut ? parseMainProcesses(psOut) : [];
+            if (afterProcs.length > 0 || hasSingletonLock()) {
+              /* Another instance (e.g. Electron's in-app relaunch helper) already spawned; next tick will inspect it cleanly */
+              busy = false;
+              return;
+            }
+            try {
+              fs.rmSync(portFile, { force: true });
+            } catch {}
+            execFile(
+              '/usr/bin/open',
+              ['-n', '-a', '/Applications/Antigravity.app', '--args', '--remote-debugging-port=0'],
+              () => {
+                busy = false;
+                waitPortAndSync(40);
+              }
+            );
+          });
+        }, 350);
       };
-      setTimeout(waitExit, 150);
+      setTimeout(waitExit, 140);
     });
   };
 
-  setInterval(checkFreshLaunch, 1200).unref();
+  setInterval(checkFreshLaunch, 650).unref();
   checkFreshLaunch();
 }
 
@@ -354,7 +435,7 @@ let lastBundleFilesSig = '';
 let cachedRuntimeTemplate = '';
 let cachedBootPayloadBase = null;
 let cachedBundleHash = '';
-let cachedVersion = '2.6.1';
+let cachedVersion = '2.6.2';
 let activeConfig = {
   enabled: true,
   contextLimit: 256000,
@@ -389,7 +470,7 @@ function rebuildBundleIfNeeded() {
   lastBundleFilesSig = filesSig;
 
   const pkg = readJsonOrFallback(PKG_FILE, {});
-  cachedVersion = pkg?.version ? `anti-claude-${pkg.version}` : 'anti-claude-2.6.1';
+  cachedVersion = pkg?.version ? `anti-claude-${pkg.version}` : 'anti-claude-2.6.2';
 
   const rawCfg = readJsonOrFallback(userConfigFile, {});
   const enabled = rawCfg?.enabled !== false;
