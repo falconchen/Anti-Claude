@@ -2,9 +2,9 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Bring the **AI execution rhythm, step-stream presentation, and desktop UI** of `Claude.app` (Code / Cowork) to Google Antigravity Desktop.
+Bring a Claude.app-inspired **AI execution rhythm, step-stream presentation, and desktop UI** to Google Antigravity Desktop.
 
-More than a theme—beyond matching `Claude.app`'s visual polish and everyday controls, Anti-Claude reshapes both the agent's narration habits and frontend rendering, turning Antigravity's silent tool batches and post-turn black-box collapses into an interleaved **"narrate as you work + live inline `TodoWrite` progress card"** flow. Everything runs via local CDP injection and user-directory configuration—`/Applications/Antigravity.app` is never modified and its code signature stays intact.
+More than a theme—beyond refining Antigravity's visual polish and everyday controls, Anti-Claude reshapes both the agent's narration habits and frontend rendering, turning silent tool batches and post-turn black-box collapses into an interleaved **"narrate as you work + live inline `TodoWrite` progress card"** flow. Everything runs via local CDP injection and user-directory configuration—`/Applications/Antigravity.app` is never modified and its code signature stays intact.
 
 ![Anti-Claude Preview](assets/preview.png)
 

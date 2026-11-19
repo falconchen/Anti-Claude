@@ -3199,7 +3199,7 @@
   document.addEventListener('keydown', onModelPopoverKeyDown, true);
 
   /* ==========================================================================
-   * 7. Inline Undo & Edit (1:1 Claude Message In-Bubble Re-Edit)
+   * 7. Inline Undo & Edit (Claude-Style Message In-Bubble Re-Edit)
    *    - Intercepts `button[data-testid="revert-button"]` to expand a clean
    *      in-bubble editor without wiping downstream turns until confirmed.
    *    - 100% delegates file revert previews & Lexical state to native host.

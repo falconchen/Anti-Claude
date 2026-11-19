@@ -762,7 +762,7 @@ test('native Settings -> UI Enhancements panel: defaults to English and live-tog
   const rightHost = h.doc.getElementById('settings-right-host');
   const panel = h.doc.getElementById('ag-claude-ux-settings-panel');
   assert.equal(rightHost.getAttribute('data-ag-claude-settings-open'), 'true');
-  assert.ok(panel && !panel.hidden, 'Claude UX settings panel visible');
+  assert.ok(panel && !panel.hidden, 'Anti-Claude settings panel visible');
 
   /* Toggle Chinese UI localization ON -> translates native UI & enhancement panel live */
   const i18nSwitch = panel.querySelector('[data-ag-cux-switch="i18n"]');

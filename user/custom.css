@@ -1,6 +1,6 @@
 /* ============================================================================
  * Anti-Claude — user/custom.css
- * 1:1 Claude Desktop (Code / Cowork) UI & Execution Stream Alignment
+ * Claude-inspired Desktop UI & Execution Stream Alignment
  *
  * Highlights:
  * 1. Pure crisp #FFFFFF light canvas + #F9F9F8 neutral sidebar; warm charcoal #212120 dark mode.
@@ -374,7 +374,7 @@ html[data-ag-preset] body[data-agy-theme].dark {
   --ag-sidebar-muted-fg: #8E8D88;
 }
 
-/* 白天侧栏选中胶囊：清除原生 1px 内阴影描边，与「最近对话」1:1 统一为纯平 #EFEFED 胶囊 */
+/* 白天侧栏选中胶囊：清除原生 1px 内阴影描边，与「最近对话」统一为纯平 #EFEFED 胶囊 */
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) :is(.agy-sidebar-row[data-selected="true"], [data-testid="conversation-row-sidebar"][data-selected="true"]) {
   background-color: #EFEFED !important;
   --row-bg: #EFEFED !important;
@@ -390,7 +390,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) :is(.agy-sidebar-row[data-
   border-color: transparent !important;
 }
 
-/* 2.1 左栏与右栏正文排版 1:1 统一（14px / 400 / 0 字距，选中态仅靠胶囊底色区分、不加粗） */
+/* 2.1 左栏与右栏正文排版统一（14px / 400 / 0 字距，选中态仅靠胶囊底色区分、不加粗） */
 html body .bg-sidebar :is([data-testid="sidebar-navigation-items"] a, [data-testid="sidebar-navigation-items"] button, [data-testid="settings-button"], [data-testid="conversation-row-sidebar"], .agy-sidebar-row, button[data-testid="project-header"], button[data-project-card="true"]),
 html body .bg-sidebar :is([data-testid="sidebar-navigation-items"] a, [data-testid="sidebar-navigation-items"] button, [data-testid="settings-button"], button[data-testid="project-header"], button[data-project-card="true"]) span.truncate,
 html body .bg-sidebar :is([data-testid="conversation-row-sidebar"], .agy-sidebar-row):is([data-selected="true"], :not([data-selected="true"])) :is(span.truncate, [class*="truncate"]),
@@ -1112,7 +1112,7 @@ html[data-ag-ux-lang="zh"] body .ag-claude-todo-card[data-ag-todo-paused="true"]
   }
 }
 
-/* 1:1 像素对齐 Claude 原版完成圆标 (#666666) + 纯白对勾 + 完成行即刻变灰 (#676767) */
+/* 对齐 Claude 风格完成圆标 (#666666) + 纯白对勾 + 完成行即刻变灰 (#676767) */
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) .ag-todo-done {
   color: #666666 !important;
   animation: agTodoDonePop 170ms cubic-bezier(0.16, 1, 0.3, 1) backwards !important;
@@ -1244,7 +1244,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) .ag-claude-todo-card > .ag
 }
 
 /* ============================================================================
- * 3.10 设置界面 1:1 质感精修（修复文字主次倒挂 · Google 官方蓝控件 · 左栏分界 · 版心居中）
+ * 3.10 设置界面质感精修（修复文字主次倒挂 · Google 官方蓝控件 · 左栏分界 · 版心居中）
  * ============================================================================ */
 
 /* 1) 修复船板 core/theme.css 第 478 行误把说明小字刷成浓黑加粗的 Bug，并舒展行留白 */
@@ -1304,7 +1304,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) button[role="switch"][aria
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18) !important;
 }
 
-/* 3) 左侧设置导航栏：1:1 复刻 Claude Desktop 设置侧栏（纯白底 · #191918 浓黑字色 · 22px 舒展分组间距 · #E5E5E5 胶囊 · 16px 线框图标） */
+/* 3) 左侧设置导航栏：Claude 风格精简设置侧栏（纯白底 · #191918 浓黑字色 · 22px 舒展分组间距 · #E5E5E5 胶囊 · 16px 线框图标） */
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sidebar"] {
   background-color: #FFFFFF !important;
   border-right: 1px solid #EAEAEA !important;
@@ -1812,7 +1812,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #antigravity\.agentSidePan
   animation: agCtxCompactingPulse 1.2s ease-in-out infinite !important;
 }
 
-/* 上弹套餐使用限额浮层（1:1 复刻 Claude Desktop 浮层质感，全局锁死同一字体与黑度） */
+/* 上弹套餐使用限额浮层（简洁浅色/暗色浮层质感，全局锁死同一字体与黑度） */
 #ag-claude-quota-popover,
 #ag-claude-quota-popover :is(div, span, button) {
   font-family: var(--font-sans) !important;
@@ -2181,7 +2181,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-quota-popover .
 }
 
 /* ============================================================================
- * 3.12 原地撤回重编消息（Inline Undo & Edit — 1:1 Claude 浅灰/暖炭圆角内联编辑卡）
+ * 3.12 原地撤回重编消息（Inline Undo & Edit — 浅灰/暖炭圆角内联编辑卡）
  * ============================================================================ */
 .ag-claude-inline-hidden {
   display: none !important;
@@ -2763,7 +2763,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-recent-section 
 }
 
 /* ============================================================================
- * 3.14 客户端原生 Settings 内嵌「界面增强 (Claude UX)」可视化开关页
+ * 3.14 客户端原生 Settings 内嵌「界面增强 (Anti-Claude)」可视化开关页
  * ============================================================================ */
 [data-ag-claude-settings-open="true"] > *:not(#ag-claude-ux-settings-panel) {
   display: none !important;

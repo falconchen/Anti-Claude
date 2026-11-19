@@ -2,9 +2,9 @@
 
 [English](README.md) | **简体中文**
 
-让 Google Antigravity 桌面端拥有和 `Claude.app`（Code / Cowork）一致的 **AI 回答节奏、过程呈现形式与界面交互**。
+让 Google Antigravity 桌面端拥有接近 `Claude.app`（Code / Cowork）风格的 **AI 回答节奏、过程呈现形式与界面交互**。
 
-它不只是一套界面样式——除了对齐 `Claude.app` 的视觉与高频控件，还同时改写了 Agent 的输出习惯与前端渲染逻辑：把原生「闷头调工具、跑完折叠成黑盒」改成「边做边汇报 + 流内实时进度卡片」。全程通过本地 CDP 注入与用户目录配置实现，不改 `Antigravity.app` 安装包，不破签名。
+它不只是一套界面样式——除了优化视觉排版与高频控件，还同时改写了 Agent 的输出习惯与前端渲染逻辑：把原生「闷头调工具、跑完折叠成黑盒」改成「边做边汇报 + 流内实时进度卡片」。全程通过本地 CDP 注入与用户目录配置实现，不改 `Antigravity.app` 安装包，不破签名。
 
 ![Anti-Claude 效果预览](assets/preview.png)
 
