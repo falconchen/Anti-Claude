@@ -1909,7 +1909,8 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #antigravity\.agentSidePan
   transition: opacity 150ms cubic-bezier(0.16, 1, 0.3, 1), transform 150ms cubic-bezier(0.16, 1, 0.3, 1) !important;
 }
 
-#ag-claude-quota-popover[data-open="false"] {
+#ag-claude-quota-popover[data-open="false"],
+#ag-claude-quota-popover[data-open="true"][data-loading-hold="true"] {
   opacity: 0 !important;
   transform: translateY(6px) scale(0.98) !important;
   pointer-events: none !important;
@@ -5746,6 +5747,9 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sid
   font-weight: 400 !important;
 }
 
+/* Zero-frame FOUC shield: keep unclassified h2 scope headers & lists hidden from Frame 0 until JS classifies them */
+[data-testid="settings-sidebar"] div.px-4.mt-2:not([data-ag-stats-subhdr="1"]):not([data-ag-stats-passthrough="1"]),
+[data-testid="settings-sidebar"] div.px-4.mt-2:not([data-ag-stats-passthrough="1"]) + div.flex.flex-col.gap-0\.5:not([data-ag-stats-list="1"]),
 [data-testid="settings-sidebar"] [data-ag-stats-hidden="1"],
 [data-testid="settings-sidebar"] > div.overflow-y-auto > div.px-4.mt-2[data-ag-stats-subhdr="1"][data-ag-stats-hidden="1"],
 [data-testid="settings-sidebar"] div.flex.flex-col.gap-0\.5[data-ag-stats-list="1"][data-ag-stats-hidden="1"] {

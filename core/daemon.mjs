@@ -354,7 +354,7 @@ let lastBundleFilesSig = '';
 let cachedRuntimeTemplate = '';
 let cachedBootPayloadBase = null;
 let cachedBundleHash = '';
-let cachedVersion = '2.6.0';
+let cachedVersion = '2.6.1';
 let activeConfig = {
   enabled: true,
   contextLimit: 256000,
@@ -389,7 +389,7 @@ function rebuildBundleIfNeeded() {
   lastBundleFilesSig = filesSig;
 
   const pkg = readJsonOrFallback(PKG_FILE, {});
-  cachedVersion = pkg?.version ? `anti-claude-${pkg.version}` : 'anti-claude-2.6.0';
+  cachedVersion = pkg?.version ? `anti-claude-${pkg.version}` : 'anti-claude-2.6.1';
 
   const rawCfg = readJsonOrFallback(userConfigFile, {});
   const enabled = rawCfg?.enabled !== false;
