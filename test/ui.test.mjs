@@ -736,6 +736,10 @@ test('native Settings -> UI Enhancements panel: defaults to English and live-tog
             <div class="group/nav-item"><button type="button" data-testid="settings-nav-item-General" class="bg-sidebar-secondary"><span>General</span></button></div>
             <div class="group/nav-item"><button type="button" data-testid="settings-nav-item-Appearance"><span>Appearance</span></button></div>
           </div>
+          <div class="px-4 mt-2"><h2>Projects</h2></div>
+          <div class="flex flex-col gap-0.5"><button>Demo Project</button></div>
+          <div class="px-4 mt-2"><h2>Not in Project</h2></div>
+          <div class="flex flex-col gap-0.5"><button>Conversations</button></div>
         </div>
       </div>
       <div>
@@ -798,6 +802,47 @@ test('native Settings -> UI Enhancements panel: defaults to English and live-tog
   assert.equal(h.doc.getElementById('p-working').textContent, 'Working');
   assert.match(h.window.localStorage.getItem('ag_claude_ux_modules_v1') || '', /"i18n":false/);
 
+  /* Verify Projects and Not in Project are grouped under collapsible "Stats / 统计" (3-level stepped tree) */
+  const statsToggle = h.doc.getElementById('ag-settings-stats-toggle');
+  const projH2 = [...h.doc.querySelectorAll('[data-testid="settings-sidebar"] h2')].find((el) => el.textContent.trim() === 'Projects');
+  const notInProjH2 = [...h.doc.querySelectorAll('[data-testid="settings-sidebar"] h2')].find((el) => el.textContent.trim() === 'Not in Project');
+  assert.ok(statsToggle, 'Stats collapsible header mounted in Settings sidebar');
+  assert.equal(statsToggle.getAttribute('data-testid'), 'settings-nav-item-Stats', 'inherits native settings-nav-item testid for 1:1 row styling');
+  assert.ok(projH2.parentElement.querySelector('.ag-settings-subhdr-chev'), 'Projects subheader mounts unified SVG chevron');
+  assert.ok(notInProjH2.parentElement.querySelector('.ag-settings-subhdr-chev'), 'Not in Project subheader mounts unified SVG chevron');
+  assert.equal(projH2.querySelector('.ag-settings-subhdr-chev'), null, 'chevron stays sibling of h2 so text walker stays clean');
+  assert.equal(projH2.parentElement.getAttribute('data-ag-stats-hidden'), '1', 'Projects hidden while Stats collapsed');
+  assert.equal(notInProjH2.parentElement.getAttribute('data-ag-stats-hidden'), '1', 'Not in Project hidden while Stats collapsed');
+
+  statsToggle.click();
+  assert.equal(projH2.parentElement.hasAttribute('data-ag-stats-hidden'), false, 'clicking Stats reveals Projects subheader');
+  assert.equal(notInProjH2.parentElement.hasAttribute('data-ag-stats-hidden'), false, 'clicking Stats reveals Not in Project subheader');
+  assert.equal(projH2.parentElement.nextElementSibling.getAttribute('data-ag-stats-hidden'), '1', 'specific project items remain collapsed until Projects clicked');
+
+  projH2.parentElement.click();
+  assert.equal(projH2.parentElement.nextElementSibling.hasAttribute('data-ag-stats-hidden'), false, 'clicking Projects expands specific project items');
+
+  /* Verify 3-tier CJK Optical Font Scale selector (94.5% / 95% / 100%) in UI Enhancements */
+  const scale945 = panel.querySelector('[data-ag-cux-cjk-scale="94.5"]');
+  const scale95 = panel.querySelector('[data-ag-cux-cjk-scale="95"]');
+  const scale100 = panel.querySelector('[data-ag-cux-cjk-scale="100"]');
+  assert.ok(scale945 && scale95 && scale100, 'renders 94.5%, 95%, and 100% CJK font scale buttons');
+  assert.equal(h.doc.documentElement.getAttribute('data-ag-cjk-scale'), '95', 'defaults to 95% CJK optical scale');
+  assert.equal(scale95.getAttribute('aria-checked'), 'true');
+  assert.equal(scale945.getAttribute('aria-checked'), 'false');
+
+  scale945.click();
+  assert.equal(h.doc.documentElement.getAttribute('data-ag-cjk-scale'), '94.5');
+  assert.equal(scale945.getAttribute('aria-checked'), 'true');
+  assert.equal(scale95.getAttribute('aria-checked'), 'false');
+  assert.match(h.window.localStorage.getItem('ag_claude_ux_modules_v1') || '', /"cjkFontScale":"94\.5"/);
+
+  scale100.click();
+  assert.equal(h.doc.documentElement.getAttribute('data-ag-cjk-scale'), '100');
+  assert.equal(scale100.getAttribute('aria-checked'), 'true');
+  assert.equal(scale945.getAttribute('aria-checked'), 'false');
+  assert.match(h.window.localStorage.getItem('ag_claude_ux_modules_v1') || '', /"cjkFontScale":"100"/);
+
   const projectsSwitch = panel.querySelector('[data-ag-cux-switch="claudeUxProjects"]');
   assert.equal(projectsSwitch.getAttribute('aria-checked'), 'true');
   projectsSwitch.click();
@@ -813,6 +858,7 @@ test('native Settings -> UI Enhancements panel: defaults to English and live-tog
   h.doc.querySelector('button[data-testid="settings-nav-item-General"]').click();
   assert.equal(rightHost.hasAttribute('data-ag-claude-settings-open'), false, 'clicking native nav item restores native settings pane');
   h.cleanups.forEach((fn) => fn());
+  assert.equal(h.doc.documentElement.hasAttribute('data-ag-cjk-scale'), false, 'dispose removes data-ag-cjk-scale');
   h.close();
 });
 
@@ -1909,5 +1955,150 @@ test('unified sidebar Recents: mixes project & standalone chats without 8-item c
   assert.equal(h.doc.getElementById('ag-claude-recent-section'), null);
   assert.equal(h.doc.getElementById('ag-recent-row-menu'), null);
   assert.equal(sbParent.hasAttribute('data-ag-sb-unified'), false);
+  h.close();
+});
+
+test('customizations layout enhancement: mounts category tabs, frames skills list, supports search bypass & + Add skill modal', { skip }, async () => {
+  const html = `
+    <div class="flex-1 overflow-y-auto">
+      <div class="sticky top-0 z-20 bg-background">
+        <div class="w-full max-w-4xl mx-auto">
+          <div class="flex items-center justify-between">
+            <h1>Customizations</h1>
+            <nav data-testid="plugins-tabs">
+              <a data-testid="plugins-tab-browse" href="/customizations/browse">Marketplace</a>
+              <a data-testid="plugins-tab-installed" href="/customizations/installed" aria-current="page">Installed</a>
+            </nav>
+          </div>
+          <input data-testid="customizations-search" type="search" value="" placeholder="Search customizations..." />
+        </div>
+      </div>
+      <div class="max-w-4xl w-full mx-auto">
+        <section data-testid="customizations-installed-plugins">
+          <div><h3><button>Installed Plugins <span data-testid="customization-section-count">4</span></button></h3></div>
+          <div class="grid"><div>bm-bridge</div></div>
+        </section>
+        <section>
+          <div>
+            <h3><button>Skills &amp; Rules <span data-testid="customization-section-count">64</span></button></h3>
+            <div><button data-testid="skills-rules-filter">All</button></div>
+          </div>
+          <div><div class="flex flex-col"><div class="group">/basic-memory</div></div></div>
+        </section>
+        <section>
+          <div><h3><button>Custom Agents <span data-testid="customization-section-count">0</span></button></h3></div>
+          <p>No custom agents yet.</p>
+        </section>
+        <section>
+          <div>
+            <h3><button>MCP Servers <span data-testid="customization-section-count">4</span></button></h3>
+            <div><button data-testid="add-mcp-button">+</button></div>
+          </div>
+          <div>basic-memory</div>
+        </section>
+      </div>
+    </div>
+  `;
+  const h = mount(html);
+  const rpcCalls = [];
+  h.window.__agProjectCall = async (action, payload) => {
+    rpcCalls.push({ action, payload });
+    if (action === 'createLocalSkill') {
+      return { ok: true, folderName: 'contract-audit', dirPath: '/Users/demo/.gemini/config/skills/contract-audit' };
+    }
+    if (action === 'createLocalAgent') {
+      return { ok: true, name: 'contract-reviewer', filePath: '/Users/demo/.gemini/config/agents/contract-reviewer.md' };
+    }
+    if (action === 'openSkillsDir' || action === 'openAgentsDir') return { ok: true };
+    return { ok: false };
+  };
+
+  h.window.__t.syncStepStream();
+  await settle(h);
+
+  const catBar = h.doc.getElementById('ag-cust-cat-bar');
+  assert.ok(catBar, 'category tabs bar mounted inside sticky header');
+  const tabs = [...catBar.querySelectorAll('[data-ag-cust-cat]')].map((b) => b.getAttribute('data-ag-cust-cat'));
+  assert.deepEqual(tabs, ['skills', 'plugins', 'mcp', 'agents', 'all'], 'renders ordered category tabs plus All');
+
+  const secSkills = h.doc.querySelector('section[data-ag-cust-sec="skills"]');
+  const secPlugins = h.doc.querySelector('section[data-ag-cust-sec="plugins"]');
+  const secMcp = h.doc.querySelector('section[data-ag-cust-sec="mcp"]');
+  assert.equal(secSkills.hasAttribute('data-ag-cust-hidden'), false, 'Skills section visible by default');
+  assert.equal(secPlugins.getAttribute('data-ag-cust-hidden'), '1', 'Plugins hidden while Skills tab active');
+  assert.equal(secMcp.getAttribute('data-ag-cust-hidden'), '1', 'MCP hidden while Skills tab active');
+
+  /* Switching to MCP isolates MCP section */
+  catBar.querySelector('[data-ag-cust-cat="mcp"]').click();
+  assert.equal(secMcp.hasAttribute('data-ag-cust-hidden'), false, 'MCP section visible after clicking MCP tab');
+  assert.equal(secSkills.getAttribute('data-ag-cust-hidden'), '1', 'Skills hidden when MCP tab active');
+
+  /* Typing in search reveals all sections via searching mode */
+  const search = h.doc.querySelector('[data-testid="customizations-search"]');
+  search.value = 'basic';
+  search.dispatchEvent(new h.window.Event('input', { bubbles: true }));
+  assert.equal(h.doc.querySelector('[data-ag-cust-page="1"]').getAttribute('data-ag-cust-searching'), '1');
+  assert.equal(secSkills.hasAttribute('data-ag-cust-hidden'), false, 'search un-hides all sections');
+
+  /* Clicking + Add skill opens modal and calls createLocalSkill RPC */
+  const addBtn = h.doc.getElementById('ag-cust-add-skill-btn');
+  assert.ok(addBtn, '+ Add skill button injected in Skills & Rules header');
+  assert.ok(h.doc.getElementById('ag-cust-open-skills-dir-btn'), 'Open skills folder button injected');
+  addBtn.click();
+  const modal = h.doc.getElementById('ag-claude-project-modal');
+  assert.ok(modal, 'Add skill modal opened');
+  assert.equal(modal.querySelector('[data-ag-skill-save]').disabled, true, 'Create skill disabled until required fields filled');
+  for (const [sel, val] of [
+    ['#ag-skill-name', 'contract-audit'],
+    ['#ag-skill-desc', 'Audit commercial contracts'],
+    ['#ag-skill-body', '# Steps\n1. Check clauses.']
+  ]) {
+    const el = modal.querySelector(sel);
+    el.value = val;
+    el.dispatchEvent(new h.window.Event('input', { bubbles: true }));
+  }
+  const saveBtn = modal.querySelector('[data-ag-skill-save]');
+  assert.equal(saveBtn.disabled, false);
+  saveBtn.click();
+  await h.microtasks();
+  await h.microtasks();
+  assert.ok(
+    rpcCalls.some((c) => c.action === 'createLocalSkill' && c.payload.name === 'contract-audit'),
+    'invokes createLocalSkill RPC'
+  );
+  assert.match(h.doc.getElementById('ag-claude-project-modal').textContent, /contract-audit/);
+  h.doc.querySelector('#ag-claude-project-modal [data-ag-pm-close]').click();
+
+  /* Clicking + New subagent opens Custom Subagent modal, switches tool preset, and calls createLocalAgent */
+  const addAgentBtn = h.doc.getElementById('ag-cust-add-agent-btn');
+  assert.ok(addAgentBtn, '+ New subagent button injected in Custom Agents header');
+  assert.ok(h.doc.getElementById('ag-cust-open-agents-dir-btn'), 'Open agents folder button injected');
+  addAgentBtn.click();
+  const agentModal = h.doc.getElementById('ag-claude-project-modal');
+  assert.ok(agentModal, 'New subagent modal opened');
+  agentModal.querySelector('[data-ag-agent-preset="editor"]').click();
+  const agentModal2 = h.doc.getElementById('ag-claude-project-modal');
+  for (const [sel, val] of [
+    ['#ag-agent-name', 'contract-reviewer'],
+    ['#ag-agent-desc', 'Reviews contracts and flags risks'],
+    ['#ag-agent-prompt', 'Always cite exact clause numbers.']
+  ]) {
+    const el = agentModal2.querySelector(sel);
+    el.value = val;
+    el.dispatchEvent(new h.window.Event('input', { bubbles: true }));
+  }
+  agentModal2.querySelector('[data-ag-agent-save]').click();
+  await h.microtasks();
+  await h.microtasks();
+  const agentCall = rpcCalls.find((c) => c.action === 'createLocalAgent');
+  assert.ok(agentCall, 'invokes createLocalAgent RPC');
+  assert.equal(agentCall.payload.name, 'contract-reviewer');
+  assert.deepEqual(Array.from(agentCall.payload.tools), ['read_file', 'edit_file', 'write_file', 'search_web']);
+
+  /* Clean disposal */
+  h.cleanups.forEach((fn) => fn());
+  assert.equal(h.doc.getElementById('ag-cust-cat-bar'), null);
+  assert.equal(h.doc.getElementById('ag-cust-skill-actions'), null);
+  assert.equal(h.doc.getElementById('ag-cust-agent-actions'), null);
   h.close();
 });

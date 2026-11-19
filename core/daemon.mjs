@@ -60,6 +60,14 @@ const PROJECT_FILES_REL = path.join('.anti-claude', 'files');
 const SIDECARS_DIR = path.resolve(
   process.env.ANTI_CLAUDE_SIDECARS_DIR || path.join(HOME, '.gemini', 'config', 'sidecars')
 );
+const GLOBAL_SKILLS_DIR = path.resolve(
+  process.env.ANTI_CLAUDE_SKILLS_DIR || path.join(HOME, '.gemini', 'config', 'skills')
+);
+const GLOBAL_AGENTS_DIR = path.resolve(
+  process.env.ANTI_CLAUDE_AGENTS_DIR || path.join(HOME, '.gemini', 'config', 'agents')
+);
+const RESERVED_AGENT_NAMES = new Set(['self', 'browser', 'research', 'deepagent', 'review-agent', 'image-generator']);
+const ALLOWED_AGENT_TOOLS = ['read_file', 'edit_file', 'write_file', 'run_command', 'manage_task', 'search_web'];
 const INLINE_TEXT_EXTS = new Set([
   '.md', '.markdown', '.txt', '.json', '.yaml', '.yml', '.toml', '.csv', '.tsv', '.xml',
   '.html', '.htm', '.css', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.go',
@@ -346,7 +354,7 @@ let lastBundleFilesSig = '';
 let cachedRuntimeTemplate = '';
 let cachedBootPayloadBase = null;
 let cachedBundleHash = '';
-let cachedVersion = '2.5.0';
+let cachedVersion = '2.6.0';
 let activeConfig = {
   enabled: true,
   contextLimit: 256000,
@@ -381,7 +389,7 @@ function rebuildBundleIfNeeded() {
   lastBundleFilesSig = filesSig;
 
   const pkg = readJsonOrFallback(PKG_FILE, {});
-  cachedVersion = pkg?.version ? `anti-claude-${pkg.version}` : 'anti-claude-2.5.0';
+  cachedVersion = pkg?.version ? `anti-claude-${pkg.version}` : 'anti-claude-2.6.0';
 
   const rawCfg = readJsonOrFallback(userConfigFile, {});
   const enabled = rawCfg?.enabled !== false;
@@ -1697,6 +1705,142 @@ function revealLocalPath(rawPath) {
   return { ok: true };
 }
 
+function sanitizeSkillFolderName(rawName) {
+  const cleaned = String(rawName || '')
+    .trim()
+    .replace(/[\\/:*?"<>|\x00-\x1f]+/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64);
+  if (!cleaned || cleaned === '.' || cleaned === '..') return '';
+  return cleaned;
+}
+
+function createLocalSkill(payload) {
+  const rawName = String(payload?.name || '').trim();
+  const description = String(payload?.description || '').trim();
+  const instructions = String(payload?.instructions || '').replace(/\r\n/g, '\n').trim();
+  if (!rawName || !description || !instructions) {
+    return { ok: false, error: 'required_fields_missing' };
+  }
+  const folderName = sanitizeSkillFolderName(rawName);
+  if (!folderName) return { ok: false, error: 'invalid_skill_name' };
+  fs.mkdirSync(GLOBAL_SKILLS_DIR, { recursive: true });
+  const targetDir = path.join(GLOBAL_SKILLS_DIR, folderName);
+  if (!isPathInsideDir(GLOBAL_SKILLS_DIR, targetDir)) return { ok: false, error: 'invalid_skill_path' };
+  if (fs.existsSync(targetDir) && !payload?.overwrite) {
+    return { ok: false, error: 'skill_already_exists' };
+  }
+  fs.mkdirSync(targetDir, { recursive: true });
+  const yamlDesc = description.replace(/\r?\n/g, ' ').replace(/"/g, '\\"');
+  const yamlName = rawName.replace(/\r?\n/g, ' ').replace(/"/g, '\\"');
+  const content = `---\nname: ${yamlName}\ndescription: "${yamlDesc}"\n---\n\n${instructions}\n`;
+  const skillMdPath = path.join(targetDir, 'SKILL.md');
+  writeAtomicUtf8(skillMdPath, content);
+  return { ok: true, name: rawName, folderName, dirPath: targetDir, skillMdPath };
+}
+
+async function importLocalSkillNative() {
+  const picked = await pickLocalFolderNative();
+  if (!picked || !picked.ok || picked.canceled || !picked.folderPath) {
+    return { ok: true, canceled: true };
+  }
+  const srcDir = path.resolve(picked.folderPath);
+  const srcSkillMd = path.join(srcDir, 'SKILL.md');
+  if (!fs.existsSync(srcSkillMd)) {
+    return { ok: false, error: 'missing_skill_md' };
+  }
+  const baseName = sanitizeSkillFolderName(path.basename(srcDir));
+  if (!baseName) return { ok: false, error: 'invalid_skill_name' };
+  fs.mkdirSync(GLOBAL_SKILLS_DIR, { recursive: true });
+  let destName = baseName;
+  let destDir = path.join(GLOBAL_SKILLS_DIR, destName);
+  let idx = 1;
+  while (fs.existsSync(destDir)) {
+    if (path.resolve(destDir) === srcDir) {
+      return { ok: true, canceled: false, alreadyInstalled: true, folderName: destName, dirPath: destDir };
+    }
+    destName = `${baseName}-${idx++}`;
+    destDir = path.join(GLOBAL_SKILLS_DIR, destName);
+  }
+  if (!isPathInsideDir(GLOBAL_SKILLS_DIR, destDir)) return { ok: false, error: 'invalid_skill_path' };
+  fs.cpSync(srcDir, destDir, { recursive: true });
+  return { ok: true, canceled: false, folderName: destName, dirPath: destDir, skillMdPath: path.join(destDir, 'SKILL.md') };
+}
+
+function createLocalAgent(payload) {
+  const rawName = String(payload?.name || '').trim();
+  const description = String(payload?.description || '').trim();
+  const systemPrompt = String(payload?.systemPrompt || '').replace(/\r\n/g, '\n').trim();
+  if (!rawName || !description || !systemPrompt) {
+    return { ok: false, error: 'required_fields_missing' };
+  }
+  const fileSlug = sanitizeSkillFolderName(rawName);
+  if (!fileSlug) return { ok: false, error: 'invalid_agent_name' };
+  if (RESERVED_AGENT_NAMES.has(fileSlug.toLowerCase())) {
+    return { ok: false, error: 'reserved_agent_name' };
+  }
+  fs.mkdirSync(GLOBAL_AGENTS_DIR, { recursive: true });
+  const targetFile = path.join(GLOBAL_AGENTS_DIR, `${fileSlug}.md`);
+  if (!isPathInsideDir(GLOBAL_AGENTS_DIR, targetFile)) return { ok: false, error: 'invalid_agent_path' };
+  if (fs.existsSync(targetFile) && !payload?.overwrite) {
+    return { ok: false, error: 'agent_already_exists' };
+  }
+
+  const roleMode = String(payload?.roleMode || 'subagent');
+  const subagent = roleMode !== 'main_only';
+  const mainAgent = roleMode === 'both' || roleMode === 'main_only';
+  const rawTools = Array.isArray(payload?.tools) ? payload.tools : ['read_file', 'search_web'];
+  const tools = rawTools.filter((t) => ALLOWED_AGENT_TOOLS.includes(t));
+  const finalTools = tools.length ? tools : ['read_file'];
+
+  const yamlName = fileSlug.replace(/\r?\n/g, ' ').replace(/"/g, '\\"');
+  const yamlDesc = description.replace(/\r?\n/g, ' ').replace(/"/g, '\\"');
+  const content = [
+    '---',
+    `name: ${yamlName}`,
+    `description: "${yamlDesc}"`,
+    `subagent: ${subagent ? 'true' : 'false'}`,
+    `mainAgent: ${mainAgent ? 'true' : 'false'}`,
+    `tools: [${finalTools.join(', ')}]`,
+    '---',
+    '',
+    systemPrompt,
+    ''
+  ].join('\n');
+  writeAtomicUtf8(targetFile, content);
+  return { ok: true, name: fileSlug, filePath: targetFile, dirPath: GLOBAL_AGENTS_DIR };
+}
+
+async function importLocalAgentNative() {
+  const picked = await pickLocalFilesNative();
+  if (!picked || !picked.ok || picked.canceled || !Array.isArray(picked.paths) || picked.paths.length === 0) {
+    return { ok: true, canceled: true };
+  }
+  const mdFiles = picked.paths.filter((p) => /\.md$/i.test(p) && fs.existsSync(p));
+  if (!mdFiles.length) return { ok: false, error: 'missing_md_file' };
+  fs.mkdirSync(GLOBAL_AGENTS_DIR, { recursive: true });
+  const imported = [];
+  for (const src of mdFiles) {
+    const absSrc = path.resolve(src);
+    const stem = sanitizeSkillFolderName(path.basename(absSrc, path.extname(absSrc)));
+    if (!stem) continue;
+    let destName = stem;
+    let destPath = path.join(GLOBAL_AGENTS_DIR, `${destName}.md`);
+    let idx = 1;
+    while (fs.existsSync(destPath)) {
+      if (path.resolve(destPath) === absSrc) break;
+      destName = `${stem}-${idx++}`;
+      destPath = path.join(GLOBAL_AGENTS_DIR, `${destName}.md`);
+    }
+    if (!isPathInsideDir(GLOBAL_AGENTS_DIR, destPath)) continue;
+    if (path.resolve(destPath) !== absSrc) fs.copyFileSync(absSrc, destPath);
+    imported.push({ name: destName, filePath: destPath });
+  }
+  if (!imported.length) return { ok: false, error: 'invalid_agent_name' };
+  return { ok: true, canceled: false, imported, dirPath: GLOBAL_AGENTS_DIR };
+}
+
 async function handleProjectRpcRequest(rawPayload) {
   let req;
   try {
@@ -1738,6 +1882,28 @@ async function handleProjectRpcRequest(rawPayload) {
     }
     if (action === 'deleteScheduledTask') {
       return { reqId, result: deleteProjectScheduledTask(payload) };
+    }
+    if (action === 'openSkillsDir') {
+      fs.mkdirSync(GLOBAL_SKILLS_DIR, { recursive: true });
+      return { reqId, result: revealLocalPath(GLOBAL_SKILLS_DIR) };
+    }
+    if (action === 'createLocalSkill') {
+      return { reqId, result: createLocalSkill(payload) };
+    }
+    if (action === 'importLocalSkill') {
+      const res = await importLocalSkillNative();
+      return { reqId, result: res };
+    }
+    if (action === 'openAgentsDir') {
+      fs.mkdirSync(GLOBAL_AGENTS_DIR, { recursive: true });
+      return { reqId, result: revealLocalPath(GLOBAL_AGENTS_DIR) };
+    }
+    if (action === 'createLocalAgent') {
+      return { reqId, result: createLocalAgent(payload) };
+    }
+    if (action === 'importLocalAgent') {
+      const res = await importLocalAgentNative();
+      return { reqId, result: res };
     }
     if (action === 'revealFile') {
       return { reqId, result: revealLocalPath(payload.targetPath) };
