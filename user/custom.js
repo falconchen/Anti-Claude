@@ -35,6 +35,7 @@
     return defaultVal;
   }
   const FEAT = {
+    i18n: effectiveModBool('i18n', false),
     stepUnfold: effectiveModBool('claudeUxStepUnfold', true),
     collapseAnim: effectiveModBool('claudeUxCollapseAnimation', true),
     todoCard: effectiveModBool('claudeUxTodoCard', true),
@@ -45,6 +46,7 @@
     folderStatus: effectiveModBool('claudeUxFolderStatus', true),
     recentSection: effectiveModBool('claudeUxRecentSection', true)
   };
+  const L = (zh, en) => (FEAT.i18n ? zh : en);
 
   /* an older instance that was never cleaned up (no ctx.onCleanup) must not keep running */
   if (typeof window.__agClaudeUxDispose === 'function') {
@@ -53,12 +55,15 @@
     } catch {}
   }
 
-  /* Set root locale to zh-CN so Chromium/HarfBuzz selects Simplified Chinese `locl` glyphs and strict CJK line-break rules */
+  /* Set root locale to zh-CN for Simplified Chinese CJK glyph fallback and track active UI language */
   const docRoot = document.documentElement;
   const origDocLang = docRoot ? docRoot.getAttribute('lang') : null;
   const hadDocLang = docRoot ? docRoot.hasAttribute('lang') : false;
   if (docRoot && origDocLang !== 'zh-CN') {
     docRoot.setAttribute('lang', 'zh-CN');
+  }
+  if (docRoot) {
+    docRoot.setAttribute('data-ag-ux-lang', FEAT.i18n ? 'zh' : 'en');
   }
 
   const userToggled = new WeakSet();
@@ -142,33 +147,33 @@
     ghost.setAttribute('aria-hidden', 'true');
     for (const n of Array.from(src.childNodes)) ghost.appendChild(n.cloneNode(true));
     ghost.querySelectorAll('[id]').forEach((el) => el.removeAttribute('id'));
-    ghost.style.cssText = 'overflow: hidden; pointer-events: none; opacity: 1; transform: translateY(0)';
+    ghost.style.opacity = '1';
+    ghost.style.transform = 'translateY(0)';
     btn.insertAdjacentElement('afterend', ghost);
 
-    const height = Math.min(ghost.scrollHeight || 0, 360);
+    const rectH = ghost.getBoundingClientRect ? ghost.getBoundingClientRect().height : 0;
+    const height = Math.min(Math.ceil(rectH || ghost.scrollHeight || 0), 360);
     if (height <= 8) {
       ghost.remove();
       return;
     }
     ghost.style.maxHeight = `${height}px`;
-    ghost.style.transition =
-      'max-height 190ms cubic-bezier(0.16, 1, 0.3, 1), opacity 150ms ease-out, transform 190ms cubic-bezier(0.16, 1, 0.3, 1), margin 190ms ease';
+    /* Commit starting box in the same frame so collapse begins immediately with zero 2-frame stall */
+    void ghost.offsetHeight;
+    ghost.classList.add('is-collapsing');
 
-    frame(() => {
-      frame(() => {
-        ghost.style.maxHeight = '0px';
-        ghost.style.opacity = '0';
-        ghost.style.transform = 'translateY(-4px)';
-        ghost.style.marginTop = '0px';
-        ghost.style.marginBottom = '0px';
-      });
-    });
-
+    let cleaned = false;
     const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      ghost.removeEventListener('transitionend', onEnd);
       if (ghost.parentNode) ghost.remove();
     };
-    ghost.addEventListener('transitionend', cleanup, { once: true });
-    setTimeout(cleanup, 240); /* intentionally untracked: must also run after dispose */
+    const onEnd = (ev) => {
+      if (ev && ev.target === ghost && ev.propertyName === 'max-height') cleanup();
+    };
+    ghost.addEventListener('transitionend', onEnd);
+    setTimeout(cleanup, 220); /* intentionally untracked: must also run after dispose */
   }
 
   function parseTodoUlUncached(ul) {
@@ -1725,7 +1730,7 @@
           : String(Math.round(d.streamTps))
         : '';
     const speedHtml = tpsText
-      ? `${tpsText} tok/s${d.isBuffered ? '<span class="ag-ux-tt-sub">缓冲</span>' : ''}`
+      ? `${tpsText} tok/s${d.isBuffered ? `<span class="ag-ux-tt-sub">${L('缓冲', 'buffered')}</span>` : ''}`
       : '—';
     const ttftHtml = Number.isFinite(d.ttftSec) ? fmtDurationSec(d.ttftSec) : '';
     const durHtml = fmtDurationSec(durVal) || '—';
@@ -1739,12 +1744,12 @@
     );
     let ctxHtml = '—';
     if (compactStatus === 'compacting') {
-      ctxHtml = `压缩中…${preUsed ? `<span class="ag-ux-tt-sub">原 ${esc(preUsed)}</span>` : ''}`;
+      ctxHtml = `${L('压缩中…', 'Compacting…')}${preUsed ? `<span class="ag-ux-tt-sub">${L('原 ', 'was ')}${esc(preUsed)}</span>` : ''}`;
     } else if (compactStatus === 'compacted') {
       ctxHtml =
         summaryLabel && limitLabel
-          ? `${esc(summaryLabel)} / ${esc(limitLabel)}<span class="ag-ux-tt-sub">已压缩${preUsed ? ` · 原 ${esc(preUsed)}` : ''}</span>`
-          : `已压缩${preUsed ? `<span class="ag-ux-tt-sub">原 ${esc(preUsed)}</span>` : ''}`;
+          ? `${esc(summaryLabel)} / ${esc(limitLabel)}<span class="ag-ux-tt-sub">${L('已压缩', 'Compacted')}${preUsed ? ` · ${L('原 ', 'was ')}${esc(preUsed)}` : ''}</span>`
+          : `${L('已压缩', 'Compacted')}${preUsed ? `<span class="ag-ux-tt-sub">${L('原 ', 'was ')}${esc(preUsed)}</span>` : ''}`;
     } else if (ctxRatio) {
       ctxHtml = `${esc(ctxRatio)}${ctxPct ? `<span class="ag-ux-tt-sub">${esc(ctxPct)}</span>` : ''}`;
     }
@@ -1754,36 +1759,41 @@
     const sessCache = Number.isFinite(d.sessionCacheRate) ? `${Math.round(d.sessionCacheRate)}%` : '';
     const sessTier = cacheTierForRate(d.sessionCacheRate);
     const cacheHtml = lastCache
-      ? `<span class="ag-ux-tt-cache" data-cache-tier="${lastTier}">${lastCache}</span>${sessCache ? `<span class="ag-ux-tt-sub">累计 ${sessCache}</span>` : ''}`
+      ? `<span class="ag-ux-tt-cache" data-cache-tier="${lastTier}">${lastCache}</span>${sessCache ? `<span class="ag-ux-tt-sub">${L('累计 ', 'avg ')}${sessCache}</span>` : ''}`
       : sessCache
         ? `<span class="ag-ux-tt-cache" data-cache-tier="${sessTier}">${sessCache}</span>`
         : '—';
 
-    const sec1List = [row('生成速度', speedHtml)];
+    const sec1List = [row(L('生成速度', 'Speed'), speedHtml)];
     if (ttftHtml) {
-      sec1List.push(row(d.isHold ? '首包等待' : '首字耗时', ttftHtml));
+      sec1List.push(row(d.isHold ? L('首包等待', 'Hold') : L('首字耗时', 'TTFT'), ttftHtml));
     }
-    sec1List.push(row('本轮耗时', durHtml), row('本轮输出', outHtml));
+    sec1List.push(row(L('本轮耗时', 'Duration'), durHtml), row(L('本轮输出', 'Output'), outHtml));
 
-    const sec2List = [row('上下文', ctxHtml), row('缓存命中', cacheHtml)];
+    const sec2List = [row(L('上下文', 'Context'), ctxHtml), row(L('缓存命中', 'Cache hit'), cacheHtml)];
     if ((d.sessionTurns > 1 || d.subLabel) && d.sessionTotalOut) {
-      sec2List.push(row('累计输出', esc(d.sessionTotalOut)));
+      sec2List.push(row(L('累计输出', 'Total out'), esc(d.sessionTotalOut)));
     }
     if (d.subLabel) {
+      const subDisplay = FEAT.i18n ? d.subLabel : d.subLabel.replace(/\s*个$/, '').replace('同步中', 'syncing');
+      const subSubDisplay = FEAT.i18n ? d.subSub : String(d.subSub || '').replace(/^输出\s+/, 'out ').replace('同步中', 'syncing');
       sec2List.push(
-        row('子 Agent', `${esc(d.subLabel)}${d.subSub ? `<span class="ag-ux-tt-sub">${esc(d.subSub)}</span>` : ''}`)
+        row(
+          L('子 Agent', 'Subagents'),
+          `${esc(subDisplay)}${subSubDisplay ? `<span class="ag-ux-tt-sub">${esc(subSubDisplay)}</span>` : ''}`
+        )
       );
     }
 
     return (
       `<div class="ag-ux-tt">` +
       `<div class="ag-ux-tt-sec">` +
-      `<div class="ag-ux-tt-hdr"><span class="ag-ux-tt-title">本轮响应</span><span class="ag-ux-tt-badge">${steps} 步</span></div>` +
+      `<div class="ag-ux-tt-hdr"><span class="ag-ux-tt-title">${L('本轮响应', 'This turn')}</span><span class="ag-ux-tt-badge">${FEAT.i18n ? `${steps} 步` : `${steps} ${steps === 1 ? 'step' : 'steps'}`}</span></div>` +
       sec1List.join('') +
       `</div>` +
       `<div class="ag-ux-tt-div"></div>` +
       `<div class="ag-ux-tt-sec">` +
-      `<div class="ag-ux-tt-hdr"><span class="ag-ux-tt-title">当前会话</span><span class="ag-ux-tt-badge">${d.sessionTurns} 轮</span></div>` +
+      `<div class="ag-ux-tt-hdr"><span class="ag-ux-tt-title">${L('当前会话', 'Session')}</span><span class="ag-ux-tt-badge">${FEAT.i18n ? `${d.sessionTurns} 轮` : `${d.sessionTurns} ${d.sessionTurns === 1 ? 'turn' : 'turns'}`}</span></div>` +
       sec2List.join('') +
       `</div>` +
       (d.warnHtml || '') +
@@ -2065,37 +2075,40 @@
     const resetMs = secStr ? Number(secStr) * 1000 : 0;
 
     if (win === '5h' && usedPct === 0 && !bucket.description) {
-      return '从发送第一条消息时起算';
+      return L('从发送第一条消息时起算', 'Starts on first message');
     }
     if (!resetMs || Number.isNaN(resetMs)) {
-      return usedPct === 0 ? '从发送第一条消息时起算' : '';
+      return usedPct === 0 ? L('从发送第一条消息时起算', 'Starts on first message') : '';
     }
     const diffMs = resetMs - Date.now();
-    if (diffMs <= 60000) return '即将重置';
+    if (diffMs <= 60000) return L('即将重置', 'Resets soon');
 
     if (win === 'weekly') {
       const dt = new Date(resetMs);
-      const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+      const weekdaysZh = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+      const weekdaysEn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
       const hh = String(dt.getHours()).padStart(2, '0');
       const mm = String(dt.getMinutes()).padStart(2, '0');
-      return `${weekdays[dt.getDay()]} ${hh}:${mm} 重置`;
+      return FEAT.i18n ? `${weekdaysZh[dt.getDay()]} ${hh}:${mm} 重置` : `Resets ${weekdaysEn[dt.getDay()]} ${hh}:${mm}`;
     }
 
     const totalMins = Math.floor(diffMs / 60000);
     const hrs = Math.floor(totalMins / 60);
     const mins = totalMins % 60;
     if (hrs > 0) {
-      return mins > 0 ? `${hrs} 小时 ${mins} 分后重置` : `${hrs} 小时后重置`;
+      if (FEAT.i18n) return mins > 0 ? `${hrs} 小时 ${mins} 分后重置` : `${hrs} 小时后重置`;
+      return mins > 0 ? `Resets in ${hrs}h ${mins}m` : `Resets in ${hrs}h`;
     }
-    return `${Math.max(1, mins)} 分钟后重置`;
+    const m = Math.max(1, mins);
+    return FEAT.i18n ? `${m} 分钟后重置` : `Resets in ${m}m`;
   }
 
   function localizeGroupShortName(name) {
     const s = String(name || '').trim();
-    if (/gemini/i.test(s)) return 'Gemini 模型';
+    if (/gemini/i.test(s)) return L('Gemini 模型', 'Gemini');
     if (/claude/i.test(s) && /gpt/i.test(s)) return 'Claude / GPT';
-    if (/claude/i.test(s)) return 'Claude 模型';
-    return s || '全部模型';
+    if (/claude/i.test(s)) return L('Claude 模型', 'Claude');
+    return s || L('全部模型', 'All models');
   }
 
   function detectDefaultGroupIndex(groups) {
@@ -2185,7 +2198,7 @@
     let ctxPctLabel = `${ctxPct}%`;
     let ctxSub = hasCtx
       ? `${latestCtxState.ratioText}${latestCtxState.outText ? ` · ${latestCtxState.outText}` : ''}`
-      : '当前会话暂无消耗';
+      : L('当前会话暂无消耗', 'No usage yet');
     let ctxColor = barColorForPct(ctxPct, 70, 85);
     let fillCompactingAttr = '';
     let compactBtnHtml = '';
@@ -2193,10 +2206,10 @@
     if (compactStatus === 'compacting') {
       ctxPct = 14;
       ctxPctLabel = '…';
-      ctxSub = preUsed ? `正在压缩 ${preUsed}…` : '正在生成压缩摘要…';
+      ctxSub = preUsed ? L(`正在压缩 ${preUsed}…`, `Compacting ${preUsed}…`) : L('正在生成压缩摘要…', 'Summarizing context…');
       ctxColor = 'var(--primary, #2F75C3)';
       fillCompactingAttr = ' data-compacting="true"';
-      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="compacting" disabled title="正在总结历史并压缩上下文…">${SVG_COMPACT_ICON}<span>压缩中…</span></button>`;
+      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="compacting" disabled title="${escapeHtml(L('正在总结历史并压缩上下文…', 'Summarizing history and compacting context…'))}">${SVG_COMPACT_ICON}<span>${L('压缩中…', 'Compacting…')}</span></button>`;
     } else if (compactStatus === 'compacted') {
       if (summaryLabel && limitLabel) {
         ctxPct = Math.max(2, summaryPct);
@@ -2205,21 +2218,24 @@
       } else {
         ctxPct = hasCtx ? 2 : 0;
         ctxPctLabel = '—';
-        ctxSub = '已完成压缩 · 下轮刷新';
+        ctxSub = L('已完成压缩 · 下轮刷新', 'Compacted · refreshes next turn');
       }
       ctxColor = 'var(--primary, #2F75C3)';
       const doneTitle =
         preUsed && summaryLabel
-          ? `已将 ${preUsed} 上下文压缩为 ${summaryLabel} 摘要，发下一条消息即按新上下文计费`
-          : '当前对话历史已完成压缩，发下一条消息即按新上下文计费';
-      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="compacted" disabled title="${escapeHtml(doneTitle)}">${SVG_COMPACT_DONE}<span>已压缩</span></button>`;
+          ? L(
+              `已将 ${preUsed} 上下文压缩为 ${summaryLabel} 摘要，发下一条消息即按新上下文计费`,
+              `Compacted ${preUsed} into a ${summaryLabel} summary; refreshes on next message`
+            )
+          : L('当前对话历史已完成压缩，发下一条消息即按新上下文计费', 'Context compacted; refreshes on next message');
+      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="compacted" disabled title="${escapeHtml(doneTitle)}">${SVG_COMPACT_DONE}<span>${L('已压缩', 'Compacted')}</span></button>`;
     } else if (!hasCtx) {
-      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="empty" disabled title="当前会话暂无可压缩上下文">${SVG_COMPACT_ICON}<span>压缩</span></button>`;
+      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="empty" disabled title="${escapeHtml(L('当前会话暂无可压缩上下文', 'No context to compact yet'))}">${SVG_COMPACT_ICON}<span>${L('压缩', 'Compact')}</span></button>`;
     } else if (paneRunning) {
-      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="busy" disabled title="请等待当前回复结束后再压缩上下文">${SVG_COMPACT_ICON}<span>压缩</span></button>`;
+      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="busy" disabled title="${escapeHtml(L('请等待当前回复结束后再压缩上下文', 'Wait for the current response to finish before compacting'))}">${SVG_COMPACT_ICON}<span>${L('压缩', 'Compact')}</span></button>`;
     } else {
       const urgentAttr = ctxPct >= 85 ? ' data-urgent="crit"' : ctxPct >= 70 ? ' data-urgent="warn"' : '';
-      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="ready"${urgentAttr} title="立即执行 /compact 压缩当前对话上下文">${SVG_COMPACT_ICON}<span>压缩</span></button>`;
+      compactBtnHtml = `<button type="button" class="ag-qp-compact-btn" data-ag-qp-compact="true" data-state="ready"${urgentAttr} title="${escapeHtml(L('立即执行 /compact 压缩当前对话上下文', 'Run /compact to compress this conversation context'))}">${SVG_COMPACT_ICON}<span>${L('压缩', 'Compact')}</span></button>`;
     }
 
     discoverQuotaService();
@@ -2246,9 +2262,9 @@
 
     let quotaRowsHtml = '';
     if (!cachedQuotaGroups && quotaFetchInFlight) {
-      quotaRowsHtml = '<div class="ag-qp-empty">正在读取实时套餐限额…</div>';
+      quotaRowsHtml = `<div class="ag-qp-empty">${L('正在读取实时套餐限额…', 'Loading plan usage…')}</div>`;
     } else if (groups.length === 0) {
-      quotaRowsHtml = '<div class="ag-qp-empty">暂无可用套餐限额数据</div>';
+      quotaRowsHtml = `<div class="ag-qp-empty">${L('暂无可用套餐限额数据', 'No plan usage data available')}</div>`;
     } else {
       const grp = groups[selectedQuotaGroupIdx] || groups[0];
       const grpShort = localizeGroupShortName(grp.displayName);
@@ -2269,12 +2285,12 @@
           const win = String(b.window || '').trim().toLowerCase();
           const title =
             win === '5h'
-              ? '5 小时限额'
+              ? L('5 小时限额', '5-hour limit')
               : win === 'weekly'
-                ? `每周 · ${grpShort}`
+                ? L(`每周 · ${grpShort}`, `Weekly · ${grpShort}`)
                 : win === 'daily'
-                  ? `每日 · ${grpShort}`
-                  : b.displayName || '使用限额';
+                  ? L(`每日 · ${grpShort}`, `Daily · ${grpShort}`)
+                  : b.displayName || L('使用限额', 'Usage limit');
           const resetTxt = formatResetLabel(b, usedPct);
           const fillCol = barColorForPct(usedPct, 75, 90);
           return `<div class="ag-qp-item">
@@ -2290,16 +2306,16 @@
 
     pop.innerHTML = `
       <div class="ag-qp-hdr">
-        <span class="ag-qp-tier">套餐使用限额 · ${escapeHtml(tierShort)}</span>
+        <span class="ag-qp-tier">${L('套餐使用限额', 'Plan usage')} · ${escapeHtml(tierShort)}</span>
         <button type="button" class="ag-qp-all" data-ag-quota-view-all="true">
-          <span>查看全部</span>
+          <span>${L('查看全部', 'View all')}</span>
           <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3.5 8h9m0 0L8.8 4.3M12.5 8l-3.7 3.7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
       </div>
       <div class="ag-qp-item">
         <div class="ag-qp-row">
           <span class="ag-qp-title-group">
-            <span class="ag-qp-title">当前上下文</span>
+            <span class="ag-qp-title">${L('当前上下文', 'Context window')}</span>
             ${compactBtnHtml}
           </span>
           <span class="ag-qp-meta"><span class="ag-qp-reset">${escapeHtml(ctxSub)}</span><span class="ag-qp-pct">${escapeHtml(ctxPctLabel)}</span></span>
@@ -2356,8 +2372,8 @@
       ring.setAttribute('data-level', 'normal');
       ring.setAttribute('data-compact-state', 'compacting');
       ring.title = preUsed
-        ? `正在压缩上下文 (原 ${preUsed})… · 点击查看状态`
-        : '正在压缩上下文… · 点击查看状态';
+        ? L(`正在压缩上下文 (原 ${preUsed})… · 点击查看状态`, `Compacting context (was ${preUsed})… · Click for status`)
+        : L('正在压缩上下文… · 点击查看状态', 'Compacting context… · Click for status');
       return;
     }
 
@@ -2371,8 +2387,11 @@
       ring.setAttribute('data-compact-state', 'compacted');
       ring.title =
         summaryLabel && limitLabel
-          ? `当前上下文 ${summaryLabel} / ${limitLabel} (${summaryPct}%${preUsed ? ` · 原 ${preUsed} 已压缩` : ''}) · 点击查看套餐限额`
-          : '当前上下文已压缩 · 点击查看套餐限额';
+          ? L(
+              `当前上下文 ${summaryLabel} / ${limitLabel} (${summaryPct}%${preUsed ? ` · 原 ${preUsed} 已压缩` : ''}) · 点击查看套餐限额`,
+              `Context ${summaryLabel} / ${limitLabel} (${summaryPct}%${preUsed ? ` · compacted from ${preUsed}` : ''}) · Click for plan usage`
+            )
+          : L('当前上下文已压缩 · 点击查看套餐限额', 'Context compacted · Click for plan usage');
       return;
     }
 
@@ -2388,8 +2407,11 @@
       ring.setAttribute('data-level', level);
     }
     ring.title = hasCtx
-      ? `当前上下文 ${latestCtxState.ratioText} (${pct}%) · 点击查看套餐限额`
-      : '当前会话暂无上下文消耗 · 点击查看套餐限额';
+      ? L(
+          `当前上下文 ${latestCtxState.ratioText} (${pct}%) · 点击查看套餐限额`,
+          `Context ${latestCtxState.ratioText} (${pct}%) · Click for plan usage`
+        )
+      : L('当前会话暂无上下文消耗 · 点击查看套餐限额', 'No context usage yet · Click for plan usage');
   }
 
   function ensureComposerContextRing() {
@@ -2479,12 +2501,16 @@
   const EFFORT_DISPLAY = { XHigh: 'Extra' };
   const EFFORT_RANK = { Low: 0, Medium: 1, High: 2, XHigh: 3, Max: 4 };
   const EFFORT_DESC = {
-    Low: '最快响应，轻量日常问答',
-    Medium: '速度与推理均衡（默认）',
-    High: '深度推演与复杂问题排障',
-    XHigh: '极限长链深度推理',
-    Max: '最高推理强度'
+    Low: ['最快响应，轻量日常问答', 'Fastest response for everyday tasks'],
+    Medium: ['速度与推理均衡（默认）', 'Balanced speed and reasoning (default)'],
+    High: ['深度推演与复杂问题排障', 'Deep analysis for complex problems'],
+    XHigh: ['极限长链深度推理', 'Maximum extended reasoning'],
+    Max: ['最高推理强度', 'Maximum reasoning effort']
   };
+  function displayEffortDesc(effort) {
+    const pair = effort && EFFORT_DESC[effort];
+    return pair ? L(pair[0], pair[1]) : '';
+  }
   function displayEffortLabel(effort) {
     return (effort && EFFORT_DISPLAY[effort]) || effort;
   }
@@ -2598,10 +2624,10 @@
     const moreFamilies = families
       .filter((f) => !primarySet.has(f))
       .map((f) => ({
-        group: isOrch(f) ? '多智能体编排' : '其他模型',
+        group: isOrch(f) ? 'orch' : 'other',
         fam: f
       }))
-      .sort((a, b) => (a.group === b.group ? 0 : a.group === '多智能体编排' ? -1 : 1));
+      .sort((a, b) => (a.group === b.group ? 0 : a.group === 'orch' ? -1 : 1));
 
     const sel = api.selectedModel || null;
     let activeFamily = null;
@@ -2783,7 +2809,7 @@
         ? displayEffortLabel(cat.activeVariant.effort)
         : hasAdjustableEffort
           ? displayEffortLabel(lastPreferredEffort)
-          : '固定';
+          : L('固定', 'Fixed');
 
     const activeInMore = cat.moreFamilies.some((x) => cat.activeFamily && x.fam.baseName === cat.activeFamily.baseName);
 
@@ -2805,20 +2831,20 @@
     const moreSubActive = activeModelSubmenu === 'more' ? ' data-active-sub="true"' : '';
 
     mainPop.innerHTML = `
-      <div class="ag-cm-sec-hdr">模型 · 本次会话</div>
+      <div class="ag-cm-sec-hdr">${L('模型 · 本次会话', 'Models · This chat')}</div>
       <div>${primaryRowsHtml}</div>
       <div class="ag-cm-divider"></div>
       <button type="button" class="ag-cm-row" data-ag-cm-hover="${
         hasAdjustableEffort ? 'effort' : 'none'
       }" data-ag-cm-subtrigger="effort"${effSubActive}${effDisabled}>
-        <span>思考强度</span>
+        <span>${L('思考强度', 'Thinking effort')}</span>
         <span class="ag-cm-right"><span>${escapeHtml(curEffortText)}</span>${
           hasAdjustableEffort ? SVG_CM_CHEVRON : ''
         }</span>
       </button>
       <button type="button" class="ag-cm-row" data-ag-cm-hover="more" data-ag-cm-subtrigger="more"${moreSubActive}>
         <span style="display:inline-flex;align-items:center;gap:6px;">
-          <span>更多模型</span>
+          <span>${L('更多模型', 'More models')}</span>
           ${activeInMore ? '<span class="ag-cm-dot"></span>' : ''}
         </span>
         <span class="ag-cm-right">
@@ -2830,11 +2856,11 @@
     if (activeModelSubmenu === 'effort' && hasAdjustableEffort) {
       const famTitle = cat.activeFamily ? cat.activeFamily.baseName : '';
       subPop.innerHTML =
-        `<div class="ag-cm-sec-hdr">思考强度 · ${escapeHtml(famTitle)}</div>` +
+        `<div class="ag-cm-sec-hdr">${L('思考强度', 'Thinking effort')} · ${escapeHtml(famTitle)}</div>` +
         multiEfforts
           .map((v) => {
             const on = Boolean(cat.activeVariant && v.effort === cat.activeVariant.effort);
-            const desc = EFFORT_DESC[v.effort] || '';
+            const desc = displayEffortDesc(v.effort);
             const label = displayEffortLabel(v.effort);
             return `<button type="button" class="ag-cm-row" data-ag-cm-effort="${escapeHtml(v.effort)}">
               <span>
@@ -2852,8 +2878,9 @@
         .map(({ group, fam }) => {
           let hdr = '';
           if (group !== lastGrp) {
+            const groupLabel = group === 'orch' ? L('多智能体编排', 'Orchestrators') : L('其他模型', 'Other models');
             hdr = `${lastGrp ? '<div class="ag-cm-divider"></div>' : ''}<div class="ag-cm-sec-hdr">${escapeHtml(
-              group
+              groupLabel
             )}</div>`;
             lastGrp = group;
           }
@@ -3317,23 +3344,25 @@
     const convOnly = stObj.conversationOnly !== undefined ? stObj.conversationOnly : Boolean(rState.conversationOnly);
     const loading = !convOnly && stObj.preview === null && !stObj.previewError;
     const fileSummary = convOnly
-      ? '仅撤回对话 · 保留文件修改'
+      ? L('仅撤回对话 · 保留文件修改', 'Chat only · keep file edits')
       : loading
-        ? '正在检查变更文件…'
+        ? L('正在检查变更文件…', 'Checking modified files…')
         : stObj.previewError
-          ? '文件预览获取失败'
+          ? L('文件预览获取失败', 'Failed to preview file changes')
           : stObj.preview && stObj.preview.length
-            ? `还原 ${stObj.preview.length} 个文件`
-            : '无关联文件变更';
+            ? L(`还原 ${stObj.preview.length} 个文件`, `Revert ${stObj.preview.length} ${stObj.preview.length === 1 ? 'file' : 'files'}`)
+            : L('无关联文件变更', 'No modified files');
     const hasMedia = Boolean(
       stObj.bubble && stObj.bubble.querySelector('.agy-user-bubble-header, img, [data-testid*="attachment"], [data-testid*="media"]')
     );
     metaEl.innerHTML =
       (rState.conversationOnlyRevertEnabled
-        ? `<button type="button" class="ag-claude-switch" role="switch" data-ag-revert-files-switch aria-label="同步撤回文件修改" aria-checked="${!convOnly}"><span></span></button><span>同步撤回文件</span><span style="opacity:0.45">·</span>`
+        ? `<button type="button" class="ag-claude-switch" role="switch" data-ag-revert-files-switch aria-label="${escapeHtml(L('同步撤回文件修改', 'Revert modified files'))}" aria-checked="${!convOnly}"><span></span></button><span>${L('同步撤回文件', 'Revert files')}</span><span style="opacity:0.45">·</span>`
         : '') +
       `<span>${escapeHtml(fileSummary)}</span>` +
-      (hasMedia ? '<span style="opacity:0.75" title="重发时自动保留原消息图片/附件；如需增删附件请点「移至底栏」">· 保留原附件</span>' : '');
+      (hasMedia
+        ? `<span style="opacity:0.75" title="${escapeHtml(L('重发时自动保留原消息图片/附件；如需增删附件请点「移至底栏」', 'Keeps original attachments on resend; click Move to input to edit attachments'))}">· ${L('保留原附件', 'Keep attachments')}</span>`
+        : '');
 
     if (filesEl) {
       if (!convOnly && !loading && !stObj.previewError && stObj.preview && stObj.preview.length) {
@@ -3346,7 +3375,7 @@
           })
           .join('');
         const extra = stObj.preview.length > 8 ? `<span class="ag-claude-inline-file-chip">+${stObj.preview.length - 8}</span>` : '';
-        filesEl.innerHTML = `<div>撤回此步将一并还原以下 ${stObj.preview.length} 个文件至提问前状态：</div><div class="ag-claude-inline-file-chips">${chips}${extra}</div>`;
+        filesEl.innerHTML = `<div>${L(`撤回此步将一并还原以下 ${stObj.preview.length} 个文件至提问前状态：`, `Reverting will restore these ${stObj.preview.length} ${stObj.preview.length === 1 ? 'file' : 'files'}:`)}</div><div class="ag-claude-inline-file-chips">${chips}${extra}</div>`;
       } else {
         filesEl.innerHTML = '';
       }
@@ -3405,7 +3434,7 @@
       b.disabled = true;
     });
     const warnEl = editorBox.querySelector('[data-ag-inline-warn]');
-    if (warnEl) warnEl.textContent = shouldSubmit ? '正在撤回并重发…' : '正在移至底栏…';
+    if (warnEl) warnEl.textContent = shouldSubmit ? L('正在撤回并重发…', 'Reverting and resending…') : L('正在移至底栏…', 'Moving to composer…');
 
     const rootEl = getComposerLexicalRoot(current.context);
     const composerEl = (rootEl && rootEl.closest('[data-testid="agent-input-box"]')) || null;
@@ -3437,7 +3466,7 @@
       editorBox.querySelectorAll('button').forEach((b) => {
         b.disabled = false;
       });
-      if (warnEl) warnEl.textContent = '撤回失败，请重试';
+      if (warnEl) warnEl.textContent = L('撤回失败，请重试', 'Revert failed, please try again');
     }
   }
 
@@ -3462,8 +3491,9 @@
 
     const editorBox = document.createElement('div');
     editorBox.className = 'ag-claude-inline-editor';
+    editorBox.setAttribute('data-ag-i18n-ignore', '1');
     editorBox.setAttribute('role', 'region');
-    editorBox.setAttribute('aria-label', '原地编辑消息');
+    editorBox.setAttribute('aria-label', L('原地编辑消息', 'Edit message inline'));
     editorBox.addEventListener('click', (ev) => ev.stopPropagation());
 
     const convOnly = Boolean(target.state && target.state.conversationOnly);
@@ -3484,7 +3514,7 @@
     activeInlineEdit = stObj;
 
     editorBox.innerHTML = `
-      <textarea class="ag-claude-inline-textarea" aria-label="编辑消息内容" rows="1"></textarea>
+      <textarea class="ag-claude-inline-textarea" aria-label="${escapeHtml(L('编辑消息内容', 'Edit message'))}" rows="1"></textarea>
       <div class="ag-claude-inline-files" data-ag-inline-files></div>
       <div class="ag-claude-inline-footer">
         <div class="ag-claude-inline-meta">
@@ -3492,9 +3522,9 @@
           <span class="ag-claude-inline-warn" data-ag-inline-warn role="status"></span>
         </div>
         <div class="ag-claude-inline-actions">
-          <button type="button" class="ag-claude-inline-btn" data-ag-inline-cancel>取消</button>
-          <button type="button" class="ag-claude-inline-btn" data-ag-inline-bottom title="撤回并移回底部输入框（可增删图片附件或切换模型）">移至底栏</button>
-          <button type="button" class="ag-claude-inline-btn" data-primary="true" data-ag-inline-send>重发</button>
+          <button type="button" class="ag-claude-inline-btn" data-ag-inline-cancel>${L('取消', 'Cancel')}</button>
+          <button type="button" class="ag-claude-inline-btn" data-ag-inline-bottom title="${escapeHtml(L('撤回并移回底部输入框（可增删图片附件或切换模型）', 'Revert and move to bottom input (to edit attachments or switch model)'))}">${L('移至底栏', 'Move to input')}</button>
+          <button type="button" class="ag-claude-inline-btn" data-primary="true" data-ag-inline-send>${L('重发', 'Resend')}</button>
         </div>
       </div>
     `;
@@ -3530,7 +3560,7 @@
     renderInlineEditMeta(stObj);
     if (composerHasExistingDraft(target.context)) {
       const warnEl = editorBox.querySelector('[data-ag-inline-warn]');
-      if (warnEl) warnEl.textContent = '将覆盖底栏现有草稿';
+      if (warnEl) warnEl.textContent = L('将覆盖底栏现有草稿', 'Will replace current composer draft');
     }
     if (typeof ta.focus === 'function') {
       ta.focus({ preventScroll: true });
@@ -3876,9 +3906,15 @@
         continue;
       }
 
-      const kindLabels = { pending: '待处理', running: '运行中', unread: '已完成未读' };
-      const summaryLine = active.map((b) => `${b.count} 个${kindLabels[b.kind]}`).join(' · ');
-      const detailLines = active.flatMap((b) => b.titles.map((t) => `${kindLabels[b.kind]}：${t}`)).slice(0, 4);
+      const kindLabels = FEAT.i18n
+        ? { pending: '待处理', running: '运行中', unread: '已完成未读' }
+        : { pending: 'pending', running: 'running', unread: 'unread' };
+      const summaryLine = active
+        .map((b) => (FEAT.i18n ? `${b.count} 个${kindLabels[b.kind]}` : `${b.count} ${kindLabels[b.kind]}`))
+        .join(' · ');
+      const detailLines = active
+        .flatMap((b) => b.titles.map((t) => `${kindLabels[b.kind]}${FEAT.i18n ? '：' : ': '}${t}`))
+        .slice(0, 4);
       const tip = detailLines.length ? `${summaryLine}\n${detailLines.join('\n')}` : summaryLine;
       if (!btn.hasAttribute('data-ag-folder-tip')) {
         const orig = btn.getAttribute('title');
@@ -3917,7 +3953,7 @@
   function formatRelativeAge(sec, nowSec) {
     if (!sec) return '';
     const diff = Math.max(0, nowSec - sec);
-    if (diff < 60) return '刚刚';
+    if (diff < 60) return L('刚刚', 'now');
     if (diff < 3600) return `${Math.floor(diff / 60)}m`;
     if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
     return `${Math.floor(diff / 86400)}d`;
@@ -4007,7 +4043,8 @@
       if (sec) sec.remove();
       sec = document.createElement('section');
       sec.id = 'ag-claude-recent-section';
-      sec.setAttribute('aria-label', '最近对话');
+      sec.setAttribute('data-ag-i18n-ignore', '1');
+      sec.setAttribute('aria-label', L('最近对话', 'Recents'));
       sec.addEventListener('click', (ev) => {
         const hdr = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-toggle]');
         if (hdr) {
@@ -4038,11 +4075,12 @@
       recentLastSig = '';
     }
 
-    const sig = `${recentCollapsed ? 1 : 0}|${recentExpanded ? 1 : 0}|${activeId}|${nowBucket}|${total}|${items
+    const sig = `${FEAT.i18n ? 1 : 0}|${recentCollapsed ? 1 : 0}|${recentExpanded ? 1 : 0}|${activeId}|${nowBucket}|${total}|${items
       .map((it) => `${it.id}:${it.title}:${it.project}:${it.status ? `${it.status.kind}-${it.status.subkind}` : 'idle'}:${Math.floor(it.updatedAt / 60)}`)
       .join(';')}`;
     if (sig === recentLastSig) return;
     recentLastSig = sig;
+    sec.setAttribute('aria-label', L('最近对话', 'Recents'));
 
     const rowsHtml = recentCollapsed
       ? ''
@@ -4058,15 +4096,15 @@
             } else if (it.status && it.status.kind === 'unread') {
               sideHtml = `<span class="ag-claude-unread-dot"></span>${age ? `<span>${escapeHtml(age)}</span>` : ''}`;
             }
-            const tip = it.project ? `${it.title}\n所属项目：${it.project}` : it.title;
+            const tip = it.project ? `${it.title}\n${L('所属项目：', 'Project: ')}${it.project}` : it.title;
             return `<button type="button" class="ag-recent-row" data-ag-recent-id="${escapeHtml(it.id)}" data-active="${isAct ? 'true' : 'false'}" title="${escapeHtml(tip)}"><div class="ag-recent-main"><div class="ag-recent-title">${escapeHtml(it.title)}</div></div><div class="ag-recent-side">${sideHtml}</div></button>`;
           })
           .join('')}</div>` +
         (total > 4
-          ? `<button type="button" class="ag-recent-more" data-ag-recent-more>${recentExpanded ? '收起' : '展开更多'}</button>`
+          ? `<button type="button" class="ag-recent-more" data-ag-recent-more>${recentExpanded ? L('收起', 'Show less') : L('展开更多', 'Show more')}</button>`
           : '');
 
-    sec.innerHTML = `<button type="button" class="ag-recent-hdr" data-ag-recent-toggle aria-expanded="${!recentCollapsed}"><span>最近对话</span><span class="ag-recent-chevron">▾</span></button>${rowsHtml}`;
+    sec.innerHTML = `<button type="button" class="ag-recent-hdr" data-ag-recent-toggle aria-expanded="${!recentCollapsed}"><span>${L('最近对话', 'Recents')}</span><span class="ag-recent-chevron">▾</span></button>${rowsHtml}`;
   }
 
   function scheduleSidebarSync() {
@@ -4114,29 +4152,424 @@
   window.addEventListener('popstate', onWindowSidebarEvent);
 
   /* ==========================================================================
-   * 9. Native Settings -> `界面增强` (Claude UX) Live Module Toggle Panel
+   * 8b. Live Zero-Reload UI Localization Engine (`i18n`, off / English by default)
+   *     - Reuses upstream `ctx.dict` / `window.__ag_i18n_dict` and `window.__ag_orig_text_map`
+   *     - Toggling `i18n` in Settings immediately translates or restores all native Antigravity
+   *       text nodes & title/placeholder/aria-label attributes with zero page reload.
+   * ========================================================================== */
+  const UX_I18N_BASE_EXCLUDE =
+    'code, pre, kbd, samp, textarea, input, style, script, noscript, [contenteditable="true"], [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .monaco-editor, .monaco-diff-editor, .xterm, [class*="onyx-key"], .prose, .markdown, [class*="chat-message"], [class*="group/file-title"], [data-testid="conversation-row-sidebar"] a[href^="/c/"], [data-testid="conversation-row-sidebar"] span.truncate, [data-testid="conversation-navigator-turn"], .msg-body, #raw, [data-testid="swarm-raw"], #swarm-title, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, [data-testid="model-selector-trigger"], [data-testid="model-selector-menu"], [data-testid="permissions-selector-trigger"]';
+  const UX_I18N_ATTR_EXCLUDE =
+    'code, pre, kbd, samp, style, script, noscript, [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .monaco-editor, .monaco-diff-editor, .xterm, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]';
+  let uxI18nObserver = null;
+  let uxI18nFlushTimer = 0;
+  let uxI18nDirtyRoots = new Set();
+  let uxI18nDictRef = null;
+  let uxI18nDictCi = null;
+
+  function getUxI18nExcludeSelector() {
+    const extra =
+      typeof ctx !== 'undefined' && ctx && ctx.config && ctx.config.selectors && ctx.config.selectors.excludeI18n
+        ? String(ctx.config.selectors.excludeI18n).trim()
+        : '';
+    return extra ? `${UX_I18N_BASE_EXCLUDE}, ${extra}` : UX_I18N_BASE_EXCLUDE;
+  }
+
+  function getUxI18nDict() {
+    const d =
+      (typeof ctx !== 'undefined' && ctx && ctx.dict && typeof ctx.dict === 'object' ? ctx.dict : null) ||
+      (window.__ag_i18n_dict && typeof window.__ag_i18n_dict === 'object' ? window.__ag_i18n_dict : null);
+    if (!d) return null;
+    if (d !== uxI18nDictRef) {
+      uxI18nDictRef = d;
+      uxI18nDictCi = Object.create(null);
+      for (const k of Object.keys(d)) {
+        const v = d[k];
+        if (typeof v === 'string') uxI18nDictCi[k.toLowerCase()] = v;
+      }
+    }
+    return d;
+  }
+
+  function getOrigTextMap() {
+    if (!window.__ag_orig_text_map) {
+      window.__ag_orig_text_map = new WeakMap();
+    }
+    return window.__ag_orig_text_map;
+  }
+
+  const UX_RE_EPHEMERAL_SUMMARY =
+    /^(Explored(?:\s+(?:\d+\s+)?(?:files?|artifacts?)(?:\s+and\s+(?:\d+\s+)?(?:files?|artifacts?))?)?|Ran\s+(?:\d+\s+)?commands?|Edited(?:\s+(?:\d+\s+)?(?:files?|artifacts?)(?:\s+and\s+(?:\d+\s+)?(?:files?|artifacts?))?)?)(?:,\s*(explored(?:\s+(?:\d+\s+)?(?:files?|artifacts?)(?:\s+and\s+(?:\d+\s+)?(?:files?|artifacts?))?)?|ran\s+(?:\d+\s+)?commands?|edited(?:\s+(?:\d+\s+)?(?:files?|artifacts?)(?:\s+and\s+(?:\d+\s+)?(?:files?|artifacts?))?)?))*$/i;
+  const UX_EPHEMERAL_CLAUSE_MAP = {
+    explored: '已探索',
+    'explored file': '已探索文件',
+    'explored files': '已探索文件',
+    'explored artifact': '已探索 Artifact',
+    'explored artifacts': '已探索 Artifact',
+    'explored file and artifact': '已探索文件与 Artifact',
+    'explored files and artifact': '已探索文件与 Artifact',
+    'explored file and artifacts': '已探索文件与 Artifact',
+    'explored files and artifacts': '已探索文件与 Artifact',
+    'ran command': '已运行命令',
+    'ran commands': '已运行命令',
+    edited: '已编辑',
+    'edited file': '已编辑文件',
+    'edited files': '已编辑文件',
+    'edited artifact': '已编辑 Artifact',
+    'edited artifacts': '已编辑 Artifact',
+    'edited file and artifact': '已编辑文件与 Artifact',
+    'edited files and artifact': '已编辑文件与 Artifact',
+    'edited file and artifacts': '已编辑文件与 Artifact',
+    'edited files and artifacts': '已编辑文件与 Artifact'
+  };
+  const UX_RE_EPHEMERAL_COUNT = /^(explored|edited|ran)\s+(\d+)\s+(files?|artifacts?|commands?)$/i;
+  const UX_RE_EPHEMERAL_ACTIVE = /^(Editing|Reading|Listing|Searching)\s+(.+)$/;
+  const UX_EPHEMERAL_VERB_MAP = { Editing: '正在编辑', Reading: '正在读取', Listing: '正在列出', Searching: '正在搜索' };
+  const UX_EPHEMERAL_NOUN_MAP = {
+    file: '文件',
+    files: '文件',
+    artifact: 'Artifact',
+    artifacts: 'Artifact',
+    'file and artifact': '文件与 Artifact',
+    'files and artifact': '文件与 Artifact',
+    'file and artifacts': '文件与 Artifact',
+    'files and artifacts': '文件与 Artifact'
+  };
+  const UX_RE_RUNNING_FOR = /^Running\s+for\s+([<0-9smhd]+(?:\s+\d+[smhd])*)$/i;
+  const UX_RE_RUNNING_CMD = /^Running\s+(?!commands?\b|processes\b|for\b|\(Dev\b)(.+)$/;
+
+  function translateUxEphemeralClause(clause) {
+    const low = clause.trim().toLowerCase();
+    if (UX_EPHEMERAL_CLAUSE_MAP[low]) return UX_EPHEMERAL_CLAUSE_MAP[low];
+    const mCount = low.match(UX_RE_EPHEMERAL_COUNT);
+    if (mCount) {
+      const vMap = { explored: '已探索', edited: '已编辑', ran: '已运行' };
+      const nMap = { file: '个文件', files: '个文件', artifact: '个 Artifact', artifacts: '个 Artifact', command: '条命令', commands: '条命令' };
+      return `${vMap[mCount[1]]} ${mCount[2]} ${nMap[mCount[3]]}`;
+    }
+    return clause.trim();
+  }
+
+  function uxI18nLookup(trimmed, contextEl) {
+    const dict = getUxI18nDict();
+    if (!dict || !trimmed) return null;
+    if (typeof dict[trimmed] === 'string') return dict[trimmed];
+    if (uxI18nDictCi && typeof uxI18nDictCi[trimmed.toLowerCase()] === 'string') {
+      return uxI18nDictCi[trimmed.toLowerCase()];
+    }
+    if (trimmed.endsWith('.')) {
+      const base = trimmed.slice(0, -1);
+      const hit =
+        (typeof dict[base] === 'string' && dict[base]) ||
+        (uxI18nDictCi && typeof uxI18nDictCi[base.toLowerCase()] === 'string' && uxI18nDictCi[base.toLowerCase()]);
+      if (hit) return hit.endsWith('。') ? hit : `${hit}。`;
+    }
+    /* High-frequency dynamic Antigravity UI strings when runtime.js i18n is disabled */
+    if (!/[A-Za-z]/.test(trimmed) || trimmed.length > 140) return null;
+    let m;
+    if (UX_RE_EPHEMERAL_SUMMARY.test(trimmed)) {
+      return trimmed.split(/,\s*/).map((part) => translateUxEphemeralClause(part)).join('、');
+    }
+    const inHdr = Boolean(contextEl && contextEl.closest && contextEl.closest('header, [data-testid="breadcrumb-segment"]'));
+    if (!inHdr && (m = trimmed.match(UX_RE_EPHEMERAL_ACTIVE))) {
+      const noun = UX_EPHEMERAL_NOUN_MAP[m[2].toLowerCase()];
+      const verbZh = UX_EPHEMERAL_VERB_MAP[m[1]];
+      return noun ? (/^[A-Za-z0-9]/.test(noun) ? `${verbZh} ${noun}` : `${verbZh}${noun}`) : `${verbZh} ${m[2]}`;
+    }
+    if ((m = trimmed.match(UX_RE_RUNNING_FOR))) return `已运行 ${m[1]}`;
+    if (!inHdr && (m = trimmed.match(UX_RE_RUNNING_CMD))) return `正在运行 ${m[1]}`;
+    if ((m = trimmed.match(/^(\d+)\s+files?\s+changed$/i))) return `${m[1]} 个文件变更`;
+    if ((m = trimmed.match(/^(\d+)\s+tools?$/i))) return `${m[1]} 个工具`;
+    if ((m = trimmed.match(/^(\d+)\s+updates?$/i))) return `${m[1]} 条进展`;
+    if ((m = trimmed.match(/^Worked\s+for\s+(.+)$/i))) return `已工作 ${m[1]}`;
+    if ((m = trimmed.match(/^Working\s+for\s+(.+)$/i))) return `正在工作 ${m[1]}`;
+    if ((m = trimmed.match(/^Thought\s+for\s+(.+)$/i))) return `已思考 ${m[1]}`;
+    if ((m = trimmed.match(/^Thinking\s+for\s+(.+)$/i))) return `正在思考 ${m[1]}`;
+    if ((m = trimmed.match(/^(\d+)\s+(seconds?|minutes?|hours?|days?)\s+ago$/i))) {
+      const unitMap = { second: '秒', seconds: '秒', minute: '分钟', minutes: '分钟', hour: '小时', hours: '小时', day: '天', days: '天' };
+      return `${m[1]} ${unitMap[m[2].toLowerCase()] || m[2]}前`;
+    }
+    if ((m = trimmed.match(/^(\d+(?:\.\d+)?)%\s+left$/i))) return `${m[1]}% 剩余`;
+    return null;
+  }
+
+  function uxRestoreAllTranslations(root) {
+    const scope = root || document.body;
+    if (!scope) return;
+    const origMap = getOrigTextMap();
+    try {
+      const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        const rec = origMap.get(node);
+        if (rec) {
+          if (node.nodeValue === rec.lastVal) {
+            node.nodeValue = rec.origRaw;
+          }
+          origMap.delete(node);
+        }
+      }
+      const attrNames = ['title', 'placeholder', 'aria-label'];
+      const els = scope.querySelectorAll
+        ? scope.querySelectorAll(
+            '[data-ag-orig-title], [data-ag-orig-title-last], [data-ag-orig-placeholder], [data-ag-orig-placeholder-last], [data-ag-orig-aria-label], [data-ag-orig-aria-label-last]'
+          )
+        : [];
+      for (const el of els) {
+        for (const attr of attrNames) {
+          const origAttr = `data-ag-orig-${attr}`;
+          const lastAttr = `${origAttr}-last`;
+          if (el.hasAttribute(origAttr) || el.hasAttribute(lastAttr)) {
+            const savedOrig = el.getAttribute(origAttr);
+            const savedLast = el.getAttribute(lastAttr);
+            const cur = el.getAttribute(attr);
+            if (savedOrig !== null && (savedLast === null || cur === savedLast)) {
+              el.setAttribute(attr, savedOrig);
+            }
+            el.removeAttribute(origAttr);
+            el.removeAttribute(lastAttr);
+          }
+        }
+      }
+    } catch {}
+  }
+
+  function uxTranslateSubtree(root) {
+    if (!root || !FEAT.i18n || disposed) return;
+    if (!getUxI18nDict()) return;
+    const exclSel = getUxI18nExcludeSelector();
+    const origMap = getOrigTextMap();
+    const isExcluded = (el) => {
+      if (!el || el.nodeType !== 1) return true;
+      try {
+        return Boolean(el.closest(exclSel));
+      } catch {
+        return Boolean(el.closest(UX_I18N_BASE_EXCLUDE));
+      }
+    };
+    try {
+      const translateText = (node) => {
+        if (!node || node.nodeType !== 3) return;
+        const p = node.parentElement;
+        if (!p || isExcluded(p)) return;
+        const cur = node.nodeValue;
+        if (!cur) return;
+        const rec = origMap.get(node);
+        if (rec && rec.lastVal === cur) return;
+        const origRaw = rec && rec.lastVal === cur ? rec.origRaw : cur;
+        const trimmed = origRaw.trim();
+        if (!trimmed) return;
+        const hit = uxI18nLookup(trimmed, p);
+        if (typeof hit === 'string' && hit !== trimmed) {
+          const next = origRaw.replace(trimmed, () => hit);
+          origMap.set(node, { origRaw, lastVal: next, ver: 'ux' });
+          if (node.nodeValue !== next) node.nodeValue = next;
+        }
+      };
+
+      if (root.nodeType === 3) {
+        translateText(root);
+        return;
+      }
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) translateText(node);
+
+      const attrTargets = [];
+      if (root.nodeType === 1 && root.matches && root.matches('[title], [placeholder], [aria-label]')) {
+        attrTargets.push(root);
+      }
+      if (root.querySelectorAll) {
+        root.querySelectorAll('[title], [placeholder], [aria-label]').forEach((el) => attrTargets.push(el));
+      }
+      for (const el of attrTargets) {
+        try {
+          if (el.closest(UX_I18N_ATTR_EXCLUDE)) continue;
+        } catch {}
+        for (const attr of ['title', 'placeholder', 'aria-label']) {
+          const cur = el.getAttribute(attr);
+          if (!cur) continue;
+          const origAttr = `data-ag-orig-${attr}`;
+          const lastAttr = `${origAttr}-last`;
+          const savedOrig = el.getAttribute(origAttr);
+          const savedLast = el.getAttribute(lastAttr);
+          if (savedOrig !== null && savedLast === cur) continue;
+          const origVal = savedOrig !== null && savedLast === cur ? savedOrig : cur;
+          const hit = uxI18nLookup(origVal.trim(), el);
+          if (typeof hit === 'string' && hit !== origVal.trim()) {
+            const nextVal = origVal.replace(origVal.trim(), () => hit);
+            if (savedOrig !== origVal) el.setAttribute(origAttr, origVal);
+            el.setAttribute(lastAttr, nextVal);
+            if (cur !== nextVal) el.setAttribute(attr, nextVal);
+          }
+        }
+      }
+    } catch {}
+  }
+
+  function stopUxI18nObserver() {
+    if (uxI18nObserver) {
+      try {
+        uxI18nObserver.disconnect();
+      } catch {}
+      uxI18nObserver = null;
+    }
+    if (uxI18nFlushTimer) {
+      cancelLater(uxI18nFlushTimer);
+      uxI18nFlushTimer = 0;
+    }
+    uxI18nDirtyRoots.clear();
+  }
+
+  function applyUiI18nState(enabled) {
+    if (docRoot) {
+      docRoot.setAttribute('data-ag-ux-lang', enabled ? 'zh' : 'en');
+    }
+    if (!enabled) {
+      stopUxI18nObserver();
+      if (window.__ag_i18n_observer) {
+        try {
+          window.__ag_i18n_observer.disconnect();
+        } catch {}
+        window.__ag_i18n_observer = null;
+      }
+      if (document.body) uxRestoreAllTranslations(document.body);
+      return;
+    }
+    if (document.body) {
+      uxTranslateSubtree(document.body);
+      if (!uxI18nObserver && typeof MutationObserver !== 'undefined') {
+        uxI18nObserver = new MutationObserver((mutations) => {
+          if (disposed || !FEAT.i18n) return;
+          for (const m of mutations) {
+            if (m.type === 'characterData' && m.target) {
+              uxI18nDirtyRoots.add(m.target);
+            } else if (m.type === 'childList') {
+              for (const n of m.addedNodes) {
+                if (n.nodeType === 1 || n.nodeType === 3) uxI18nDirtyRoots.add(n);
+              }
+            }
+          }
+          if (uxI18nDirtyRoots.size && !uxI18nFlushTimer) {
+            uxI18nFlushTimer = later(() => {
+              uxI18nFlushTimer = 0;
+              if (disposed || !FEAT.i18n) return;
+              const batch = Array.from(uxI18nDirtyRoots);
+              uxI18nDirtyRoots.clear();
+              for (const r of batch) {
+                if (r && r.isConnected) uxTranslateSubtree(r);
+              }
+            }, 40);
+          }
+        });
+        uxI18nObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+      }
+    }
+  }
+
+  /* ==========================================================================
+   * 9. Native Settings -> `UI Enhancements` / `界面增强` Live Module Toggle Panel
    *    - Injects `settings-nav-item-ClaudeUX` right after `Appearance` (`外观`)
    *      inside `[data-testid="settings-sidebar"]`.
    *    - Toggles persist to `localStorage` and take effect in 0ms without reload.
    * ========================================================================== */
   const SETTINGS_GROUPS = [
     {
-      heading: '对话与过程流增强',
+      headingZh: '语言与本地化',
+      headingEn: 'Language & Localization',
       items: [
-        ['claudeUxModelMenu', 'modelMenu', '分层模型选择器 (⌘/)', '精简主列表为 4 款主力模型，独立拆分思考强度与更多模型二级菜单'],
-        ['claudeUxContextRing', 'contextRing', '上下文圆环与套餐限额浮层 (◎)', '模型旁显示占用圆环，点击查看 5 小时 / 每周真实限额与重置倒计时'],
-        ['claudeUxTodoCard', 'todoCard', '流内 TodoWrite 实时进度卡片', '将多阶段任务清单渲染为 14px 圆角白卡，兼容虚拟滚动与知识工作模式'],
-        ['claudeUxStepUnfold', 'stepUnfold', '自动展开回合步骤折叠', '回合结束时保持中间进展与工具摘要平铺可见，不被外层折叠吞没'],
-        ['claudeUxRunningTimer', 'runningTimer', '运行中官方蓝旋转点与实时读秒', '在正在执行的工具步骤行挂载官方蓝双点旋转与 1s / 2s 读秒器'],
-        ['claudeUxCollapseAnimation', 'collapseAnim', '工具面板平滑收起动画', '收拢工具详情面板时补齐 190ms 丝滑过渡动画']
+        [
+          'i18n',
+          'i18n',
+          '中文界面汉化',
+          'Chinese UI Localization',
+          '将 Antigravity 原生界面与增强面板切换为简体中文（默认关闭，保持英文原版界面）',
+          'Translate Antigravity UI and enhancement panels into Simplified Chinese (English by default)'
+        ]
       ]
     },
     {
-      heading: '侧边栏与消息编辑增强',
+      headingZh: '对话与过程流增强',
+      headingEn: 'Conversation & Stream',
       items: [
-        ['claudeUxInlineUndo', 'inlineUndo', '原地撤回重编消息', '点击撤回时在原气泡直接展开编辑框，支持变更文件还原预览与原附件保留'],
-        ['claudeUxFolderStatus', 'folderStatus', '折叠项目状态聚合角标', '项目文件夹折叠时在右侧安静汇总待审批、运行中与已完成未读状态'],
-        ['claudeUxRecentSection', 'recentSection', '侧边栏顶部最近对话', '在侧边栏顶部按活跃优先级展示非置顶最近会话，支持跨项目无刷秒切与收起']
+        [
+          'claudeUxModelMenu',
+          'modelMenu',
+          '分层模型选择器 (⌘/)',
+          'Layered Model Picker (⌘/)',
+          '精简主列表为 5 款主力模型，独立拆分思考强度与更多模型二级菜单',
+          'Compact 5-model primary list with dedicated Thinking effort & More models flyouts'
+        ],
+        [
+          'claudeUxContextRing',
+          'contextRing',
+          '上下文圆环与套餐限额浮层 (◎)',
+          'Context Ring & Plan Usage Popover (◎)',
+          '模型旁显示占用圆环，点击查看 5 小时 / 每周真实限额与一键压缩',
+          'Shows context ring beside the model selector with live 5-hour / weekly quotas and one-click Compact'
+        ],
+        [
+          'claudeUxTodoCard',
+          'todoCard',
+          '流内 TodoWrite 实时进度卡片',
+          'Inline TodoWrite Progress Card',
+          '将多阶段任务清单渲染为圆角白卡，兼容虚拟滚动与知识工作模式',
+          'Renders multi-step checklists as reactive rounded cards across virtualized turns'
+        ],
+        [
+          'claudeUxStepUnfold',
+          'stepUnfold',
+          '自动展开回合步骤折叠',
+          'Auto-Expand Turn Steps',
+          '回合结束时保持中间进展与工具摘要平铺可见，不被外层折叠吞没',
+          'Keeps mid-turn narration and tool summaries inline instead of collapsing them at turn end'
+        ],
+        [
+          'claudeUxRunningTimer',
+          'runningTimer',
+          '运行中官方蓝旋转点与实时读秒',
+          'Live Running Dots & Elapsed Timer',
+          '在正在执行的工具步骤行挂载官方蓝双点旋转与 1s / 2s 读秒器',
+          'Shows orbiting blue dots and live elapsed seconds on actively executing tool rows'
+        ],
+        [
+          'claudeUxCollapseAnimation',
+          'collapseAnim',
+          '工具面板平滑收起动画',
+          'Smooth Tool Panel Collapse',
+          '收拢工具详情面板时补齐 190ms 丝滑过渡动画',
+          'Adds a 190ms smooth collapse transition when closing tool detail panels'
+        ]
+      ]
+    },
+    {
+      headingZh: '侧边栏与消息编辑增强',
+      headingEn: 'Sidebar & Editing',
+      items: [
+        [
+          'claudeUxInlineUndo',
+          'inlineUndo',
+          '原地撤回重编消息',
+          'In-Bubble Undo & Edit',
+          '点击撤回时在原气泡直接展开编辑框，支持变更文件还原预览与原附件保留',
+          'Expands an inline editor inside the user bubble with file-revert preview and attachment preservation'
+        ],
+        [
+          'claudeUxFolderStatus',
+          'folderStatus',
+          '折叠项目状态聚合角标',
+          'Collapsed Project Status Badges',
+          '项目文件夹折叠时在右侧安静汇总待审批、运行中与已完成未读状态',
+          'Summarizes pending, running, and unread sessions beside collapsed project folders'
+        ],
+        [
+          'claudeUxRecentSection',
+          'recentSection',
+          '侧边栏顶部最近对话',
+          'Top Sidebar Recents',
+          '在侧边栏顶部按活跃优先级展示非置顶最近会话，支持跨项目无刷秒切与收起',
+          'Lists active unpinned chats at the top of the sidebar with instant cross-project switching'
+        ]
       ]
     }
   ];
@@ -4148,8 +4581,72 @@
   let settingsPanelEl = null;
   let settingsToastTimer = 0;
 
+  function renderSettingsPanelContent(panel) {
+    if (!panel) return;
+    panel.setAttribute('aria-label', L('界面增强设置', 'UI Enhancements Settings'));
+    panel.innerHTML = `
+      <div class="ag-cux-settings-wrap">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+          <div>
+            <h2 class="text-2xl m-0" style="color:var(--foreground)">${L('界面增强', 'UI Enhancements')}</h2>
+            <div class="ag-cux-settings-desc" style="margin-top:4px">${L(
+              '管理 Anti-Claude 语言、视觉、过程流与侧边栏效率模块，点击开关即时生效并跨重启自动记忆。',
+              'Configure Anti-Claude language, layout, execution stream, and sidebar modules. Changes apply immediately and persist across restarts.'
+            )}</div>
+          </div>
+          <span class="ag-cux-toast" data-ag-cux-toast data-visible="false">${L('✓ 已保存并即时生效', '✓ Saved and applied')}</span>
+        </div>
+        ${SETTINGS_GROUPS.map(
+          (grp) => `
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <h3 class="m-0">${escapeHtml(L(grp.headingZh, grp.headingEn))}</h3>
+            <div class="ag-cux-settings-group">
+              ${grp.items
+                .map(
+                  ([modKey, featKey, titleZh, titleEn, descZh, descEn]) => `
+                <div class="ag-cux-settings-row">
+                  <div style="min-width:0">
+                    <div class="ag-cux-settings-title">${escapeHtml(L(titleZh, titleEn))}</div>
+                    <div class="ag-cux-settings-desc">${escapeHtml(L(descZh, descEn))}</div>
+                  </div>
+                  <button type="button" class="ag-claude-switch" role="switch" data-ag-cux-switch="${modKey}" data-ag-cux-feat="${featKey}" aria-label="${escapeHtml(L(titleZh, titleEn))}" aria-checked="${Boolean(FEAT[featKey])}"><span></span></button>
+                </div>`
+                )
+                .join('')}
+            </div>
+          </div>`
+        ).join('')}
+      </div>
+    `;
+    panel.querySelectorAll('[data-ag-cux-switch]').forEach((sw) => {
+      sw.addEventListener('click', () => {
+        const modKey = sw.getAttribute('data-ag-cux-switch');
+        const featKey = sw.getAttribute('data-ag-cux-feat');
+        setModuleOverride(modKey, featKey, !FEAT[featKey]);
+      });
+    });
+  }
+
   function applyImmediateFeatureEffects(featKey, on) {
-    if (featKey === 'modelMenu' && !on) {
+    if (featKey === 'i18n') {
+      applyUiI18nState(on);
+      if (settingsNavBtn) {
+        settingsNavBtn.innerHTML = `<span class="truncate">${L('界面增强', 'UI Enhancements')}</span>`;
+      }
+      if (settingsPanelEl && !settingsPanelEl.hidden) {
+        renderSettingsPanelContent(settingsPanelEl);
+      }
+      if (modelPopoverOpen) renderModelPopovers();
+      if (quotaPopoverOpen) renderQuotaPopoverBody();
+      updateComposerRingVisuals();
+      if (typeof window.__ag_render_metrics === 'function' && window.__ag_last_metrics) {
+        try {
+          window.__ag_render_metrics(window.__ag_last_metrics);
+        } catch {}
+      }
+      recentLastSig = '';
+      if (activeInlineEdit) renderInlineEditMeta(activeInlineEdit);
+    } else if (featKey === 'modelMenu' && !on) {
       closeClaudeModelPopover();
     } else if (featKey === 'contextRing') {
       if (!on) {
@@ -4233,49 +4730,12 @@
       if (settingsPanelEl) settingsPanelEl.remove();
       const panel = document.createElement('div');
       panel.id = 'ag-claude-ux-settings-panel';
+      panel.setAttribute('data-ag-i18n-ignore', '1');
       panel.setAttribute('role', 'region');
-      panel.setAttribute('aria-label', '界面增强设置');
-      panel.innerHTML = `
-        <div class="ag-cux-settings-wrap">
-          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
-            <div>
-              <h2 class="text-2xl m-0" style="color:var(--foreground)">界面增强</h2>
-              <div class="ag-cux-settings-desc" style="margin-top:4px">管理 Claude UX 视觉、过程流与侧边栏效率模块，点击开关即时生效并跨重启自动记忆。</div>
-            </div>
-            <span class="ag-cux-toast" data-ag-cux-toast data-visible="false">✓ 已保存并即时生效</span>
-          </div>
-          ${SETTINGS_GROUPS.map(
-            (grp) => `
-            <div style="display:flex;flex-direction:column;gap:8px">
-              <h3 class="m-0">${escapeHtml(grp.heading)}</h3>
-              <div class="ag-cux-settings-group">
-                ${grp.items
-                  .map(
-                    ([modKey, featKey, title, desc]) => `
-                  <div class="ag-cux-settings-row">
-                    <div style="min-width:0">
-                      <div class="ag-cux-settings-title">${escapeHtml(title)}</div>
-                      <div class="ag-cux-settings-desc">${escapeHtml(desc)}</div>
-                    </div>
-                    <button type="button" class="ag-claude-switch" role="switch" data-ag-cux-switch="${modKey}" data-ag-cux-feat="${featKey}" aria-label="${escapeHtml(title)}" aria-checked="${Boolean(FEAT[featKey])}"><span></span></button>
-                  </div>`
-                  )
-                  .join('')}
-              </div>
-            </div>`
-          ).join('')}
-        </div>
-      `;
-      panel.querySelectorAll('[data-ag-cux-switch]').forEach((sw) => {
-        sw.addEventListener('click', () => {
-          const modKey = sw.getAttribute('data-ag-cux-switch');
-          const featKey = sw.getAttribute('data-ag-cux-feat');
-          setModuleOverride(modKey, featKey, !FEAT[featKey]);
-        });
-      });
       settingsRightRef.appendChild(panel);
       settingsPanelEl = panel;
     }
+    renderSettingsPanelContent(settingsPanelEl);
     settingsPanelEl.hidden = false;
     syncSettingsSwitchesUi();
     settingsRightRef.scrollTop = 0;
@@ -4318,13 +4778,14 @@
     settingsRightRef = rightContent;
     const navWrap = document.createElement('div');
     navWrap.id = 'ag-claude-ux-settings-nav';
+    navWrap.setAttribute('data-ag-i18n-ignore', '1');
     navWrap.className = anchorBtn.parentElement.className || 'relative group/nav-item mx-2';
 
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.setAttribute('data-testid', 'settings-nav-item-ClaudeUX');
     btn.className = (anchorBtn.className || '').replace(/\bbg-sidebar-secondary\b/g, 'hover:bg-sidebar-muted');
-    btn.innerHTML = '<span class="truncate">界面增强</span>';
+    btn.innerHTML = `<span class="truncate">${L('界面增强', 'UI Enhancements')}</span>`;
     btn.addEventListener('click', () => openClaudeUxSettingsPane());
     navWrap.appendChild(btn);
 
@@ -4378,8 +4839,13 @@
         const t = m.target;
         if (!t || !t.getAttribute) continue;
         if (m.attributeName === 'aria-expanded') {
-          if (FEAT.collapseAnim && t.getAttribute('data-testid') === 'tool-group-collapsible' && t.getAttribute('aria-expanded') === 'false') {
-            animateCollapseIfNeeded(t);
+          if (FEAT.collapseAnim && t.getAttribute('data-testid') === 'tool-group-collapsible') {
+            const exp = t.getAttribute('aria-expanded');
+            if (exp === 'false') {
+              animateCollapseIfNeeded(t);
+            } else if (exp === 'true' && t.parentElement) {
+              t.parentElement.querySelectorAll(':scope > .ag-collapse-ghost').forEach((g) => g.remove());
+            }
           }
           if (!isOwnNode(t)) needSync = true;
         } else if (m.attributeName === 'class') {
@@ -4393,6 +4859,7 @@
   });
 
   if (document.body) {
+    applyUiI18nState(FEAT.i18n);
     observer.observe(document.body, {
       subtree: true,
       childList: true,
@@ -4406,6 +4873,7 @@
     if (disposed) return;
     disposed = true;
     observer.disconnect();
+    stopUxI18nObserver();
     for (const id of pendingRafs) cancelAnimationFrame(id);
     pendingRafs.clear();
     for (const id of pendingTimeouts) clearTimeout(id);
@@ -4489,6 +4957,7 @@
       if (hadDocLang && origDocLang !== null) docRoot.setAttribute('lang', origDocLang);
       else docRoot.removeAttribute('lang');
     }
+    if (docRoot) docRoot.removeAttribute('data-ag-ux-lang');
     if (window.__agClaudeUxDispose === dispose) window.__agClaudeUxDispose = null;
   }
 

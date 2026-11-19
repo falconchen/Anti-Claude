@@ -92,6 +92,8 @@ test('install then uninstall restores files, settings and AGENTS.md exactly', ()
     assert.match(h.read('.gemini/antigravity/antigravity_state.pbtxt'), /PRODUCT_SKIN_DEVELOPER/);
     assert.equal(JSON.parse(h.read('.gemini/config/config.json')).userSettings.verboseConversationSteps, true);
     assert.match(h.read('.gemini/AGENTS.md'), /BEGIN antigravity-claude-ux/);
+    assert.match(h.read('.gemini/AGENTS.md'), /Execution Progress Sync/);
+    assert.match(h.read('.gemini/AGENTS.md'), /same language the user is speaking/);
 
     const un = run(h, ['uninstall']);
     assert.equal(un.status, 0, un.stderr);
@@ -146,7 +148,8 @@ test('sync keeps user edits: JSON overrides survive, edited CSS is not overwritt
   try {
     run(h, ['install']);
     const cfg = JSON.parse(h.readUser('config.json'));
-    cfg.modules.i18n = false;
+    assert.equal(cfg.modules.i18n, false, 'default config keeps English UI (i18n: false)');
+    cfg.modules.i18n = true;
     cfg.contextLimit = 999;
     fs.writeFileSync(h.user('config.json'), JSON.stringify(cfg, null, 2));
     fs.appendFileSync(h.user('custom.css'), '\n/* my tweak */\n');
@@ -154,7 +157,7 @@ test('sync keeps user edits: JSON overrides survive, edited CSS is not overwritt
     const s = run(h, ['sync-upgrade', '--force']);
     assert.equal(s.status, 0, s.stderr);
     const after = JSON.parse(h.readUser('config.json'));
-    assert.equal(after.modules.i18n, false);
+    assert.equal(after.modules.i18n, true);
     assert.equal(after.contextLimit, 999);
     assert.match(h.readUser('custom.css'), /my tweak/);
 

@@ -24,7 +24,7 @@ const SRC = fs
     'window.__t = { scheduleSync, syncStepStream, dispose, parseAndSlimMetricsPayload, cacheTierForRate, detectCompactStatus, triggerConversationCompact }; })();'
   );
 
-function mount(html, { modules = {} } = {}) {
+function mount(html, { modules = {}, dict = null } = {}) {
   const dom = new JSDOM(`<!doctype html><body>${html}</body>`, {
     runScripts: 'outside-only',
     url: 'http://127.0.0.1/c/abcd-1234',
@@ -40,7 +40,7 @@ function mount(html, { modules = {} } = {}) {
   };
   window.cancelAnimationFrame = (id) => queue.delete(id);
   const cleanups = [];
-  window.ctx = { modules, onCleanup: (fn) => cleanups.push(fn) };
+  window.ctx = { modules, dict: dict || undefined, onCleanup: (fn) => cleanups.push(fn) };
   window.eval(SRC);
   const flushFrames = () => {
     for (let i = 0; i < 10 && queue.size; i++) {
@@ -714,7 +714,7 @@ test('sidebar folder status badges & top Recents: aggregates collapsed folders, 
   );
   assert.equal(h.doc.querySelector('[data-testid="conversation-row-sidebar"] span.truncate').textContent, '恢复谷歌浏览器Gemini侧边栏');
   assert.equal(h.doc.querySelectorAll('#ag-claude-recent-section .ag-recent-proj').length, 0, 'Variant A uses pure single-line rows');
-  assert.match(recentRows[1].getAttribute('title') || '', /所属项目：项目B/, 'hover title exposes project name');
+  assert.match(recentRows[1].getAttribute('title') || '', /Project: 项目B/, 'hover title exposes project name in default English UI');
   recentRows[1].click();
   assert.deepEqual(JSON.parse(JSON.stringify(navigatedTo)), { to: '/c/$cascadeId', params: { cascadeId: 'conv-running' } });
   h.cleanups.forEach((fn) => fn());
@@ -722,32 +722,77 @@ test('sidebar folder status badges & top Recents: aggregates collapsed folders, 
   h.close();
 });
 
-test('native Settings -> 界面增强 panel: injects nav item, switches pane, and live-toggles modules with localStorage persistence', { skip }, async () => {
-  const h = mount(`
+test('native Settings -> UI Enhancements panel: defaults to English and live-toggles Chinese UI localization with localStorage persistence', { skip }, async () => {
+  const h = mount(
+    `
     <div data-split-root="true">
       <div>
         <div data-testid="settings-sidebar">
           <div class="flex flex-col gap-0.5">
-            <div class="group/nav-item"><button type="button" data-testid="settings-nav-item-General" class="bg-sidebar-secondary"><span>常规</span></button></div>
-            <div class="group/nav-item"><button type="button" data-testid="settings-nav-item-Appearance"><span>外观</span></button></div>
+            <div class="group/nav-item"><button type="button" data-testid="settings-nav-item-General" class="bg-sidebar-secondary"><span>General</span></button></div>
+            <div class="group/nav-item"><button type="button" data-testid="settings-nav-item-Appearance"><span>Appearance</span></button></div>
           </div>
         </div>
       </div>
       <div>
-        <div id="settings-right-host"><div id="native-general-pane">原生常规内容</div></div>
+        <div id="settings-right-host"><div id="native-general-pane">Native general content</div></div>
       </div>
     </div>
-  `);
+    <div id="step-stream-probe">
+      <span id="p-compound">Explored file, edited files</span>
+      <span id="p-count">Explored 3 files</span>
+      <span id="p-active">Editing custom.js</span>
+      <span id="p-runfor">Running for 4s</span>
+      <span id="p-working">Working</span>
+    </div>
+  `,
+    { dict: { General: '常规', Appearance: '外观', Working: '正在工作' } }
+  );
   await settle(h);
 
   const navBtn = h.doc.querySelector('button[data-testid="settings-nav-item-ClaudeUX"]');
-  assert.ok(navBtn, '界面增强 nav button injected into settings-sidebar');
+  assert.ok(navBtn, 'UI Enhancements nav button injected into settings-sidebar');
+  assert.equal(navBtn.textContent.trim(), 'UI Enhancements', 'defaults to English');
+  assert.equal(h.doc.documentElement.getAttribute('data-ag-ux-lang'), 'en');
+  assert.equal(h.doc.querySelector('button[data-testid="settings-nav-item-General"]').textContent.trim(), 'General');
+  assert.equal(h.doc.getElementById('p-compound').textContent, 'Explored file, edited files');
+  assert.equal(h.doc.getElementById('p-working').textContent, 'Working');
   navBtn.click();
 
   const rightHost = h.doc.getElementById('settings-right-host');
   const panel = h.doc.getElementById('ag-claude-ux-settings-panel');
   assert.equal(rightHost.getAttribute('data-ag-claude-settings-open'), 'true');
   assert.ok(panel && !panel.hidden, 'Claude UX settings panel visible');
+
+  /* Toggle Chinese UI localization ON -> translates native UI & enhancement panel live */
+  const i18nSwitch = panel.querySelector('[data-ag-cux-switch="i18n"]');
+  assert.ok(i18nSwitch, 'Chinese UI localization switch rendered');
+  assert.equal(i18nSwitch.getAttribute('aria-checked'), 'false', 'i18n switch off by default');
+  i18nSwitch.click();
+  assert.equal(h.doc.documentElement.getAttribute('data-ag-ux-lang'), 'zh');
+  assert.equal(navBtn.textContent.trim(), '界面增强');
+  assert.equal(h.doc.querySelector('button[data-testid="settings-nav-item-General"]').textContent.trim(), '常规');
+  assert.equal(h.doc.querySelector('button[data-testid="settings-nav-item-Appearance"]').textContent.trim(), '外观');
+  assert.equal(h.doc.getElementById('p-compound').textContent, '已探索文件、已编辑文件');
+  assert.equal(h.doc.getElementById('p-count').textContent, '已探索 3 个文件');
+  assert.equal(h.doc.getElementById('p-active').textContent, '正在编辑 custom.js');
+  assert.equal(h.doc.getElementById('p-runfor').textContent, '已运行 4s');
+  assert.equal(h.doc.getElementById('p-working').textContent, '正在工作');
+  assert.match(panel.textContent, /中文界面汉化/);
+  assert.match(h.window.localStorage.getItem('ag_claude_ux_modules_v1') || '', /"i18n":true/);
+
+  /* Toggle Chinese UI localization back OFF -> restores native English UI & enhancement panel live */
+  panel.querySelector('[data-ag-cux-switch="i18n"]').click();
+  assert.equal(h.doc.documentElement.getAttribute('data-ag-ux-lang'), 'en');
+  assert.equal(navBtn.textContent.trim(), 'UI Enhancements');
+  assert.equal(h.doc.querySelector('button[data-testid="settings-nav-item-General"]').textContent.trim(), 'General');
+  assert.equal(h.doc.querySelector('button[data-testid="settings-nav-item-Appearance"]').textContent.trim(), 'Appearance');
+  assert.equal(h.doc.getElementById('p-compound').textContent, 'Explored file, edited files');
+  assert.equal(h.doc.getElementById('p-count').textContent, 'Explored 3 files');
+  assert.equal(h.doc.getElementById('p-active').textContent, 'Editing custom.js');
+  assert.equal(h.doc.getElementById('p-runfor').textContent, 'Running for 4s');
+  assert.equal(h.doc.getElementById('p-working').textContent, 'Working');
+  assert.match(h.window.localStorage.getItem('ag_claude_ux_modules_v1') || '', /"i18n":false/);
 
   const recentSwitch = panel.querySelector('[data-ag-cux-switch="claudeUxRecentSection"]');
   assert.equal(recentSwitch.getAttribute('aria-checked'), 'true');
@@ -798,15 +843,15 @@ test('metrics slimming: keeps outer TTFT pill, renders minimalist two-section po
   assert.equal(slim1.inlineHtml.includes('sub'), false);
 
   assert.ok(slim1.tooltipHtml.includes('class="ag-ux-tt"'));
-  assert.ok(slim1.tooltipHtml.includes('本轮响应'));
-  assert.ok(slim1.tooltipHtml.includes('首字耗时') && slim1.tooltipHtml.includes('2.5s'));
+  assert.ok(slim1.tooltipHtml.includes('This turn'));
+  assert.ok(slim1.tooltipHtml.includes('TTFT') && slim1.tooltipHtml.includes('2.5s'));
   assert.ok(slim1.tooltipHtml.includes('1m 17s'));
   assert.ok(slim1.tooltipHtml.includes('11.4k'));
-  assert.ok(slim1.tooltipHtml.includes('当前会话'));
+  assert.ok(slim1.tooltipHtml.includes('Session'));
   assert.ok(slim1.tooltipHtml.includes('data-cache-tier="high"'));
   assert.equal(slim1.tooltipHtml.includes('Gen #6'), false);
   assert.equal(slim1.tooltipHtml.includes('距压缩余'), false);
-  assert.equal(slim1.tooltipHtml.includes('累计输出'), false, 'turn 1 without subagent omits total output');
+  assert.equal(slim1.tooltipHtml.includes('Total out'), false, 'turn 1 without subagent omits total output');
 
   const replayed = parseAndSlimMetricsPayload(slim1);
   assert.equal(replayed.inlineHtml, slim1.inlineHtml);
@@ -814,9 +859,9 @@ test('metrics slimming: keeps outer TTFT pill, renders minimalist two-section po
 
   const slimHold = parseAndSlimMetricsPayload(mkPayload({ turns: 3, cacheRate: '87.2', sessCacheRate: '82.1', hold: true }));
   assert.ok(slimHold.inlineHtml.includes('Hold 1.8s'), 'outer pill keeps Hold on buffered run');
-  assert.ok(slimHold.tooltipHtml.includes('首包等待') && slimHold.tooltipHtml.includes('1.8s'));
+  assert.ok(slimHold.tooltipHtml.includes('Hold') && slimHold.tooltipHtml.includes('1.8s'));
   assert.ok(slimHold.tooltipHtml.includes('data-cache-tier="mid"'));
-  assert.ok(slimHold.tooltipHtml.includes('累计输出') && slimHold.tooltipHtml.includes('28k'));
+  assert.ok(slimHold.tooltipHtml.includes('Total out') && slimHold.tooltipHtml.includes('28k'));
 
   h.cleanups.forEach((fn) => fn());
   h.close();
@@ -954,7 +999,7 @@ test('context ring & quota popover: adds inline compact button and immediately c
   assert.ok(compactBtn, 'compact button rendered next to 当前上下文');
   assert.equal(compactBtn.getAttribute('data-state'), 'ready');
   assert.equal(compactBtn.getAttribute('data-urgent'), 'crit');
-  assert.equal(compactBtn.textContent.trim(), '压缩');
+  assert.equal(compactBtn.textContent.trim(), 'Compact');
 
   /* 2. Clicking compact dispatches native slashCommand:compact without clearing draft & enters compacting state */
   compactBtn.click();
@@ -965,7 +1010,7 @@ test('context ring & quota popover: adds inline compact button and immediately c
   assert.equal(ring.getAttribute('data-level'), 'normal', 'ring leaves red crit immediately on compacting');
   assert.equal(ring.getAttribute('data-compact-state'), 'compacting');
   assert.equal(pop.querySelector('[data-ag-qp-compact]').getAttribute('data-state'), 'compacting');
-  assert.match(pop.textContent, /压缩中…/);
+  assert.match(pop.textContent, /Compacting…/);
 
   /* 3a. /compact finishes (checkpoint without hydrated metadata.modelUsage), while daemon still pushes 481k/94% + Out 574 */
   const vp = h.doc.getElementById('vp');
@@ -990,10 +1035,10 @@ test('context ring & quota popover: adds inline compact button and immediately c
   assert.equal(ring.getAttribute('data-level'), 'normal', 'ring stays normal instead of stale 94% red');
   assert.equal(ring.getAttribute('data-compact-state'), 'compacted');
   assert.equal(pop.querySelector('[data-ag-qp-compact]').getAttribute('data-state'), 'compacted');
-  assert.match(pop.textContent, /已压缩/);
+  assert.match(pop.textContent, /Compacted/);
   assert.equal(pop.textContent.includes('574'), false, 'must never misread prior Out 574 as compact summary');
   assert.equal(pop.textContent.includes('→ 摘要'), false);
-  assert.match(pop.textContent, /已完成压缩 · 下轮刷新/);
+  assert.match(pop.textContent, /Compacted · refreshes next turn/);
 
   /* 3b. checkpoint hydrates metadata.modelUsage -> displays real 5.2k / 512k (1%) */
   vp.__reactFiber$t.memoizedProps.trajectorySlice.stepsInSlice[3].metadata = {
@@ -1012,7 +1057,7 @@ test('context ring & quota popover: adds inline compact button and immediately c
   assert.equal(pop.textContent.includes('574'), false);
   assert.equal(pop.textContent.includes('~5%'), false);
   assert.match(h.window.__ag_last_metrics.tooltipHtml, /5\.2k \/ 512k/);
-  assert.match(h.window.__ag_last_metrics.tooltipHtml, /原 483k/);
+  assert.match(h.window.__ag_last_metrics.tooltipHtml, /was 483k/);
   assert.equal(h.window.__ag_last_metrics.tooltipHtml.includes('94%'), false);
 
   /* 3c. Bottom metrics pill CSS centering & centered tooltip positioning in narrow window mode */

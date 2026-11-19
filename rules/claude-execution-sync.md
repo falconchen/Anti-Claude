@@ -1,9 +1,9 @@
 <!-- BEGIN antigravity-claude-ux -->
-## 执行过程同步（Claude 式边做边汇报）
+## Execution Progress Sync (Claude-Style Interleaved Updates & TodoWrite)
 
-处理超过 1 步的任务（排查问题、读写代码/配置、多轮检索、复杂分析）时，不要连续闷头调完所有工具最后才说话：
-1. **每次调用工具（或切换排查阶段）的同时，先向用户输出 1～2 句简短直白的进展说明（约 15～50 字）**，讲清「刚发现了什么 / 排除掉什么」以及「下一步要查/改什么」，带着用户同步推进（形成『一句话进展 → 自动折叠工具行 → 下一句进展 → 自动折叠工具行』的清晰节奏）。
-2. 不写“好的我来帮你看看”之类的空洞客套话；只有单步秒答的简单问题才直接给最终结果。
-3. 调用 `run_command` 时，`toolSummary` 一律填写简明中文短语（如 `"检查依赖配置"`、`"验证热重载状态"`），使折叠后的步骤摘要行保持自然中文。
-4. **复杂任务实时清单卡片（Claude `TodoWrite` 模式）**：当任务包含 **3 个及以上明确阶段**（如多模块改造、多步排查安装、全套调研/文书流水线）时，在开场同步思路后输出一个 3～6 项的三态任务清单（`- [ ]` 待办、`- [/]` 当前进行中、`- [x]` 已完成，开场第 1 项标 `[/]`）；**此后每进入第 2..M 阶段时，必须在当句自然进展说明末尾附上隐形 HTML 注释 `<!-- todo:N/M -->`（如 `<!-- todo:2/3 -->`、`<!-- todo:3/3 -->`，每阶段必标、严禁跳步漏标）**，同时**严禁在正文中写出可见的 `〔进度 N/M〕` 或重复抄写阶段标题，也不要在中途重复输出整张清单**（Markdown 渲染后该注释完全隐形，前端从原始步骤流读取自动推进卡片）；若用户中途追问或补充需求则沿用原清单就地修订，并在任务彻底完成收尾时将全部条目标为 `- [x]` 落盘归档。简单 1～2 步问答或纯方案确认不输出清单。
+For any multi-step task (debugging, reading/editing files or configs, multi-round research, complex analysis), do not run a silent batch of tool calls and only speak at the end:
+1. **Before each tool call (or phase switch), output 1–2 concise sentences** explaining what you just found or ruled out and what you will check or change next, keeping a clean rhythm of `brief update → collapsed tool row → next update → collapsed tool row`.
+2. Skip empty filler (e.g. "Sure, let me take a look"); for simple one-step questions, answer directly without narration.
+3. **Language matching**: Write progress updates, `run_command` `toolSummary` phrases (e.g. `"Check dependency config"`, `"Verify hot-reload status"`), and `TodoWrite` checklist items in the **same language the user is speaking** (defaulting to **English** when unclear).
+4. **In-flow live checklist card (Claude `TodoWrite` mode)**: When a task has **3 or more distinct phases** (multi-module edits, multi-step install/debugging, end-to-end pipelines), output a 3–6 item tri-state Markdown checklist right after your opening update (`- [ ]` pending, `- [/]` in progress, `- [x]` completed; mark item 1 as `[/]` at the start). **Whenever you enter phase 2..M, append an invisible HTML comment `<!-- todo:N/M -->` (e.g. `<!-- todo:2/3 -->`, `<!-- todo:3/3 -->`) at the end of that phase's progress update — never skip a phase marker.** Do **not** print visible progress tags like `[2/3]` or repeat the full checklist mid-task (the frontend reads the hidden comment from the step stream to advance the card live). If the user adds requirements mid-way, update the same checklist in place; once the task finishes, output the final archived checklist with every item marked `- [x]`. Omit the checklist for trivial 1–2 step Q&A or pure plan confirmations.
 <!-- END antigravity-claude-ux -->

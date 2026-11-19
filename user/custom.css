@@ -938,19 +938,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="thinking-col
   color: #9E9D98 !important;
 }
 
-@keyframes agStepExpandIn {
-  from {
-    opacity: 0;
-    transform: translateY(-4px);
-    max-height: 0;
-  }
-  to {
-    opacity: 1;
-    transform: none;
-    max-height: 500px;
-  }
-}
-
+/* 展开动画交给 Antigravity 原生内联 opacity + transform GPU 过渡，避免与自定义 max-height 关键帧叠加产生二次跳弹和 mask-image 闪烁 */
 [data-testid="tool-group-collapsible"][aria-expanded="true"] + div,
 .ag-collapse-ghost {
   margin: 4px 4px 8px 8px !important;
@@ -960,8 +948,33 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="thinking-col
   font-size: 13px !important;
 }
 
-[data-testid="tool-group-collapsible"][aria-expanded="true"] + div:not(.ag-collapse-ghost) {
-  animation: agStepExpandIn 190ms cubic-bezier(0.16, 1, 0.3, 1) backwards !important;
+.ag-collapse-ghost {
+  overflow: hidden !important;
+  box-sizing: border-box !important;
+  pointer-events: none !important;
+  will-change: max-height, opacity, transform;
+  transition:
+    max-height 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    margin-top 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    margin-bottom 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    padding-top 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    padding-bottom 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-top-width 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-bottom-width 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 120ms ease-out !important;
+}
+
+.ag-collapse-ghost.is-collapsing {
+  max-height: 0 !important;
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  border-top-width: 0 !important;
+  border-bottom-width: 0 !important;
+  opacity: 0 !important;
+  transform: translateY(-4px) !important;
 }
 
 [data-testid="tool-group-collapsible"][aria-expanded="true"] + div > div > * + *,
@@ -1072,11 +1085,15 @@ html body .ag-claude-todo-card[data-ag-todo-paused="true"] .ag-todo-active.ag-to
 }
 
 html body .ag-claude-todo-card[data-ag-todo-paused="true"]::after {
-  content: "已暂停";
+  content: "Paused";
   font-family: var(--font-sans) !important;
   font-size: 12px !important;
   line-height: 1.3 !important;
   color: #8E8D88 !important;
+}
+
+html[data-ag-ux-lang="zh"] body .ag-claude-todo-card[data-ag-todo-paused="true"]::after {
+  content: "已暂停";
 }
 
 @keyframes agTodoDonePop {
