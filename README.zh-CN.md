@@ -22,8 +22,9 @@ node ~/Developer/Anti-Claude/install.mjs install
 常用命令：
 
 ```bash
+node ~/Developer/Anti-Claude/install.mjs install --cli-only    # 仅安装 Antigravity CLI (agy) 支持（跨平台免桌面端）
 node ~/Developer/Anti-Claude/install.mjs sync-upgrade --force  # 拉取更新并热重载
-node ~/Developer/Anti-Claude/install.mjs doctor                # 检查各层状态
+node ~/Developer/Anti-Claude/install.mjs doctor                # 检查各层状态（含桌面端与 CLI）
 node ~/Developer/Anti-Claude/install.mjs uninstall             # 卸载并还原原配置
 ```
 
@@ -44,6 +45,12 @@ node ~/Developer/Anti-Claude/install.mjs uninstall             # 卸载并还原
 - **侧边栏增强与气泡内撤回重编**：侧边栏顶部增加跨项目的「最近对话」（自动跳过已置顶会话），折叠的项目文件夹右侧汇总待确认、运行中、未读角标。点击消息「撤回」时直接在原气泡内展开编辑框修改重发，可选是否同步回滚代码改动。
 - **默认英文、实时汉化开关与升级自愈**：项目默认保持英文原版界面；在客户端「Settings → UI Enhancements（设置 → 界面增强）」内可单独开关全部 10 项模块（含「中文界面汉化」免重启实时切换，原生界面与所有增强面板同步切中/英文）。macOS 下后台自动跟随客户端升级重挂注入（兼容 `v2.33+` 移除默认调试端口的改动）。
 
+### 3. Antigravity CLI（`agy`）支持
+
+- **自动识别与纯 CLI 模式**：默认运行 `install` 时若检测到本机已安装 `agy` 或存在 `~/.gemini/antigravity-cli`，会自动一并配置 CLI 支持（可用 `--no-cli` 跳过）；也可运行 `install --cli-only` 仅部署 CLI 层，无需桌面端或 CDP，支持 macOS / Linux / Windows。
+- **零依赖 Claude 风格终端状态栏**：自动部署 `~/.gemini/antigravity-cli/anti-claude-statusline.mjs` 并在 `~/.gemini/antigravity-cli/settings.json` 中启用 `statusLine`，实时展示当前模型、分级配色上下文进度条、Git 分支与脏状态、工作区名及运行状态，并随终端宽度自动精简防换行（可用 `--no-cli-statusline` 跳过）。
+- **共享规则与无损回滚**：复用 `~/.gemini/AGENTS.md`（非交互终端自动降级选项提示），升级时尊重用户手动改过的 `statusLine` 配置，执行 `uninstall` 时逐项还原原配置并清理脚本。
+
 ## 本机改动范围
 
 安装器不触碰 `/Applications/Antigravity.app`，仅修改以下用户层文件（全部记录在 `~/.gemini/antigravity/anti-claude/install-state.json`，执行 `uninstall` 逐项还原）：
@@ -51,6 +58,7 @@ node ~/Developer/Anti-Claude/install.mjs uninstall             # 卸载并还原
 - `~/.gemini/AGENTS.md`：写入「边做边汇报 + 隐形进度标记 + 交互式选择卡」协作规则（可用 `--no-agents-rule` 跳过）。
 - `antigravity_state.pbtxt` 与 `~/.gemini/config/config.json`：开启完整步骤详情展示（可用 `--no-step-unlock` 跳过）。
 - `~/.gemini/antigravity/theme-patch/user/`：写入样式、脚本与配置（未装 [`chuanban-antigravity-theme-patch`](https://github.com/Anarcadia/chuanban-antigravity-theme-patch) 时自动拉取；手动改过的本地文件升级时不覆盖）。
+- `~/.gemini/antigravity-cli/anti-claude-statusline.mjs` 与 `~/.gemini/antigravity-cli/settings.json`：检测到 `agy` 或传入 `--cli` / `--cli-only` 时部署终端状态栏并启用 `statusLine`（可用 `--no-cli` 或 `--no-cli-statusline` 跳过）。
 - `~/Library/LaunchAgents/com.antigravity.anti-claude.autosync.plist`：监听客户端升级并定期同步（可用 `--no-auto-update` 跳过）。
 
 ## 致谢与许可

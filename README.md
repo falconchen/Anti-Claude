@@ -22,8 +22,9 @@ Or simply ask Antigravity or Claude Code: `Install https://github.com/hongqi7/An
 Common commands:
 
 ```bash
+node ~/Developer/Anti-Claude/install.mjs install --cli-only    # Antigravity CLI (agy) only — macOS / Linux / Windows
 node ~/Developer/Anti-Claude/install.mjs sync-upgrade --force  # Pull updates and hot-reload
-node ~/Developer/Anti-Claude/install.mjs doctor                # Inspect health of all layers
+node ~/Developer/Anti-Claude/install.mjs doctor                # Inspect health of all layers (Desktop & CLI)
 node ~/Developer/Anti-Claude/install.mjs uninstall             # Uninstall and restore original config
 ```
 
@@ -44,6 +45,12 @@ By default, Antigravity hides reasoning inside collapsed `thinking` blocks, runs
 - **Sidebar enhancements & in-bubble undo/edit**: Adds a cross-project `Recents` section at the top of the sidebar (skipping pinned threads) and aggregates pending, running, and unread badges beside collapsed project folders. Clicking Undo expands an inline editor directly inside the original user bubble with file-revert preview and original attachment preservation.
 - **English by default, zero-reload Chinese switch & self-healing updates**: Keeps the native English UI by default; open **Settings → UI Enhancements** to toggle all 10 modules individually in 0ms—including **Chinese UI Localization**, which switches both Antigravity's native UI and every enhancement panel cleanly between English and Simplified Chinese without reloading. A macOS LaunchAgent automatically re-attaches after Antigravity updates (including `v2.33+` CDP port changes).
 
+### 3. Antigravity CLI (`agy`) Support
+
+- **Auto-detected or standalone CLI mode**: Running `install` automatically configures Antigravity CLI (`agy`) when detected alongside Desktop (disable with `--no-cli`), or run `install --cli-only` on macOS, Linux, or Windows to install CLI support without requiring Antigravity Desktop or CDP.
+- **Zero-dependency Claude-style status line**: Deploys `~/.gemini/antigravity-cli/anti-claude-statusline.mjs` and wires `statusLine` in `~/.gemini/antigravity-cli/settings.json` to display active model, color-coded context progress bar, Git branch/dirty marker, workspace name, and live agent state with automatic narrow-terminal adaptation (skip with `--no-cli-statusline`).
+- **Shared execution rules & clean rollback**: Shares `~/.gemini/AGENTS.md` (with graceful terminal fallback when `ask_question` is unavailable), respects user edits to `settings.json` / statusline scripts on `sync-upgrade`, and restores prior `statusLine` settings cleanly on `uninstall`.
+
 ## Local Footprint
 
 The installer never touches `/Applications/Antigravity.app`. It only manages the following user-level files (tracked in `~/.gemini/antigravity/anti-claude/install-state.json` and cleanly restored on `uninstall`):
@@ -51,6 +58,7 @@ The installer never touches `/Applications/Antigravity.app`. It only manages the
 - `~/.gemini/AGENTS.md`: Adds the execution-sync, `TodoWrite`, and `ask_question` collaboration rule block (skip with `--no-agents-rule`).
 - `antigravity_state.pbtxt` & `~/.gemini/config/config.json`: Enables detailed step visibility (skip with `--no-step-unlock`).
 - `~/.gemini/antigravity/theme-patch/user/`: Deploys CSS, JS, and config (auto-installs [`chuanban-antigravity-theme-patch`](https://github.com/Anarcadia/chuanban-antigravity-theme-patch) if absent; preserves local customizations via 3-way merge).
+- `~/.gemini/antigravity-cli/anti-claude-statusline.mjs` & `~/.gemini/antigravity-cli/settings.json`: Deploys the zero-dependency CLI status bar and enables `statusLine` when `agy` is detected or `--cli` / `--cli-only` is passed (skip with `--no-cli` or `--no-cli-statusline`).
 - `~/Library/LaunchAgents/com.antigravity.anti-claude.autosync.plist`: Watches client upgrades and syncs periodically (skip with `--no-auto-update`).
 
 ## Credits & License
