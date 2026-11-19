@@ -133,8 +133,10 @@
       inputBoxId: 'antigravity.agentSidePanelInputBox',
       homeGreeting: '[data-testid="home-greeting"], [data-testid="home-splash-content"]'
     },
+    boot.config && typeof boot.config.selectors === 'object' ? boot.config.selectors : {},
     boot.selectors || {}
   );
+  const RPC_TOKEN = typeof boot.rpcToken === 'string' ? boot.rpcToken : '';
 
   /* Run previous cleanup callbacks before hot-reloading or tearing down */
   if (Array.isArray(window.__ag_cleanup_fns) && window.__ag_cleanup_fns.length > 0) {
@@ -146,12 +148,22 @@
     }
   }
   window.__ag_cleanup_fns = [];
+  let runtimeDisposed = false;
+  window.__ag_cleanup_fns.push(() => {
+    runtimeDisposed = true;
+  });
 
   if (window.__ag_dcl_handler) {
     try {
       window.removeEventListener('DOMContentLoaded', window.__ag_dcl_handler);
     } catch {}
     window.__ag_dcl_handler = null;
+  }
+  if (window.__ag_doc_body_observer) {
+    try {
+      window.__ag_doc_body_observer.disconnect();
+    } catch {}
+    window.__ag_doc_body_observer = null;
   }
   if (window.__ag_theme_mode_observer) {
     try {
@@ -164,6 +176,12 @@
       window.__ag_mql_cleanup();
     } catch {}
     window.__ag_mql_cleanup = null;
+  }
+  if (window.__ag_metrics_raf) {
+    try {
+      cancelAnimationFrame(window.__ag_metrics_raf);
+    } catch {}
+    window.__ag_metrics_raf = 0;
   }
   if (window.__ag_metrics_ro) {
     try {
@@ -186,6 +204,14 @@
     } catch {}
     window.__ag_zoom_keydown_fn = null;
   }
+  window.__ag_check_route_fn = null;
+  window.__ag_render_metrics = null;
+  window.__ag_ensure_metrics_pill_fn = null;
+  window.__ag_sync_preset_fn = null;
+  window.__ag_set_host_theme_mode = null;
+  window.__agProjectCall = null;
+  window.__ag_project_rpc_resolve = null;
+  window.__ag_custom_js_mounted = false;
 
   if (!window.__ag_orig_text_map) {
     window.__ag_orig_text_map = new WeakMap();
@@ -327,12 +353,14 @@
 
   /* Lossless teardown when user/config.json sets enabled: false */
   if (!ENABLED) {
+    runtimeDisposed = true;
+    window.__ag_watched_cascade_id = '';
     for (const id of ['ag-custom-fonts', 'ag-user-theme-vars', 'antigravity-user-custom-style', 'ag-live-metrics-pill', 'ag-live-metrics-tooltip']) {
       const el = document.getElementById(id);
       if (el) el.remove();
     }
     applyThemeVars({}, {});
-    for (const attr of ['data-ag-theme-mode', 'data-ag-page-type', 'data-ag-os', 'data-ag-ux-lang']) {
+    for (const attr of ['data-ag-theme-mode', 'data-ag-page-type', 'data-ag-os', 'data-ag-ux-lang', 'data-ag-custom-font-size', 'data-ag-cjk-scale']) {
       document.documentElement.removeAttribute(attr);
     }
     if (document.body) restoreAllTranslations(document.body);
@@ -559,9 +587,10 @@
       window.__ag_metrics_ro_observed = new WeakSet();
       window.__ag_last_metrics_layout_sig = '';
       window.__ag_metrics_ro = new ResizeObserver(() => {
-        if (window.__ag_metrics_raf) return;
+        if (runtimeDisposed || !ENABLED || window.__ag_metrics_raf) return;
         window.__ag_metrics_raf = requestAnimationFrame(() => {
           window.__ag_metrics_raf = 0;
+          if (runtimeDisposed || !ENABLED) return;
           const curBox = document.getElementById(SELECTORS.inputBoxId);
           const curBottom = findFooterRow(curBox);
           if (!curBottom || !curBottom.children[0]) return;
@@ -600,6 +629,7 @@
   }
 
   function ensureMetricsPill(forceLayout = false, resetHysteresis = false) {
+    if (runtimeDisposed || !ENABLED) return null;
     if (!MODULES.metrics) {
       const existing = document.getElementById('ag-live-metrics-pill');
       if (existing) existing.style.display = 'none';
@@ -639,7 +669,10 @@
     syncMetricsResizeObserver(bottomRow, leftGroup, rightGroup);
 
     const rowW = bottomRow.clientWidth || 0;
-    if (rowW <= 0) return pill;
+    if (rowW <= 0) {
+      if (!pill.parentElement) leftGroup.appendChild(pill);
+      return pill;
+    }
     const leftW = measureNaturalLeftWidth(leftGroup);
     const rightW = rightGroup ? rightGroup.offsetWidth || 0 : 0;
     const curLayoutSig = rowW + ':' + leftW + ':' + rightW;
@@ -679,7 +712,7 @@
 
   window.__ag_render_metrics = function (payload) {
     try {
-      if (!MODULES.metrics) return;
+      if (runtimeDisposed || !ENABLED || !MODULES.metrics) return;
       window.__ag_last_metrics = payload;
       const currentId = extractCascadeId();
       const pill = ensureMetricsPill(false);
@@ -706,6 +739,7 @@
 
   function checkRouteAndMountMetrics() {
     try {
+      if (runtimeDisposed || !ENABLED) return;
       if (IS_SWARM_PLUGIN_FRAME) {
         if (document.documentElement.getAttribute('data-ag-page-type') !== 'plugin') {
           document.documentElement.setAttribute('data-ag-page-type', 'plugin');
@@ -798,8 +832,20 @@
 
   /* Handle early NewDocument injection when document.body is not yet created */
   if (!document.body) {
-    window.__ag_dcl_handler = () => {
-      window.__ag_dcl_handler = null;
+    const onRuntimeBodyReady = () => {
+      if (runtimeDisposed || !ENABLED || !document.body) return;
+      if (window.__ag_dcl_handler) {
+        try {
+          window.removeEventListener('DOMContentLoaded', window.__ag_dcl_handler);
+        } catch {}
+        window.__ag_dcl_handler = null;
+      }
+      if (window.__ag_doc_body_observer) {
+        try {
+          window.__ag_doc_body_observer.disconnect();
+        } catch {}
+        window.__ag_doc_body_observer = null;
+      }
       ensureStylesMounted();
       if (document.body && window.__ag_theme_mode_observer) {
         try {
@@ -812,7 +858,15 @@
       syncThemeMode();
       checkRouteAndMountMetrics();
     };
-    window.addEventListener('DOMContentLoaded', window.__ag_dcl_handler, { once: true });
+    window.__ag_dcl_handler = onRuntimeBodyReady;
+    window.addEventListener('DOMContentLoaded', onRuntimeBodyReady, { once: true });
+    if (typeof MutationObserver === 'function' && document.documentElement) {
+      const docObs = new MutationObserver(() => {
+        if (document.body) onRuntimeBodyReady();
+      });
+      docObs.observe(document.documentElement, { childList: true });
+      window.__ag_doc_body_observer = docObs;
+    }
   }
 
   /* Local project context RPC bridge (via daemon CDP binding __agProjectRpc) */
@@ -829,7 +883,7 @@
       pending.resolve(result);
     };
     window.__agProjectCall = (action, payload = {}, timeoutMs = 125000) => {
-      if (typeof window.__agProjectRpc !== 'function') {
+      if (runtimeDisposed || !ENABLED || typeof window.__agProjectRpc !== 'function') {
         return Promise.resolve({ ok: false, error: 'rpc_unavailable' });
       }
       const reqId = `prpc_${Date.now()}_${++rpcSeq}`;
@@ -841,7 +895,7 @@
         }, timeoutMs);
         window.__ag_project_rpc_pending.set(reqId, { resolve, timer });
         try {
-          window.__agProjectRpc(JSON.stringify({ reqId, action, payload }));
+          window.__agProjectRpc(JSON.stringify({ reqId, action, payload, token: RPC_TOKEN }));
         } catch (err) {
           clearTimeout(timer);
           window.__ag_project_rpc_pending.delete(reqId);

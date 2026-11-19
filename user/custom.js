@@ -221,10 +221,10 @@
     if (ul.closest('[data-testid="tool-group-collapsible"] + div')) return null;
     if (ul.closest('.ag-claude-todo-card, .ag-collapse-ghost')) return null;
 
-    /* cheap signature: item count + status classes + text; avoids re-cloning unchanged lists every sync */
+    /* cheap signature: item count + status classes + inline tag count + text; avoids re-cloning unchanged lists every sync */
     const sig = `${ul.children.length}|${ul.querySelectorAll(':scope > li.task-checked').length}|${
-      ul.querySelectorAll(':scope > li > div.bg-primary:first-child').length
-    }|${ul.textContent}`;
+      ul.querySelectorAll(':scope > li > div.bg-primary:first-child, :scope > li > p:first-child > div.bg-primary:first-child').length
+    }|${ul.querySelectorAll('code, strong, em, a, del, span').length}|${ul.textContent}`;
     const cached = todoParseCache.get(ul);
     if (cached && cached.sig === sig) return cached.items;
     const items = parseTodoUlUncached(ul);
@@ -843,19 +843,6 @@
       }
     }
     return best;
-  }
-
-  function turnContinuesChecklist(turnEl, baseItems) {
-    if (!turnEl || !baseItems || !baseItems.length) return false;
-    const mem = turnTodoMemory.get(turnEl);
-    if (mem && mem.size > 0) {
-      for (const rec of mem.values()) {
-        if (isChecklistEvolution(baseItems, rec.items)) return true;
-      }
-      return false;
-    }
-    const byTotal = turnProgressByTotal.get(turnEl);
-    return Boolean(byTotal && byTotal.has(baseItems.length));
   }
 
   /**
@@ -5996,14 +5983,12 @@
   const SVG_PROJ_SEARCH_ICON =
     '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="7.2" cy="7.2" r="4.6"/><path d="M10.8 10.8l2.8 2.8"/></svg>';
 
-  const SVG_PROJ_UPLOAD_ICON =
-    '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>';
-
   let projectsViewOpen = false;
   let activeProjectId = null; // null = Level 1 grid; string = Level 2 project detail workspace
   let projectsSearchQuery = '';
   let projectsSortMode = 'recent'; // 'recent' | 'name'
   let projectsContextMap = {};
+  const projectComposerDrafts = new Map();
   let projectsSidebarRo = null;
   let projectsSidebarRoTarget = null;
   let projectsViewEl = null;
@@ -6050,13 +6035,6 @@
     const p = String(absPath || '').trim();
     if (!p) return '';
     return p.replace(/^\/Users\/[^/]+/, '~').replace(/^\/home\/[^/]+/, '~').replace(/^[A-Za-z]:\\Users\\[^\\]+/i, '~');
-  }
-
-  function formatProjectBytes(bytes) {
-    const n = Number(bytes) || 0;
-    if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-    if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
-    return `${n} B`;
   }
 
   function formatProjectTimeAgo(sec) {
@@ -6250,7 +6228,12 @@
     if (projectFolderDropdownOpen && !t.closest('[data-ag-pd-folder-menu], [data-ag-pd-folder-toggle]')) {
       projectFolderDropdownOpen = false;
       projectFolderSearch = '';
-      renderProjectsView();
+      if (projectsViewEl) {
+        const openMenu = projectsViewEl.querySelector('[data-ag-pd-folder-menu]');
+        if (openMenu) openMenu.remove();
+        const toggleBtn = projectsViewEl.querySelector('[data-ag-pd-folder-toggle]');
+        if (toggleBtn) toggleBtn.setAttribute('data-open', 'false');
+      }
     }
     if (t.closest('#ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-recent-row-menu')) return;
     if (
@@ -6373,7 +6356,9 @@
   }
 
   async function saveProjectContextDelta(project, mutator) {
-    if (!project || !project.dirPath || projectsContextBusy || typeof window.__agProjectCall !== 'function') return;
+    if (!project || !project.dirPath || projectsContextBusy || typeof window.__agProjectCall !== 'function') {
+      return { ok: false, error: 'busy_or_unavailable' };
+    }
     projectsContextBusy = true;
     try {
       let cur = projectsContextMap[project.dirPath];
@@ -6395,8 +6380,13 @@
         files: existingFiles,
         extraFolders: existingFolders
       };
-      const updated = mutator(draft);
-      if (!updated) return;
+      const updated =
+        typeof mutator === 'function'
+          ? mutator(draft)
+          : mutator && typeof mutator === 'object'
+            ? Object.assign({}, draft, mutator)
+            : null;
+      if (!updated) return { ok: true, skipped: true };
       const saved = await window.__agProjectCall(
         'saveContext',
         {
@@ -6417,6 +6407,7 @@
         projectsContextMap[project.dirPath] = saved;
         if (projectsViewOpen) renderProjectsView();
       }
+      return saved || { ok: false, error: 'save_failed' };
     } finally {
       projectsContextBusy = false;
     }
@@ -6692,6 +6683,17 @@
     const hadFmFocus = prevFmSearch && document.activeElement === prevFmSearch;
     const fmSelStart = hadFmFocus ? prevFmSearch.selectionStart : null;
 
+    const prevComp = el.getAttribute('data-ag-pd-proj-id') === project.id ? el.querySelector('#ag-pd-composer-input') : null;
+    const hadCompFocus = Boolean(prevComp && document.activeElement === prevComp);
+    const compSelStart = hadCompFocus ? prevComp.selectionStart : null;
+    const compSelEnd = hadCompFocus ? prevComp.selectionEnd : null;
+    if (prevComp) {
+      if (prevComp.value) projectComposerDrafts.set(project.id, prevComp.value);
+      else projectComposerDrafts.delete(project.id);
+    }
+    const savedDraft = projectComposerDrafts.get(project.id) || '';
+    el.setAttribute('data-ag-pd-proj-id', project.id);
+
     el.innerHTML = `
       <div class="ag-pd-topbar">
         <nav class="ag-pd-breadcrumb" aria-label="Breadcrumb">
@@ -6711,7 +6713,7 @@
                 <div class="ag-pd-composer-box">
                   <textarea id="ag-pd-composer-input" class="ag-pd-composer-input" rows="2" placeholder="${escapeHtml(
                     L('想在这个项目里处理什么？', 'What would you like to work on in this project?')
-                  )}"></textarea>
+                  )}">${escapeHtml(savedDraft)}</textarea>
                   <div class="ag-pd-composer-foot">
                     ${
                       hasLocalDir
@@ -6880,8 +6882,9 @@
     const compInput = el.querySelector('#ag-pd-composer-input');
     const sendBtn = el.querySelector('[data-ag-pd-send]');
     const dispatchPrompt = () => {
-      const raw = (compInput && compInput.value || '').trim();
+      const raw = ((compInput && compInput.value) || '').trim();
       if (!raw) return;
+      projectComposerDrafts.delete(project.id);
       const finalPrompt =
         activeFolder && !activeFolder.primary && activeFolder.absPath
           ? `[${L('关联文件夹', 'Linked folder')}: ${activeFolder.absPath}]\n${raw}`
@@ -6889,11 +6892,23 @@
       startNewChatInProject(project, finalPrompt);
     };
     if (compInput && sendBtn) {
+      if (compInput.value !== savedDraft) compInput.value = savedDraft;
       const syncSend = () => {
+        if (compInput.value) projectComposerDrafts.set(project.id, compInput.value);
+        else projectComposerDrafts.delete(project.id);
         sendBtn.disabled = !compInput.value.trim();
         compInput.style.height = 'auto';
         compInput.style.height = `${Math.min(180, Math.max(48, compInput.scrollHeight))}px`;
       };
+      syncSend();
+      if (hadCompFocus && !hadFmFocus) {
+        compInput.focus();
+        if (typeof compSelStart === 'number' && typeof compSelEnd === 'number') {
+          try {
+            compInput.setSelectionRange(compSelStart, compSelEnd);
+          } catch {}
+        }
+      }
       compInput.addEventListener('input', syncSend);
       compInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && compInput.value.trim()) {
@@ -6948,7 +6963,7 @@
       b.addEventListener('click', () => {
         const p = b.getAttribute('data-ag-pd-reveal-file');
         if (p && typeof window.__agProjectCall === 'function') {
-          window.__agProjectCall('revealFile', { targetPath: p }, 5000);
+          window.__agProjectCall('revealFile', { dirPath: project.dirPath, targetPath: p }, 5000);
         }
       });
     });
@@ -7004,6 +7019,12 @@
 
   function renderProjectsView() {
     const el = ensureProjectsViewEl();
+    const prevProjId = el.getAttribute('data-ag-pd-proj-id');
+    const prevComp = prevProjId ? el.querySelector('#ag-pd-composer-input') : null;
+    if (prevProjId && prevComp) {
+      if (prevComp.value) projectComposerDrafts.set(prevProjId, prevComp.value);
+      else projectComposerDrafts.delete(prevProjId);
+    }
     const allProjects = collectNativeProjects();
     if (activeProjectId) {
       const target = allProjects.find((p) => p.id === activeProjectId);
@@ -7013,6 +7034,7 @@
       }
       activeProjectId = null;
     }
+    el.removeAttribute('data-ag-pd-proj-id');
 
     const q = projectsSearchQuery.trim().toLowerCase();
     const filtered = allProjects
@@ -7141,24 +7163,33 @@
     if (!project || !project.dirPath) return;
     closeProjectsModal();
     const cached = projectsContextMap[project.dirPath] || null;
-    projectsModalState = {
+    const modalRef = {
+      kind: 'instructions',
       project,
       dirPath: project.dirPath,
       instructions: cached ? cached.instructions || '' : '',
       hasOtherAgentsMd: Boolean(cached && cached.hasOtherAgentsMd),
+      userEdited: false,
       saving: false,
       error: ''
     };
+    projectsModalState = modalRef;
     renderProjectContextModal();
 
     if (typeof window.__agProjectCall === 'function') {
       const fresh = await window.__agProjectCall('readContext', { dirPath: project.dirPath }, 8000);
-      if (disposed || !projectsModalState || projectsModalState.dirPath !== project.dirPath) return;
+      if (disposed || projectsModalState !== modalRef) return;
       if (fresh && fresh.ok) {
         projectsContextMap[project.dirPath] = fresh;
-        projectsModalState.instructions = fresh.instructions || '';
-        projectsModalState.hasOtherAgentsMd = Boolean(fresh.hasOtherAgentsMd);
-        renderProjectContextModal();
+        const nextOther = Boolean(fresh.hasOtherAgentsMd);
+        const needRender = !modalRef.userEdited || modalRef.hasOtherAgentsMd !== nextOther;
+        if (!modalRef.userEdited) {
+          modalRef.instructions = fresh.instructions || '';
+        }
+        modalRef.hasOtherAgentsMd = nextOther;
+        if (needRender && !modalRef.userEdited) {
+          renderProjectContextModal();
+        }
       }
     }
   }
@@ -7214,7 +7245,10 @@
     if (textarea) {
       textarea.focus();
       textarea.addEventListener('input', () => {
-        if (projectsModalState) projectsModalState.instructions = textarea.value;
+        if (projectsModalState) {
+          projectsModalState.instructions = textarea.value;
+          projectsModalState.userEdited = true;
+        }
       });
     }
 
@@ -7234,23 +7268,12 @@
         projectsModalState.saving = true;
         projectsModalState.error = '';
         renderProjectContextModal();
-        const cur = projectsContextMap[projectsModalState.dirPath];
-        const keepFiles = (cur && Array.isArray(cur.files) ? cur.files : []).map((f) => ({
-          action: 'keep',
-          relPath: f.relPath,
-          name: f.name
-        }));
-        const keepFolders = (cur && Array.isArray(cur.extraFolders) ? cur.extraFolders : []).map((f) => ({
-          name: f.name,
-          absPath: f.absPath
-        }));
+        /* Submit only `instructions` so in-flight context loads can never overwrite existing attachments or folders */
         const res = await window.__agProjectCall(
           'saveContext',
           {
             dirPath: projectsModalState.dirPath,
-            instructions: projectsModalState.instructions,
-            files: keepFiles,
-            extraFolders: keepFolders
+            instructions: projectsModalState.instructions
           },
           20000
         );
@@ -7541,19 +7564,40 @@
         if (!projectsModalState) return;
         if (folderSel.value === '__add_folder__') {
           if (typeof window.__agProjectCall === 'function') {
-            const picked = await window.__agProjectCall('pickFolder', {}, 120000);
-            if (!disposed && projectsModalState && picked && picked.ok && !picked.canceled && picked.folderPath) {
-              const nextPath = picked.folderPath;
-              const cur = projectsContextMap[projectsModalState.dirPath];
-              const existing = (cur && Array.isArray(cur.extraFolders) ? cur.extraFolders : []).map((f) => ({
-                name: f.name,
-                absPath: f.absPath
-              }));
-              if (nextPath !== projectsModalState.dirPath && !existing.some((f) => f.absPath === nextPath)) {
-                existing.push({ name: picked.name || nextPath, absPath: nextPath });
-                await saveProjectContextDelta(projectsModalState.project, { extraFolders: existing });
+            try {
+              const picked = await window.__agProjectCall('pickFolder', {}, 120000);
+              if (!disposed && projectsModalState && picked && picked.ok && !picked.canceled && picked.folderPath) {
+                const nextPath = picked.folderPath;
+                if (nextPath !== projectsModalState.dirPath) {
+                  const saveRes = await saveProjectContextDelta(projectsModalState.project, (draft) => {
+                    const nextExtra = draft.extraFolders.slice();
+                    if (!nextExtra.some((f) => f.absPath === nextPath)) {
+                      nextExtra.push({
+                        name: picked.name || nextPath.split(/[\\/]/).pop() || nextPath,
+                        absPath: nextPath
+                      });
+                    }
+                    return Object.assign({}, draft, { extraFolders: nextExtra });
+                  });
+                  if (projectsModalState) {
+                    if (saveRes && saveRes.ok === false) {
+                      projectsModalState.error =
+                        L('关联文件夹保存失败：', 'Failed to link folder: ') + String(saveRes.error || 'unknown');
+                    } else {
+                      projectsModalState.folderPath = nextPath;
+                      projectsModalState.error = '';
+                    }
+                  }
+                } else if (projectsModalState) {
+                  projectsModalState.folderPath = nextPath;
+                  projectsModalState.error = '';
+                }
               }
-              if (projectsModalState) projectsModalState.folderPath = nextPath;
+            } catch (err) {
+              if (projectsModalState) {
+                projectsModalState.error =
+                  L('关联文件夹保存失败：', 'Failed to link folder: ') + String((err && err.message) || err);
+              }
             }
           }
           renderProjectScheduledModal();
@@ -7696,11 +7740,13 @@
   function refreshProjectsLanguageUi() {
     updateProjectsNavActiveVisual();
     if (projectsViewOpen) renderProjectsView();
-    if (projectsModalState) renderProjectContextModal();
+    if (projectsModalState) {
+      if (projectsModalState.kind === 'scheduled') renderProjectScheduledModal();
+      else renderProjectContextModal();
+    }
   }
 
   let sidebarHideScrollEl = null;
-  let lastAutoCollapseProjTs = 0;
 
   function parseVirtualTranslateY(el) {
     if (!el) return 0;
@@ -8792,7 +8838,17 @@
     if (needSync) scheduleSync();
   });
 
-  if (document.body) {
+  let bodyEnhancementsMounted = false;
+  let pendingBodyReadyCleanup = null;
+
+  function mountBodyEnhancements() {
+    if (disposed || bodyEnhancementsMounted || !document.body) return false;
+    bodyEnhancementsMounted = true;
+    window.__ag_custom_js_mounted = true;
+    if (pendingBodyReadyCleanup) {
+      pendingBodyReadyCleanup();
+      pendingBodyReadyCleanup = null;
+    }
     applyUiI18nState(FEAT.i18n);
     observer.observe(document.body, {
       subtree: true,
@@ -8801,11 +8857,41 @@
       attributeFilter: ['aria-expanded', 'class']
     });
     syncStepStream();
+    return true;
+  }
+
+  if (!mountBodyEnhancements()) {
+    const onBodyReady = () => {
+      mountBodyEnhancements();
+    };
+    window.addEventListener('DOMContentLoaded', onBodyReady, { once: true });
+    document.addEventListener('readystatechange', onBodyReady);
+    let docElObs = null;
+    if (typeof MutationObserver === 'function' && document.documentElement) {
+      docElObs = new MutationObserver(() => {
+        if (document.body) mountBodyEnhancements();
+      });
+      docElObs.observe(document.documentElement, { childList: true });
+    }
+    pendingBodyReadyCleanup = () => {
+      window.removeEventListener('DOMContentLoaded', onBodyReady);
+      document.removeEventListener('readystatechange', onBodyReady);
+      if (docElObs) {
+        docElObs.disconnect();
+        docElObs = null;
+      }
+    };
   }
 
   function dispose() {
     if (disposed) return;
     disposed = true;
+    window.__ag_custom_js_mounted = false;
+    if (pendingBodyReadyCleanup) {
+      pendingBodyReadyCleanup();
+      pendingBodyReadyCleanup = null;
+    }
+    projectComposerDrafts.clear();
     observer.disconnect();
     stopUxI18nObserver();
     for (const id of pendingRafs) cancelAnimationFrame(id);
