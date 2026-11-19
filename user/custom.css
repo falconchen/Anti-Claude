@@ -148,17 +148,20 @@ body[data-agy-font] :where(.font-sans),
   --ag-chat-font-size: 14px;
   text-autospace: normal !important;
   text-spacing-trim: normal !important;
+  -webkit-font-smoothing: antialiased !important;
+  -moz-osx-font-smoothing: grayscale !important;
 }
 
 /* AI response prose & lists: unified sans-serif 14px / 1.65 with orphan prevention & strict CJK line-break rules */
 :is([data-testid="planner-response-text"], [data-markdown-root], .select-text, .prose, .markdown, article),
-:is([data-testid="planner-response-text"], [data-markdown-root], .select-text, .prose, .markdown, article) :is(p, li, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, td, th) {
+:is([data-testid="planner-response-text"], [data-markdown-root], .select-text, .prose, .markdown, article) :is(p, li, ul, ol, blockquote, h1, h2, h3, h4, h5, h6, td, th, span, strong, b, em) {
   font-family: var(--font-sans) !important;
   font-variant-numeric: normal;
   letter-spacing: 0 !important;
   text-shadow: none !important;
   text-autospace: normal !important;
   text-spacing-trim: normal !important;
+  -webkit-font-smoothing: antialiased !important;
 }
 
 :is([data-testid="planner-response-text"], [data-markdown-root], .prose, .markdown) :is(p, li, blockquote) {
@@ -314,11 +317,11 @@ html:not([data-ag-theme-mode="dark"])[data-ag-preset] body:not(.dark) {
 
   --background: #FFFFFF !important;
   --content: #FFFFFF !important;
-  --foreground: #191918 !important;
+  --foreground: #141413 !important;
   --secondary: #F4F4F2 !important;
   --secondary-foreground: #52524E !important;
   --muted: #F6F6F4 !important;
-  --muted-foreground: #787774 !important;
+  --muted-foreground: #73726C !important;
   --placeholder: #8E8D88 !important;
 
   --sidebar: #F9F9F8 !important;
@@ -358,23 +361,23 @@ html:not([data-ag-theme-mode="dark"])[data-ag-preset] body:not(.dark) {
   --ag-seal-off-border: rgba(0, 0, 0, 0.10);
   --ag-composer-top-fg: #52524E;
   --ag-composer-top-hover-bg: rgba(0, 0, 0, 0.045);
-  --ag-composer-top-hover-fg: #191918;
+  --ag-composer-top-hover-fg: #141413;
   --ag-composer-ctrl-fg: #52524E;
-  --ag-send-btn-bg: #191918;
+  --ag-send-btn-bg: #141413;
   --ag-send-btn-hover-bg: #333330;
-  --ag-send-btn-border: #191918;
+  --ag-send-btn-border: #141413;
   --ag-send-btn-shadow: none;
 
-  --ag-sidebar-fg: #191918;
-  --ag-sidebar-row-fg: #191918;
-  --ag-sidebar-header-fg: #191918;
-  --ag-sidebar-header-title-fg: #191918;
-  --ag-sidebar-selected-fg: #191918;
+  --ag-sidebar-fg: #141413;
+  --ag-sidebar-row-fg: #141413;
+  --ag-sidebar-header-fg: #141413;
+  --ag-sidebar-header-title-fg: #141413;
+  --ag-sidebar-selected-fg: #141413;
   --ag-sidebar-muted-fg: #8E8D88;
-  --ag-menu-item-fg: #191918;
-  --ag-menu-header-fg: #787774;
-  --ag-dialog-title-fg: #191918;
-  --ag-dialog-item-fg: #191918;
+  --ag-menu-item-fg: #141413;
+  --ag-menu-header-fg: #73726C;
+  --ag-dialog-title-fg: #141413;
+  --ag-dialog-item-fg: #141413;
 }
 
 /* ============================================================================
@@ -481,7 +484,7 @@ html body .bg-sidebar :is([data-active="true"], [data-active=""]) span.truncate 
   line-height: 20px !important;
   letter-spacing: 0 !important;
   text-shadow: none !important;
-  color: var(--ag-sidebar-fg, #191918) !important;
+  color: var(--ag-sidebar-fg, #141413) !important;
   -webkit-font-smoothing: antialiased !important;
 }
 
@@ -496,7 +499,7 @@ html body .bg-sidebar :is([data-testid="conversation-row-sidebar"], .agy-sidebar
   text-shadow: none !important;
   opacity: 1 !important;
   color: var(--ag-sidebar-muted-fg, #8E8D88) !important;
-  -webkit-font-smoothing: subpixel-antialiased !important;
+  -webkit-font-smoothing: antialiased !important;
 }
 
 /* ============================================================================
@@ -733,7 +736,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-live-metrics-tooltip#a
 }
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-live-metrics-tooltip#ag-live-metrics-tooltip .ag-ux-tt-title {
-  color: #191918 !important;
+  color: #141413 !important;
 }
 
 :is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-tooltip#ag-live-metrics-tooltip .ag-ux-tt-title {
@@ -745,7 +748,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-live-metrics-tooltip#a
   font-size: 11.5px !important;
   font-weight: 400 !important;
   font-variant-numeric: tabular-nums !important;
-  -webkit-font-smoothing: subpixel-antialiased !important;
+  -webkit-font-smoothing: antialiased !important;
 }
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-live-metrics-tooltip#ag-live-metrics-tooltip .ag-ux-tt-badge,
@@ -783,7 +786,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-live-metrics-tooltip#a
   font-size: 12.5px !important;
   font-weight: 400 !important;
   flex-shrink: 0 !important;
-  -webkit-font-smoothing: subpixel-antialiased !important;
+  -webkit-font-smoothing: antialiased !important;
 }
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-live-metrics-tooltip#ag-live-metrics-tooltip .ag-ux-tt-lbl {
@@ -805,7 +808,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-live-metrics-tooltip#a
 }
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-live-metrics-tooltip#ag-live-metrics-tooltip .ag-ux-tt-val {
-  color: #191918 !important;
+  color: #141413 !important;
 }
 
 :is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-tooltip#ag-live-metrics-tooltip .ag-ux-tt-val {
@@ -1245,7 +1248,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) .ag-claude-todo-card > .ag
 }
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) .ag-claude-todo-card > .ag-claude-todo-row[data-status="in_progress"] .ag-claude-todo-label {
-  color: #191918 !important;
+  color: var(--foreground, #141413) !important;
 }
 
 :is(html[data-ag-theme-mode="dark"] body, body.dark) .ag-claude-todo-card > .ag-claude-todo-row[data-status="in_progress"] .ag-claude-todo-label {
@@ -1324,7 +1327,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) .ag-claude-todo-card > .ag
  * 3.10 设置界面质感精修（修复文字主次倒挂 · Google 官方蓝控件 · 左栏分界 · 版心居中）
  * ============================================================================ */
 
-/* 1) 修复船板 core/theme.css 第 478 行误把说明小字刷成浓黑加粗的 Bug，并舒展行留白 */
+/* 1) 原生设置卡片（.agy-card）与自绘「界面增强」面板 1:1 统一圆角、内边距、14px/500 行标题与 12.5px 次灰说明 */
 .agy-card {
   background-color: var(--card, #FFFFFF) !important;
   border-color: var(--card-border, rgba(0, 0, 0, 0.085)) !important;
@@ -1332,26 +1335,34 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) .ag-claude-todo-card > .ag
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02) !important;
 }
 
-.agy-card > div:not([class*="p-0"]) {
+.agy-card > div:not([class*="p-0"]):not(:has(> div.w-full.flex.justify-between)),
+.agy-card div.w-full.flex.justify-between.gap-4:not([class*="p-0"]) {
   padding: 13px 16px !important;
 }
 
-.agy-card > div > div.flex-1 > div:first-child > span:first-child:not([data-testid="settings-row-badge"]) {
-  font-size: 13.5px !important;
+.agy-card div.flex-1.flex-col > div.flex.items-center > span:first-child:not([data-testid="settings-row-badge"]):not(.text-muted-foreground),
+:is([role="dialog"]:has([data-testid="settings-sidebar"]), [data-split-root]:has([data-testid="settings-sidebar"])) button.rounded-xl :is(.font-semibold, .font-medium) {
+  font-family: var(--font-sans) !important;
+  font-size: 14px !important;
   font-weight: 500 !important;
-  color: var(--foreground, #191918) !important;
+  line-height: 1.4 !important;
+  color: var(--foreground, #141413) !important;
   letter-spacing: 0 !important;
   text-shadow: none !important;
+  -webkit-font-smoothing: antialiased !important;
 }
 
-[role="dialog"] :is(.agy-card, [class*="agy-card"], [class*="divide-border"]) span.text-sm.text-muted-foreground,
-.agy-card span.text-sm.text-muted-foreground {
+:is([role="dialog"], [data-split-root]) :is(.agy-card, [class*="agy-card"], [class*="divide-border"]) span.text-sm.text-muted-foreground,
+.agy-card span.text-sm.text-muted-foreground,
+:is([role="dialog"]:has([data-testid="settings-sidebar"]), [data-split-root]:has([data-testid="settings-sidebar"])) :is(p, span).text-sm.text-muted-foreground {
+  font-family: var(--font-sans) !important;
   font-size: 12.5px !important;
   font-weight: 400 !important;
-  line-height: 1.5 !important;
-  color: var(--muted-foreground, #787774) !important;
+  line-height: 1.48 !important;
+  color: var(--muted-foreground, #73726C) !important;
   letter-spacing: 0 !important;
   text-shadow: none !important;
+  -webkit-font-smoothing: antialiased !important;
 }
 
 /* 2) Switch 开关与音量滑块：启用 Google 官方强调色 (#2F75C3 / #2F71E3) 与精致白芯圆柄 */
@@ -1420,7 +1431,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sid
   line-height: 1.35 !important;
   letter-spacing: 0 !important;
   text-shadow: none !important;
-  -webkit-font-smoothing: subpixel-antialiased !important;
+  -webkit-font-smoothing: antialiased !important;
 }
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sidebar"] :is(h1, h2) {
@@ -1462,7 +1473,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sid
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sidebar"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-Account"]):not(.bg-sidebar-secondary),
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sidebar"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-Account"]):not(.bg-sidebar-secondary) span {
-  color: #191918 !important;
+  color: var(--foreground, #141413) !important;
 }
 
 :is(html[data-ag-theme-mode="dark"] body, body.dark) [data-testid="settings-sidebar"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-Account"]):not(.bg-sidebar-secondary),
@@ -1499,7 +1510,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sid
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sidebar"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-Account"]).bg-sidebar-secondary,
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sidebar"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-Account"]).bg-sidebar-secondary span {
-  color: #191918 !important;
+  color: var(--foreground, #141413) !important;
 }
 
 :is(html[data-ag-theme-mode="dark"] body, body.dark) [data-testid="settings-sidebar"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-Account"]).bg-sidebar-secondary,
@@ -1518,7 +1529,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sid
 [data-testid="settings-sidebar"] button[data-testid="settings-nav-item-Account"] div.flex-col > span:first-child {
   font-size: 13.5px !important;
   font-weight: 500 !important;
-  color: var(--foreground, #191918) !important;
+  color: var(--foreground, #141413) !important;
 }
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sidebar"] button[data-testid="settings-nav-item-Account"] div.flex-col > span:nth-child(2) {
@@ -1545,13 +1556,13 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sid
   letter-spacing: 0 !important;
   text-shadow: none !important;
   opacity: 1 !important;
-  -webkit-font-smoothing: subpixel-antialiased !important;
+  -webkit-font-smoothing: antialiased !important;
   color: #4A4A46 !important;
   text-decoration: none !important;
 }
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sidebar"] div.flex.flex-col.gap-0\.5 > button:hover {
-  color: #191918 !important;
+  color: var(--foreground, #141413) !important;
   background-color: #EFEFED !important;
 }
 
@@ -1572,23 +1583,28 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sid
   border-top-color: rgba(255, 255, 255, 0.085) !important;
 }
 
-/* 4) 右侧设置内容版心适度水平居中，优化三级标题阶梯（兼容弹窗与全屏视图两种挂载方式） */
-:is([role="dialog"]:has([data-testid="settings-sidebar"]), div:has(> [data-testid="settings-sidebar"]), div:has(> div > [data-testid="settings-sidebar"])) [class*="max-w-"] {
+/* 4) 右侧设置内容版心适度水平居中，统一大标题与分区小标题阶梯（兼容弹窗、[data-split-root] 与界面增强面板） */
+:is([role="dialog"]:has([data-testid="settings-sidebar"]), [data-split-root]:has([data-testid="settings-sidebar"]), div:has(> [data-testid="settings-sidebar"]), div:has(> div > [data-testid="settings-sidebar"])) [class*="max-w-"] {
   margin-left: auto !important;
   margin-right: auto !important;
 }
 
-:is([role="dialog"]:has([data-testid="settings-sidebar"]), div:has(> [data-testid="settings-sidebar"]), div:has(> div > [data-testid="settings-sidebar"])) h2.text-2xl {
+:is([role="dialog"]:has([data-testid="settings-sidebar"]), [data-split-root]:has([data-testid="settings-sidebar"]), div:has(> [data-testid="settings-sidebar"]), div:has(> div > [data-testid="settings-sidebar"]), #ag-claude-ux-settings-panel) h2.text-2xl {
+  font-family: var(--font-sans) !important;
   font-size: 20px !important;
   font-weight: 600 !important;
   letter-spacing: -0.01em !important;
+  color: var(--foreground, #141413) !important;
+  -webkit-font-smoothing: antialiased !important;
 }
 
-:is([role="dialog"]:has([data-testid="settings-sidebar"]), div:has(> [data-testid="settings-sidebar"]), div:has(> div > [data-testid="settings-sidebar"])) h3 {
+:is([role="dialog"]:has([data-testid="settings-sidebar"]), [data-split-root]:has([data-testid="settings-sidebar"]), div:has(> [data-testid="settings-sidebar"]), div:has(> div > [data-testid="settings-sidebar"]), #ag-claude-ux-settings-panel) h3 {
+  font-family: var(--font-sans) !important;
   font-size: 13px !important;
   font-weight: 600 !important;
-  color: var(--secondary-foreground, #3D3D3A) !important;
+  color: var(--secondary-foreground, #52524E) !important;
   letter-spacing: 0 !important;
+  -webkit-font-smoothing: antialiased !important;
 }
 
 /* ============================================================================
@@ -2719,7 +2735,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-recent-section 
   font-weight: 400 !important;
   letter-spacing: 0 !important;
   text-shadow: none !important;
-  -webkit-font-smoothing: subpixel-antialiased !important;
+  -webkit-font-smoothing: antialiased !important;
 }
 
 #ag-claude-recent-section .ag-recent-hdr {
@@ -2829,11 +2845,11 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-recent-section 
 }
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-recent-section .ag-recent-title {
-  color: #191918 !important;
+  color: var(--foreground, #141413) !important;
 }
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-recent-section .ag-recent-row[data-active="true"] .ag-recent-title {
-  color: #191918 !important;
+  color: var(--foreground, #141413) !important;
   font-weight: 400 !important;
 }
 
@@ -2891,7 +2907,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-recent-section 
   font-weight: 400 !important;
   letter-spacing: 0 !important;
   text-shadow: none !important;
-  -webkit-font-smoothing: subpixel-antialiased !important;
+  -webkit-font-smoothing: antialiased !important;
   cursor: pointer !important;
   transition: background-color 110ms ease, color 110ms ease !important;
 }
@@ -3116,13 +3132,34 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-recent-row-menu .ag-rm
   display: none !important;
 }
 
-[data-testid="settings-sidebar"][data-ag-claude-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-ClaudeUX"]).bg-sidebar-secondary {
+html body [data-testid="settings-sidebar"][data-ag-claude-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-ClaudeUX"]).bg-sidebar-secondary,
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sidebar"][data-ag-claude-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-ClaudeUX"]).bg-sidebar-secondary,
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [data-testid="settings-sidebar"][data-ag-claude-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-ClaudeUX"]).bg-sidebar-secondary {
   background-color: transparent !important;
   font-weight: 400 !important;
 }
 
-[data-testid="settings-sidebar"][data-ag-claude-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-ClaudeUX"]).bg-sidebar-secondary span {
+html body [data-testid="settings-sidebar"][data-ag-claude-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-ClaudeUX"]).bg-sidebar-secondary span,
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sidebar"][data-ag-claude-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-ClaudeUX"]).bg-sidebar-secondary span,
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [data-testid="settings-sidebar"][data-ag-claude-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-ClaudeUX"]).bg-sidebar-secondary span {
   font-weight: 400 !important;
+}
+
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sidebar"][data-ag-claude-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-ClaudeUX"]).bg-sidebar-secondary {
+  color: var(--foreground, #141413) !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [data-testid="settings-sidebar"][data-ag-claude-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-ClaudeUX"]).bg-sidebar-secondary,
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [data-testid="settings-sidebar"][data-ag-claude-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-ClaudeUX"]).bg-sidebar-secondary span {
+  color: #ECECEA !important;
+}
+
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sidebar"][data-ag-claude-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-ClaudeUX"]).bg-sidebar-secondary:hover {
+  background-color: #F2F2F2 !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [data-testid="settings-sidebar"][data-ag-claude-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-ClaudeUX"]).bg-sidebar-secondary:hover {
+  background-color: rgba(255, 255, 255, 0.06) !important;
 }
 
 #ag-claude-ux-settings-panel {
@@ -3130,6 +3167,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-recent-row-menu .ag-rm
   height: 100% !important;
   overflow-y: auto !important;
   font-family: var(--font-sans) !important;
+  -webkit-font-smoothing: antialiased !important;
 }
 
 .ag-cux-settings-wrap {
@@ -3142,18 +3180,19 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-recent-row-menu .ag-rm
 }
 
 .ag-cux-settings-group {
-  border-radius: 14px !important;
+  border-radius: 12px !important;
   overflow: hidden !important;
 }
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) .ag-cux-settings-group {
-  background-color: #FFFFFF !important;
-  border: 1px solid #EBEBEB !important;
+  background-color: var(--card, #FFFFFF) !important;
+  border: 1px solid var(--card-border, rgba(0, 0, 0, 0.085)) !important;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02) !important;
 }
 
 :is(html[data-ag-theme-mode="dark"] body, body.dark) .ag-cux-settings-group {
-  background-color: #252523 !important;
-  border: 1px solid rgba(255, 255, 255, 0.09) !important;
+  background-color: var(--card, #2A2A28) !important;
+  border: 1px solid var(--card-border, rgba(255, 255, 255, 0.10)) !important;
 }
 
 .ag-cux-settings-row {
@@ -3165,34 +3204,38 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) .ag-cux-settings-group {
 }
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) .ag-cux-settings-row + .ag-cux-settings-row {
-  border-top: 1px solid #F0F0EE !important;
+  border-top: 1px solid var(--border, rgba(0, 0, 0, 0.075)) !important;
 }
 
 :is(html[data-ag-theme-mode="dark"] body, body.dark) .ag-cux-settings-row + .ag-cux-settings-row {
-  border-top: 1px solid rgba(255, 255, 255, 0.065) !important;
+  border-top: 1px solid var(--border, rgba(255, 255, 255, 0.09)) !important;
 }
 
 .ag-cux-settings-title {
+  font-family: var(--font-sans) !important;
   font-size: 14px !important;
   font-weight: 500 !important;
   line-height: 1.4 !important;
-  color: #191918 !important;
+  color: var(--foreground, #141413) !important;
+  -webkit-font-smoothing: antialiased !important;
 }
 
 :is(html[data-ag-theme-mode="dark"] body, body.dark) .ag-cux-settings-title {
-  color: #ECECEA !important;
+  color: var(--foreground, #ECECEA) !important;
 }
 
 .ag-cux-settings-desc {
+  font-family: var(--font-sans) !important;
   font-size: 12.5px !important;
   font-weight: 400 !important;
-  line-height: 1.45 !important;
+  line-height: 1.48 !important;
   margin-top: 2px !important;
-  color: #676765 !important;
+  color: var(--muted-foreground, #73726C) !important;
+  -webkit-font-smoothing: antialiased !important;
 }
 
 :is(html[data-ag-theme-mode="dark"] body, body.dark) .ag-cux-settings-desc {
-  color: #9A9994 !important;
+  color: var(--muted-foreground, #8E8D88) !important;
 }
 
 .ag-cux-toast {
@@ -5631,7 +5674,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) .ag-cux-seg-btn[aria-check
 }
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sidebar"] #ag-settings-stats-toggle:not(.bg-sidebar-secondary) .ag-settings-stats-lbl {
-  color: #191918 !important;
+  color: var(--foreground, #141413) !important;
 }
 
 :is(html[data-ag-theme-mode="dark"] body, body.dark) [data-testid="settings-sidebar"] #ag-settings-stats-toggle:not(.bg-sidebar-secondary) .ag-settings-stats-lbl {
@@ -5686,7 +5729,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sid
   font-weight: 400 !important;
   line-height: 20px !important;
   letter-spacing: 0 !important;
-  color: #191918 !important;
+  color: var(--foreground, #141413) !important;
   -webkit-font-smoothing: antialiased !important;
 }
 
@@ -5713,7 +5756,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sid
 
 html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sidebar"] [data-ag-stats-subhdr="1"][data-ag-stats-active="true"] h2 {
   font-weight: 500 !important;
-  color: #191918 !important;
+  color: var(--foreground, #141413) !important;
 }
 
 :is(html[data-ag-theme-mode="dark"] body, body.dark) [data-testid="settings-sidebar"] [data-ag-stats-subhdr="1"][data-ag-stats-active="true"] {
