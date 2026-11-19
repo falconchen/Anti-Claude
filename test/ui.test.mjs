@@ -610,7 +610,8 @@ test('inline undo & edit: expands in-bubble editor, previews modified files, tog
 });
 
 test('sidebar folder status badges & top Recents: aggregates collapsed folders, sorts pending > running > recent, and navigates via router', { skip }, async () => {
-  const h = mount(`
+  const h = mount(
+    `
     <div class="sidebar-grand">
       <div class="sidebar-parent">
         <div data-testid="conversation-list-sidebar">
@@ -626,7 +627,9 @@ test('sidebar folder status badges & top Recents: aggregates collapsed folders, 
         </div>
       </div>
     </div>
-  `);
+  `,
+    { modules: { claudeUxRecentSection: true, claudeUxHideSidebarProjects: false } }
+  );
   let navigatedTo = null;
   const nowSec = Math.floor(Date.now() / 1000);
   const storeState = {
@@ -795,11 +798,17 @@ test('native Settings -> UI Enhancements panel: defaults to English and live-tog
   assert.equal(h.doc.getElementById('p-working').textContent, 'Working');
   assert.match(h.window.localStorage.getItem('ag_claude_ux_modules_v1') || '', /"i18n":false/);
 
-  const recentSwitch = panel.querySelector('[data-ag-cux-switch="claudeUxRecentSection"]');
-  assert.equal(recentSwitch.getAttribute('aria-checked'), 'true');
-  recentSwitch.click();
-  assert.equal(recentSwitch.getAttribute('aria-checked'), 'false');
-  assert.match(h.window.localStorage.getItem('ag_claude_ux_modules_v1') || '', /"claudeUxRecentSection":false/);
+  const projectsSwitch = panel.querySelector('[data-ag-cux-switch="claudeUxProjects"]');
+  assert.equal(projectsSwitch.getAttribute('aria-checked'), 'true');
+  projectsSwitch.click();
+  assert.equal(projectsSwitch.getAttribute('aria-checked'), 'false');
+  assert.match(h.window.localStorage.getItem('ag_claude_ux_modules_v1') || '', /"claudeUxProjects":false/);
+
+  const hideProjSwitch = panel.querySelector('[data-ag-cux-switch="claudeUxHideSidebarProjects"]');
+  assert.equal(hideProjSwitch.getAttribute('aria-checked'), 'true');
+  hideProjSwitch.click();
+  assert.equal(hideProjSwitch.getAttribute('aria-checked'), 'false');
+  assert.match(h.window.localStorage.getItem('ag_claude_ux_modules_v1') || '', /"claudeUxHideSidebarProjects":false/);
 
   h.doc.querySelector('button[data-testid="settings-nav-item-General"]').click();
   assert.equal(rightHost.hasAttribute('data-ag-claude-settings-open'), false, 'clicking native nav item restores native settings pane');
@@ -1361,5 +1370,544 @@ test('Home composer with top project/location bar mounts context ring beside mod
   assert.equal(ring.parentElement.id, 'home-bottom-row', 'ring mounts in bottom toolbar, not top project row');
   assert.equal(ring.previousElementSibling.id, 'model-wrap', 'ring sits immediately after model selector wrapper');
   h.cleanups.forEach((fn) => fn());
+  h.close();
+});
+
+test('quota popover: refreshes userTier after account switch and preserves specific Gemini model group names', { skip }, async () => {
+  const html = `
+    <div id="antigravity.agentSidePanelInputBox">
+      <div class="flex min-w-0 flex-1 items-center">
+        <div><button type="button" data-testid="model-selector-trigger">Gemini 4 Argon High</button></div>
+      </div>
+    </div>
+  `;
+  const h = mount(html);
+  const ib = h.doc.getElementById('antigravity.agentSidePanelInputBox');
+  let activeTier = { id: 'g1-ultra-tier', name: 'Google AI Ultra' };
+  let activeEmail = 'ultra@example.com';
+  let activeGroups = [
+    { displayName: 'Gemini Models', buckets: [{ window: '5h', remainingFraction: 0.9 }] },
+    { displayName: 'Claude and GPT models', buckets: [{ window: '5h', remainingFraction: 1 }] }
+  ];
+  let fetchCount = 0;
+  const fetchArgs = [];
+  ib.__reactFiber$q = {
+    dependencies: {
+      firstContext: {
+        memoizedValue: {
+          retrieveUserQuotaSummary: async (req, _opts) => {
+            fetchCount += 1;
+            fetchArgs.push(req);
+            return { groups: activeGroups };
+          },
+          get userStatus() {
+            return { email: activeEmail, userTier: activeTier };
+          }
+        }
+      }
+    }
+  };
+
+  h.window.__t.syncStepStream();
+  await settle(h);
+  const ring = h.doc.getElementById('ag-claude-ctx-ring');
+  ring.click();
+  await h.microtasks();
+
+  const pop = h.doc.getElementById('ag-claude-quota-popover');
+  assert.match(pop.querySelector('.ag-qp-tier').textContent, /Ultra/, 'shows initial Ultra tier');
+  assert.deepEqual(
+    [...pop.querySelectorAll('.ag-qp-tab')].map((b) => b.textContent.trim()),
+    ['Gemini', 'Claude / GPT']
+  );
+
+  /* Switch account in-place from Ultra to Pro with a dedicated Gemini 4 Argon quota group */
+  ring.click(); // close
+  activeTier = { id: 'g1-pro-tier', name: 'Google AI Pro' };
+  activeEmail = 'pro@example.com';
+  activeGroups = [
+    { displayName: 'Gemini Models', buckets: [{ window: '5h', remainingFraction: 1 }] },
+    { displayName: 'Claude and GPT models', buckets: [{ window: '5h', remainingFraction: 1 }] },
+    { displayName: 'Gemini 4 Argon', buckets: [{ window: 'weekly', remainingFraction: 0.7 }] }
+  ];
+
+  ring.click(); // reopen on new account
+  await h.microtasks();
+  assert.match(pop.querySelector('.ag-qp-tier').textContent, /Pro/, 'updates tier immediately to Pro on account switch');
+  assert.doesNotMatch(pop.querySelector('.ag-qp-tier').textContent, /Ultra/, 'no stale Ultra tier');
+  assert.ok(fetchCount >= 2, 'account switch invalidates stale quota cache and refetches');
+  assert.equal(fetchArgs[fetchArgs.length - 1]?.forceRefresh, true, 'passes protobuf { forceRefresh: true } to raw RPC client');
+  assert.deepEqual(
+    [...pop.querySelectorAll('.ag-qp-tab')].map((b) => b.textContent.trim()),
+    ['Gemini', 'Claude / GPT', 'Gemini 4 Argon'],
+    'specific Gemini model group keeps its distinct name instead of duplicating Gemini'
+  );
+  const activeTab = pop.querySelector('.ag-qp-tab[data-active="true"]');
+  assert.equal(activeTab.textContent.trim(), 'Gemini 4 Argon', 'selects dedicated Argon tab when Gemini 4 Argon is active');
+
+  h.cleanups.forEach((fn) => fn());
+  h.close();
+});
+
+test('projects workspace: 3-level Claude Projects flow (grid -> detail page with project chats & right Instructions/Context card -> chat navigation)', { skip }, async () => {
+  const html = `
+    <div class="bg-sidebar">
+      <div class="flex flex-col gap-1.5">
+        <a data-testid="new-conversation-button" href="/">New chat</a>
+        <button data-testid="automations-button" class="agy-button">Automations</button>
+        <a href="/customizations" class="agy-button">Skills &amp; Customizations</a>
+      </div>
+      <div data-testid="conversation-list-sidebar">
+        <div class="w-full relative" style="height: 220px;">
+          <div data-index="0" style="position: sticky; top: 0px;"><div data-testid="section-header">Pinned</div></div>
+          <div data-index="1" style="position: absolute; transform: translateY(24px);"><div data-testid="conversation-row-sidebar">Pinned chat</div></div>
+          <div data-index="2" style="position: absolute; transform: translateY(57px);"></div>
+          <div data-index="3" style="position: absolute; transform: translateY(73px);"><div data-testid="section-header"><span>Projects</span><button data-testid="sidebar-add-project-button"></button></div></div>
+          <div data-index="4" style="position: absolute; transform: translateY(97px);"></div>
+          <div data-index="5" style="position: absolute; transform: translateY(113px);"><div data-testid="section-header">Conversations</div></div>
+          <div data-index="6" style="position: absolute; transform: translateY(137px);"><div data-testid="conversation-row-sidebar">Regular chat</div></div>
+        </div>
+      </div>
+      <div data-testid="project-header" data-project-label="Quotation">Quotation</div>
+    </div>
+  `;
+  const h = mount(html);
+  const navigated = [];
+  const storeState = {
+    userStatus: {
+      cascadeModelConfigData: {
+        clientModelConfigs: [
+          { label: 'Gemini 4 Neon (High)', modelId: 'gemini-4-neon-high', modelOrAlias: { choice: { case: 'model', value: 1532 } } },
+          { label: 'Gemini 4 Neon (XHigh)', modelId: 'gemini-4-neon-xhigh', modelOrAlias: { choice: { case: 'model', value: 1535 } } },
+          { label: 'Gemini 4 Argon (High)', modelId: 'gemini-4-argon-high', modelOrAlias: { choice: { case: 'model', value: 1417 } } }
+        ]
+      }
+    },
+    modelSelection: {
+      default: { model: 1535 }
+    },
+    sidebarProjects: {
+      projects: [
+        { id: 'p-1', name: 'Quotation', folderUris: ['file:///Users/demo/Documents/Quotation'] },
+        { id: 'p-2', name: 'Legal Notes', folderUris: ['file:///Users/demo/Documents/Legal'] },
+        { id: 'default-cli-project', name: 'CLI Project', folderUris: [] }
+      ]
+    },
+    trajectorySummaries: {
+      summaries: {
+        'c-101': {
+          projectId: 'p-1',
+          summary: 'Switchgear BOM pricing',
+          lastModifiedTime: { seconds: Math.floor(Date.now() / 1000) - 300 },
+          annotations: { title: 'Switchgear BOM pricing' }
+        },
+        'c-102': {
+          projectId: 'p-2',
+          summary: 'Contract review',
+          lastModifiedTime: { seconds: Math.floor(Date.now() / 1000) - 600 },
+          annotations: { title: 'Contract review' }
+        }
+      },
+      indexes: {
+        byProject: { 'p-1': ['c-101'], 'p-2': ['c-102'] }
+      }
+    }
+  };
+  const hdr = h.doc.querySelector('[data-testid="project-header"]');
+  const sb = h.doc.querySelector('[data-testid="conversation-list-sidebar"]');
+  const dispatched = [];
+  const mockStore = {
+    getState: () => storeState,
+    subscribe: () => () => {},
+    dispatch: (act) => dispatched.push(act)
+  };
+  const mockRouter = {
+    state: { location: { pathname: '/c/old-chat', search: { project: 'outside-of-project' } } },
+    navigate: (opts) => {
+      navigated.push(opts);
+      if (opts && opts.to === '/') {
+        mockRouter.state.location = { pathname: '/', search: opts.search || {} };
+      }
+    }
+  };
+  const fiberNode = {
+    memoizedProps: {
+      sidebarStore: mockStore,
+      sidebarRouter: mockRouter
+    },
+    dependencies: {
+      firstContext: {
+        memoizedValue: {
+          store: mockStore
+        }
+      }
+    }
+  };
+  hdr.__reactFiber$p = fiberNode;
+  sb.__reactFiber$p = fiberNode;
+
+  let savedPayload = null;
+  let savedScheduledPayload = null;
+  const mockState = {
+    instructions: 'Always output prices in CNY.',
+    files: [{ name: 'price.md', relPath: '.anti-claude/files/price.md', size: 512, sizeText: '512 B', inlined: true }],
+    extraFolders: [],
+    scheduledTasks: []
+  };
+  h.window.__agProjectCall = async (action, payload) => {
+    if (action === 'listContexts') {
+      return {
+        ok: true,
+        contexts: {
+          '/Users/demo/Documents/Quotation': {
+            ok: true,
+            dirPath: '/Users/demo/Documents/Quotation',
+            ...mockState,
+            hasOtherAgentsMd: false,
+            lastModifiedMs: Date.now()
+          }
+        }
+      };
+    }
+    if (action === 'readContext') {
+      return {
+        ok: true,
+        dirPath: payload.dirPath,
+        ...mockState,
+        hasOtherAgentsMd: false,
+        lastModifiedMs: Date.now()
+      };
+    }
+    if (action === 'pickFolder') {
+      return { ok: true, canceled: false, folderPath: '/Volumes/GM7/CivilLaw/Guide', name: 'Guide' };
+    }
+    if (action === 'saveContext') {
+      savedPayload = payload;
+      mockState.instructions = payload.instructions;
+      mockState.extraFolders = payload.extraFolders || [];
+      return {
+        ok: true,
+        dirPath: payload.dirPath,
+        ...mockState,
+        hasOtherAgentsMd: false,
+        lastModifiedMs: Date.now()
+      };
+    }
+    if (action === 'saveScheduledTask') {
+      savedScheduledPayload = payload;
+      const t = { ...payload.task, id: 'ac-daily-briefing-1', sidecarId: payload.task.frequency !== 'manual' ? 'ac-daily-briefing-1' : '', syncedSidecar: payload.task.frequency !== 'manual' };
+      mockState.scheduledTasks = [t];
+      return {
+        ok: true,
+        dirPath: payload.dirPath,
+        ...mockState,
+        hasOtherAgentsMd: false,
+        lastModifiedMs: Date.now()
+      };
+    }
+    return { ok: false };
+  };
+
+  h.window.__t.syncStepStream();
+  await settle(h);
+
+  /* 1. Verify placement strictly between Automations and Skills */
+  const autoBtn = h.doc.querySelector('[data-testid="automations-button"]');
+  const skillsLink = h.doc.querySelector('a[href="/customizations"]');
+  const projBtn = h.doc.getElementById('ag-claude-projects-nav-btn');
+  assert.ok(projBtn, 'Projects nav button mounted');
+  assert.equal(autoBtn.nextElementSibling, projBtn, 'Projects nav sits directly after Automations');
+  assert.equal(projBtn.nextElementSibling, skillsLink, 'Projects nav sits directly before Skills & Customizations');
+  assert.ok(projBtn.querySelector('svg path[d*="M5.25 2.75"]'), 'renders Claude stacked-box SVG icon');
+
+  /* 1b. Verify unified Claude-style sidebar: native Projects & standalone Conversations hidden, Pinned kept to exact height, unified Recents mixes all project & standalone chats below */
+  const sbList = h.doc.querySelector('[data-testid="conversation-list-sidebar"] > div');
+  assert.equal(sb.getAttribute('data-ag-sb-unified'), 'pinned', 'keeps Pinned slice visible with exact height');
+  assert.equal(sb.style.getPropertyValue('--ag-sb-pinned-height'), '73px', 'measures exact 73px Pinned height');
+  assert.equal(sbList.querySelector('[data-index="0"]').hasAttribute('data-ag-sb-hide-proj'), false, 'Pinned header stays visible');
+  assert.equal(sbList.querySelector('[data-index="1"]').hasAttribute('data-ag-sb-hide-proj'), false, 'Pinned row stays visible');
+  assert.equal(sbList.querySelector('[data-index="3"]').getAttribute('data-ag-sb-hide-proj'), '1', 'native sidebar Projects header hidden');
+  assert.equal(sbList.querySelector('[data-index="4"]').getAttribute('data-ag-sb-hide-proj'), '1', 'native sidebar Projects spacer hidden');
+  assert.equal(sbList.querySelector('[data-index="5"]').getAttribute('data-ag-sb-hide-proj'), '1', 'native standalone Conversations header hidden');
+  assert.equal(sbList.querySelector('[data-index="6"]').getAttribute('data-ag-sb-hide-proj'), '1', 'native standalone Conversations rows hidden');
+  const unifiedSec = h.doc.getElementById('ag-claude-recent-section');
+  assert.ok(unifiedSec, 'unified Recents section mounted below Pinned');
+  assert.equal(unifiedSec.getAttribute('data-mode'), 'unified');
+  assert.equal(sb.nextElementSibling, unifiedSec, 'unified Recents sits directly after Pinned container');
+  const unifiedRows = [...unifiedSec.querySelectorAll('.ag-recent-row')];
+  assert.equal(unifiedRows.length, 2, 'unified Recents surfaces project conversations directly in sidebar');
+  assert.deepEqual(
+    unifiedRows.map((r) => r.getAttribute('data-ag-recent-id')),
+    ['c-101', 'c-102'],
+    'sorted newest-first across projects'
+  );
+  assert.match(unifiedRows[0].getAttribute('title') || '', /Project: Quotation/, 'row tooltip exposes owning project name');
+
+  /* 2. Level 1: Clicking opens Projects card grid (including CLI Project) */
+  projBtn.click();
+  await h.microtasks();
+  const view = h.doc.getElementById('ag-claude-projects-view');
+  assert.equal(view.getAttribute('data-open'), 'true');
+  const cards = [...view.querySelectorAll('.ag-proj-card')];
+  assert.equal(cards.length, 3, 'renders the 2 local projects plus CLI Project');
+  assert.match(cards[0].textContent, /Quotation/);
+  assert.ok(cards.some((c) => /CLI Project/.test(c.textContent)), 'CLI Project included in Projects workspace');
+
+  /* 3. Level 2: Clicking a card navigates into the Project Detail Page with composer, Recents & Instructions/Context card */
+  cards[0].click();
+  await h.microtasks();
+  assert.equal(view.querySelector('.ag-pd-crumb-cur').textContent.trim(), 'Quotation');
+  assert.ok(view.querySelector('#ag-pd-composer-input'), 'project quick-start composer rendered');
+  const chatRows = [...view.querySelectorAll('.ag-pd-chat-row')];
+  assert.equal(chatRows.length, 1, 'lists only conversations belonging to Quotation');
+  assert.match(chatRows[0].textContent, /Switchgear BOM pricing/);
+  assert.match(view.querySelector('.ag-pd-sidecard').textContent, /Always output prices in CNY/);
+  assert.match(view.querySelector('.ag-pd-sidecard').textContent, /price\.md/);
+
+  /* 4. Editing Instructions from the right-hand card saves via local RPC bridge */
+  view.querySelector('[data-ag-pd-edit-inst]').click();
+  await h.microtasks();
+  const modal = h.doc.getElementById('ag-claude-project-modal');
+  assert.ok(modal, 'instructions editor modal opened');
+  const ta = modal.querySelector('#ag-pm-instructions');
+  ta.value = 'Always output prices in CNY with tax breakdown.';
+  ta.dispatchEvent(new h.window.Event('input', { bubbles: true }));
+  modal.querySelector('[data-ag-pm-save]').click();
+  await h.microtasks();
+  assert.ok(savedPayload, 'saveContext RPC invoked');
+  assert.equal(savedPayload.instructions, 'Always output prices in CNY with tax breakdown.');
+  assert.equal(h.doc.getElementById('ag-claude-project-modal'), null, 'modal closes cleanly after save');
+
+  /* 4b. Adding an extra local folder from the composer dropdown persists it in extraFolders & switches active folder */
+  view.querySelector('[data-ag-pd-folder-toggle]').click();
+  const folderMenu = view.querySelector('[data-ag-pd-folder-menu]');
+  assert.ok(folderMenu, 'folder picker dropdown opened');
+  folderMenu.querySelector('[data-ag-pd-add-folder]').click();
+  await h.microtasks();
+  await h.microtasks();
+  assert.equal(savedPayload.extraFolders.length, 1, 'extra folder persisted via saveContext');
+  assert.equal(savedPayload.extraFolders[0].absPath, '/Volumes/GM7/CivilLaw/Guide');
+  assert.match(view.querySelector('[data-ag-pd-folder-toggle]').textContent, /Guide/, 'active folder trigger reflects newly added folder');
+
+  /* 4c. Right-hand Scheduled section opens Claude-style Create scheduled task modal and saves recurring task */
+  const schedAddBtn = view.querySelector('[data-ag-pd-add-sched]');
+  assert.ok(schedAddBtn, 'Scheduled + button mounted in right card');
+  schedAddBtn.click();
+  await h.microtasks();
+  const schedModal = h.doc.getElementById('ag-claude-project-modal');
+  assert.ok(schedModal, 'Create scheduled task modal opened');
+  assert.equal(schedModal.querySelector('[data-ag-sched-save]').disabled, true, 'Save disabled until required fields filled');
+  const setVal = (sel, val, ev = 'input') => {
+    const el = schedModal.querySelector(sel);
+    el.value = val;
+    el.dispatchEvent(new h.window.Event(ev, { bubbles: true }));
+  };
+  setVal('#ag-sched-name', 'daily-briefing');
+  setVal('#ag-sched-desc', 'Summarize quote updates');
+  setVal('#ag-sched-instructions', 'Check latest BOM prices and produce daily report.');
+  setVal('#ag-sched-freq', 'daily', 'change');
+  await h.microtasks();
+  const saveSchedBtn = h.doc.getElementById('ag-claude-project-modal').querySelector('[data-ag-sched-save]');
+  assert.equal(saveSchedBtn.disabled, false, 'Save enabled once required fields are filled');
+  saveSchedBtn.click();
+  await h.microtasks();
+  await h.microtasks();
+  assert.ok(savedScheduledPayload, 'saveScheduledTask RPC invoked');
+  assert.equal(savedScheduledPayload.task.name, 'daily-briefing');
+  assert.equal(savedScheduledPayload.task.frequency, 'daily');
+  assert.equal(h.doc.getElementById('ag-claude-project-modal'), null, 'scheduled modal closes cleanly after save');
+  assert.match(view.querySelector('[data-ag-pd-sched-sec]').textContent, /daily-briefing/, 'saved scheduled task rendered in right Scheduled section');
+  assert.ok(view.querySelector('[data-ag-pd-run-sched]'), 'Run now button rendered for scheduled task');
+
+  /* 4d. Submitting a prompt from Project Detail composer dispatches official project-binding actions & navigates with search.project */
+  const compInput = view.querySelector('#ag-pd-composer-input');
+  const pdModelBtn = view.querySelector('#ag-pd-model-btn');
+  assert.ok(pdModelBtn, 'interactive model selector button rendered in project composer');
+  assert.match(pdModelBtn.textContent, /Gemini 4 Neon/, 'model label resolves from Redux even without a native model-selector-trigger in DOM');
+  assert.match(pdModelBtn.textContent, /Extra/, 'effort label resolves from Redux default model');
+  pdModelBtn.dispatchEvent(new h.window.Event('pointerdown', { bubbles: true }));
+  const modelPop = h.doc.getElementById('ag-claude-model-popover');
+  assert.equal(modelPop && modelPop.getAttribute('data-open'), 'true', 'clicking project model button opens real Claude model popover purely via Redux fallback');
+  modelPop.querySelector('[data-ag-cm-family="Gemini 4 Argon"]').click();
+  assert.ok(
+    dispatched.some((a) => a && a.type === 'modelSelection/modelPicked' && a.payload && a.payload.model === 1417),
+    'selecting a model from project composer dispatches modelSelection/modelPicked'
+  );
+  assert.ok(view.querySelector('[data-ag-pd-composer-add]'), 'composer + add-file button rendered');
+  compInput.value = 'Draft quotation summary';
+  compInput.dispatchEvent(new h.window.Event('input', { bubbles: true }));
+  view.querySelector('[data-ag-pd-send]').click();
+  await h.microtasks();
+  assert.ok(
+    dispatched.some((a) => a && a.type === 'newConvoResourceSelector/setLastSelectedProject' && a.payload === 'p-1'),
+    'dispatches setLastSelectedProject(p-1)'
+  );
+  assert.ok(
+    dispatched.some((a) => a && a.type === 'newConvoResourceSelector/setMagicWorkspaceSelected' && a.payload === false),
+    'dispatches setMagicWorkspaceSelected(false)'
+  );
+  assert.ok(
+    navigated.some((n) => n && n.to === '/' && n.search && n.search.project === 'p-1'),
+    'navigates to / with search.project = p-1 so the new conversation belongs to the project'
+  );
+
+  /* Re-open project detail to verify Level 3 direct chat navigation */
+  projBtn.click();
+  await h.microtasks();
+  view.querySelectorAll('.ag-proj-card')[0].click();
+  await h.microtasks();
+
+  /* 5. Level 3: Clicking a conversation in Recents closes Projects view and navigates straight into that conversation */
+  view.querySelector('.ag-pd-chat-row').click();
+  assert.equal(view.getAttribute('data-open'), 'false', 'Projects overlay closes when opening a chat');
+  assert.ok(navigated.some((n) => JSON.stringify(n).includes('c-101')), 'navigated directly to project conversation c-101');
+
+  /* 6. Clean disposal */
+  h.cleanups.forEach((fn) => fn());
+  assert.equal(h.doc.getElementById('ag-claude-projects-nav-btn'), null, 'nav button removed on dispose');
+  assert.equal(h.doc.getElementById('ag-claude-projects-view'), null, 'projects view removed on dispose');
+  h.close();
+});
+
+test('unified sidebar Recents: mixes project & standalone chats without 8-item cap, supports pin/rename/archive/delete & direct project jump', { skip }, async () => {
+  const html = `
+    <div class="bg-sidebar">
+      <div class="flex flex-col gap-1.5">
+        <a data-testid="new-conversation-button" href="/">New chat</a>
+        <button data-testid="automations-button" class="agy-button">Automations</button>
+        <a href="/customizations" class="agy-button">Skills &amp; Customizations</a>
+      </div>
+      <div class="sb-grand flex-1 min-h-0 overflow-y-auto flex flex-col">
+        <div class="sb-parent w-full relative flex-1">
+          <div data-testid="conversation-list-sidebar">
+            <div class="w-full relative" style="height: 200px;">
+              <div data-index="0" style="position: absolute; transform: translateY(0px);"><div data-testid="section-header"><span>Projects</span><button data-testid="sidebar-add-project-button"></button></div></div>
+              <div data-index="1" style="position: absolute; transform: translateY(40px);"><div data-testid="section-header">Conversations</div></div>
+              <div data-index="2" style="position: absolute; transform: translateY(64px);"><div data-testid="conversation-row-sidebar">Standalone 1</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+  const h = mount(html);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const summaries = {};
+  for (let i = 1; i <= 10; i++) {
+    summaries[`c-${i}`] = {
+      annotations: { title: i === 1 ? 'Project Test Chat' : `Chat ${i}` },
+      lastModifiedTime: { seconds: nowSec - i * 60 },
+      trajectoryMetadata: { projectId: i % 2 === 1 ? 'p-law' : 'outside-of-project' },
+      status: 1
+    };
+  }
+  const storeState = {
+    sidebarProjects: {
+      projects: [{ id: 'p-law', name: '广州楚垚案', folderUris: ['file:///Users/demo/LawCase'] }]
+    },
+    trajectorySummaries: { summaries }
+  };
+  const mutations = [];
+  const deleted = [];
+  const navigated = [];
+  const sb = h.doc.querySelector('[data-testid="conversation-list-sidebar"]');
+  const sbParent = h.doc.querySelector('.sb-parent');
+  sb.firstElementChild.__reactFiber$sb = {
+    memoizedProps: {
+      sidebarStore: { getState: () => storeState, subscribe: () => () => {} },
+      sidebarRouter: {
+        state: { location: { pathname: '/c/c-1' } },
+        navigate: (arg) => navigated.push(arg)
+      },
+      sidebarActions: {
+        updateConversationAnnotations: async (id, patch, merge) => {
+          mutations.push({ id, patch, merge });
+        },
+        deleteCascadeTrajectory: async (id) => {
+          deleted.push(id);
+        }
+      }
+    }
+  };
+
+  h.window.__t.syncStepStream();
+  await settle(h);
+
+  /* Empty pinned section collapses wrapper cleanly */
+  assert.equal(sbParent.getAttribute('data-ag-sb-unified'), 'empty', 'collapses empty native wrapper when no Pinned chats exist');
+  const sec = h.doc.getElementById('ag-claude-recent-section');
+  assert.ok(sec, 'unified Recents mounted');
+  assert.equal(sec.getAttribute('data-mode'), 'unified');
+  assert.equal(sbParent.nextElementSibling, sec, 'unified Recents sits right after native wrapper inside sbGrand');
+
+  /* Shows all 10 mixed chats without 4/8 cap */
+  const rows = [...sec.querySelectorAll('.ag-recent-row')];
+  assert.equal(rows.length, 10, 'renders all 10 mixed project + standalone chats without old 4/8 cap');
+  assert.equal(rows[0].getAttribute('data-ag-recent-id'), 'c-1');
+  assert.match(rows[0].getAttribute('title') || '', /Project: 广州楚垚案/, 'shows owning project name in tooltip');
+
+  /* Inline hover Pin button */
+  rows[0].querySelector('[data-ag-recent-pin="c-1"]').click();
+  await h.microtasks();
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(mutations[0])),
+    { id: 'c-1', patch: { pinned: true }, merge: true },
+    'hover pin calls updateConversationAnnotations'
+  );
+
+  /* More menu: jump straight to owning project detail */
+  rows[0].querySelector('[data-ag-recent-menu="c-1"]').click();
+  const menu = h.doc.getElementById('ag-recent-row-menu');
+  assert.ok(menu, 'more menu opened');
+  const projItem = menu.querySelector('[data-ag-rm-act="open-project"]');
+  assert.ok(projItem, 'menu exposes owning project entry');
+  assert.match(projItem.textContent, /广州楚垚案/);
+  projItem.click();
+  await h.microtasks();
+  const view = h.doc.getElementById('ag-claude-projects-view');
+  assert.ok(view && view.getAttribute('data-open') === 'true', 'clicking project entry opens project detail view');
+  assert.match(view.querySelector('.ag-pd-crumb-cur').textContent, /广州楚垚案/);
+
+  /* Inline rename via menu */
+  rows[0].querySelector('[data-ag-recent-menu="c-1"]').click();
+  h.doc.querySelector('#ag-recent-row-menu [data-ag-rm-act="rename"]').click();
+  await settle(h);
+  const renameInput = sec.querySelector('[data-ag-recent-rename-input="c-1"]');
+  assert.ok(renameInput, 'inline rename input mounted');
+  renameInput.value = 'Renamed Case Chat';
+  renameInput.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await h.microtasks();
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(mutations[1])),
+    { id: 'c-1', patch: { title: 'Renamed Case Chat' }, merge: true },
+    'Enter commits rename'
+  );
+
+  /* Archive via menu */
+  sec.querySelector('[data-ag-recent-menu="c-2"]').click();
+  h.doc.querySelector('#ag-recent-row-menu [data-ag-rm-act="archive"]').click();
+  await h.microtasks();
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(mutations[2])),
+    { id: 'c-2', patch: { archived: true }, merge: true },
+    'archive updates annotations'
+  );
+
+  /* Two-step confirm delete via menu */
+  sec.querySelector('[data-ag-recent-menu="c-2"]').click();
+  const delBtn1 = h.doc.querySelector('#ag-recent-row-menu [data-ag-rm-act="delete"]');
+  delBtn1.click();
+  assert.equal(deleted.length, 0, 'first delete click arms confirmation instead of deleting immediately');
+  const delBtn2 = h.doc.querySelector('#ag-recent-row-menu [data-ag-rm-act="delete"]');
+  assert.equal(delBtn2.getAttribute('data-confirm'), '1');
+  delBtn2.click();
+  await h.microtasks();
+  assert.deepEqual(deleted, ['c-2'], 'second delete click calls deleteCascadeTrajectory');
+
+  /* Clean disposal */
+  h.cleanups.forEach((fn) => fn());
+  assert.equal(h.doc.getElementById('ag-claude-recent-section'), null);
+  assert.equal(h.doc.getElementById('ag-recent-row-menu'), null);
+  assert.equal(sbParent.hasAttribute('data-ag-sb-unified'), false);
   h.close();
 });

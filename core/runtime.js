@@ -815,6 +815,42 @@
     window.addEventListener('DOMContentLoaded', window.__ag_dcl_handler, { once: true });
   }
 
+  /* Local project context RPC bridge (via daemon CDP binding __agProjectRpc) */
+  if (!IS_SWARM_PLUGIN_FRAME) {
+    if (!(window.__ag_project_rpc_pending instanceof Map)) {
+      window.__ag_project_rpc_pending = new Map();
+    }
+    let rpcSeq = window.__ag_project_rpc_seq || 0;
+    window.__ag_project_rpc_resolve = (reqId, result) => {
+      const pending = window.__ag_project_rpc_pending.get(reqId);
+      if (!pending) return;
+      window.__ag_project_rpc_pending.delete(reqId);
+      clearTimeout(pending.timer);
+      pending.resolve(result);
+    };
+    window.__agProjectCall = (action, payload = {}, timeoutMs = 125000) => {
+      if (typeof window.__agProjectRpc !== 'function') {
+        return Promise.resolve({ ok: false, error: 'rpc_unavailable' });
+      }
+      const reqId = `prpc_${Date.now()}_${++rpcSeq}`;
+      window.__ag_project_rpc_seq = rpcSeq;
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          window.__ag_project_rpc_pending.delete(reqId);
+          resolve({ ok: false, error: 'rpc_timeout' });
+        }, timeoutMs);
+        window.__ag_project_rpc_pending.set(reqId, { resolve, timer });
+        try {
+          window.__agProjectRpc(JSON.stringify({ reqId, action, payload }));
+        } catch (err) {
+          clearTimeout(timer);
+          window.__ag_project_rpc_pending.delete(reqId);
+          resolve({ ok: false, error: String(err?.message || err) });
+        }
+      });
+    };
+  }
+
   /* Execute user/custom.js with unified ctx */
   window.__AG_PATCH_CTX__ = {
     version: PATCH_VERSION,
