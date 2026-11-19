@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * Anti-Claude — install.mjs
- * Zero-dependency CLI installer, step-stream unlocker, auto-updater, doctor & uninstaller (Node.js >= 22)
+ * Standalone, zero-dependency CLI installer, CDP daemon manager, step-stream unlocker,
+ * auto-updater, doctor & uninstaller (Node.js >= 22).
  *
  * Commands:
  *   node install.mjs install [--cli] [--cli-only] [--no-cli] [--no-cli-statusline] [--no-auto-update] [--no-step-unlock] [--no-agents-rule] [--overwrite-local]
@@ -11,12 +12,15 @@
  *   node install.mjs sync-fonts
  *   node install.mjs uninstall          Idempotent: a second run is a no-op
  *
- * State lives in ~/.gemini/antigravity/anti-claude/ (outside the upstream user/ dir;
- * legacy ~/.gemini/antigravity/claude-ux/ installs are migrated automatically):
+ * Everything lives under ~/.gemini/antigravity/anti-claude/ (zero external git/runtime dependencies):
+ *   user/                live config.json, custom.css, custom.js, i18n.override.json
  *   install-state.json   ownership of every file / setting this tool changed + sync timestamps
- *   backup/              pre-install originals of user/ files
+ *   backup/              pre-install originals of user/ files (when pre-existing)
  *   base/                last deployed template copies (3-way merge base, local-edit detection)
  *   incoming/            new template versions held back because the user edited the live file
+ *
+ * Legacy ~/.gemini/antigravity/theme-patch and com.antigravity.theme installations are migrated
+ * and retired automatically during install / sync-upgrade.
  *
  * Exit codes: 0 = ok / partial (see "status"), 1 = failed.
  */
@@ -25,7 +29,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -33,8 +37,6 @@ const __dirname = path.dirname(__filename);
 const HOME = os.homedir();
 const GEMINI_DIR = path.join(HOME, '.gemini');
 const AGY_DIR = path.join(GEMINI_DIR, 'antigravity');
-const THEME_PATCH_DIR = path.join(AGY_DIR, 'theme-patch');
-const THEME_USER_DIR = path.join(THEME_PATCH_DIR, 'user');
 const AGY_STATE_PBTXT = path.join(AGY_DIR, 'antigravity_state.pbtxt');
 const AGY_CONFIG_JSON = path.join(GEMINI_DIR, 'config', 'config.json');
 const AGENTS_MD = path.join(GEMINI_DIR, 'AGENTS.md');
@@ -44,32 +46,39 @@ const AGY_CLI_STATUSLINE_NAME = 'anti-claude-statusline.mjs';
 const AGY_CLI_STATUSLINE_FILE = path.join(AGY_CLI_DIR, AGY_CLI_STATUSLINE_NAME);
 
 const STATE_DIR = path.join(AGY_DIR, 'anti-claude');
+const USER_DIR = path.join(STATE_DIR, 'user');
 const STATE_FILE = path.join(STATE_DIR, 'install-state.json');
+const PID_FILE = path.join(STATE_DIR, 'daemon.pid');
 const BACKUP_DIR = path.join(STATE_DIR, 'backup');
 const BASE_DIR = path.join(STATE_DIR, 'base');
 const INCOMING_DIR = path.join(STATE_DIR, 'incoming');
 const LOCAL_SAVE_DIR = path.join(STATE_DIR, 'local-saves');
 const SYNC_LOG_FILE = path.join(STATE_DIR, 'auto-sync.log');
 const LAUNCHD_LOG_FILE = path.join(STATE_DIR, 'launchd.log');
+const DAEMON_LOG_FILE = path.join(STATE_DIR, 'daemon.log');
+const CORE_DAEMON_SCRIPT = path.join(__dirname, 'core', 'daemon.mjs');
 
-/* Legacy locations (v1 & pre-rename claude-ux), migrated automatically on first run */
-const LEGACY_V2_STATE_DIR = path.join(AGY_DIR, 'claude-ux');
-const LEGACY_V2_STATE_FILE = path.join(LEGACY_V2_STATE_DIR, 'install-state.json');
-const LEGACY_BACKUP_DIR = path.join(THEME_USER_DIR, '.backup-before-claude-ux');
-const LEGACY_SYNC_STATE_FILE = path.join(THEME_USER_DIR, '.claude-ux-sync-state.json');
-const LEGACY_SYNC_LOG_FILE = path.join(THEME_USER_DIR, 'auto-sync.log');
-
+/* Own LaunchAgent / background service identifiers */
+const DAEMON_LABEL = 'com.antigravity.anti-claude.daemon';
+const DAEMON_PLIST = path.join(HOME, 'Library', 'LaunchAgents', `${DAEMON_LABEL}.plist`);
 const AUTOSYNC_LABEL = 'com.antigravity.anti-claude.autosync';
 const AUTOSYNC_PLIST = path.join(HOME, 'Library', 'LaunchAgents', `${AUTOSYNC_LABEL}.plist`);
+
+/* Legacy paths (v1, pre-rename claude-ux, and retired upstream theme-patch) — migrated & cleaned up automatically */
+const LEGACY_V2_STATE_DIR = path.join(AGY_DIR, 'claude-ux');
+const LEGACY_V2_STATE_FILE = path.join(LEGACY_V2_STATE_DIR, 'install-state.json');
+const LEGACY_THEME_PATCH_DIR = path.join(AGY_DIR, 'theme-patch');
+const LEGACY_THEME_USER_DIR = path.join(LEGACY_THEME_PATCH_DIR, 'user');
+const LEGACY_BACKUP_DIR = path.join(LEGACY_THEME_USER_DIR, '.backup-before-claude-ux');
+const LEGACY_SYNC_STATE_FILE = path.join(LEGACY_THEME_USER_DIR, '.claude-ux-sync-state.json');
+const LEGACY_SYNC_LOG_FILE = path.join(LEGACY_THEME_USER_DIR, 'auto-sync.log');
 const LEGACY_AUTOSYNC_LABEL = 'com.antigravity.claude-ux.autosync';
 const LEGACY_AUTOSYNC_PLIST = path.join(HOME, 'Library', 'LaunchAgents', `${LEGACY_AUTOSYNC_LABEL}.plist`);
-const THEME_DAEMON_LABEL = 'com.antigravity.theme';
-const DAEMON_WRAPPER_FILE = path.join(AGY_DIR, 'scripts', 'antigravity-font-daemon.mjs');
-const AG2_SYNC_SCRIPT = path.join(AGY_DIR, 'scripts', 'sync-antigravity-2.mjs');
+const LEGACY_THEME_DAEMON_LABEL = 'com.antigravity.theme';
+const LEGACY_THEME_DAEMON_PLIST = path.join(HOME, 'Library', 'LaunchAgents', `${LEGACY_THEME_DAEMON_LABEL}.plist`);
+const LEGACY_DAEMON_WRAPPER_FILE = path.join(AGY_DIR, 'scripts', 'antigravity-font-daemon.mjs');
+const LEGACY_AG2_SYNC_SCRIPT = path.join(AGY_DIR, 'scripts', 'sync-antigravity-2.mjs');
 
-const UPSTREAM_REPO = 'https://github.com/Anarcadia/chuanban-antigravity-theme-patch.git';
-/* Verified upstream commit (v5.4.2). Bump deliberately after testing; override with ANTI_CLAUDE_UPSTREAM_REF=HEAD at your own risk. */
-const UPSTREAM_REF = process.env.ANTI_CLAUDE_UPSTREAM_REF || process.env.CLAUDE_UX_UPSTREAM_REF || '6b3783d2a5104e863084adfffea1d61f95838ead';
 const SELF_REPO = 'https://github.com/hongqi7/Anti-Claude.git';
 const RULE_BEGIN = '<!-- BEGIN anti-claude -->';
 const RULE_END = '<!-- END anti-claude -->';
@@ -163,9 +172,9 @@ export function threeWayMergeJson(base, local, remote) {
     const inB = Object.prototype.hasOwnProperty.call(base, k);
     const inL = Object.prototype.hasOwnProperty.call(local, k);
     const inR = Object.prototype.hasOwnProperty.call(remote, k);
-    if (inB && !inL) continue; // user deleted the key: respect it
+    if (inB && !inL) continue;
     if (inB && !inR) {
-      if (inL && !deepEqual(local[k], base[k])) out[k] = clone(local[k]); // template dropped it, user customised it
+      if (inL && !deepEqual(local[k], base[k])) out[k] = clone(local[k]);
       continue;
     }
     if (!inB) {
@@ -178,7 +187,7 @@ export function threeWayMergeJson(base, local, remote) {
   return out;
 }
 
-/** Parse the last top-level JSON object printed to stdout (upstream prints daemon logs before its JSON). */
+/** Parse the last top-level JSON object printed to stdout. */
 export function parseTrailingJson(text) {
   if (!text) return null;
   const s = String(text);
@@ -220,6 +229,14 @@ function appendSyncLog(msg) {
     const lines = prev ? prev.trim().split('\n').slice(-199) : [];
     lines.push(line);
     writeFileAtomic(SYNC_LOG_FILE, `${lines.join('\n')}\n`);
+  } catch {}
+}
+
+function removeDirIfEmpty(dirPath) {
+  try {
+    if (fs.existsSync(dirPath) && fs.readdirSync(dirPath).length === 0) {
+      fs.rmdirSync(dirPath);
+    }
   } catch {}
 }
 
@@ -359,7 +376,7 @@ function detectAntigravityCli() {
   };
 }
 
-/** Prefer a version-independent node path so `brew upgrade node` does not break the LaunchAgent. */
+/** Prefer a version-independent node path so `brew upgrade node` does not break LaunchAgents. */
 export function stableNodePath(execPath = process.execPath) {
   const candidates = ['/opt/homebrew/bin/node', '/usr/local/bin/node'];
   let realExec = execPath;
@@ -378,7 +395,7 @@ export function stableNodePath(execPath = process.execPath) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* State (ownership manifest)                                                 */
+/* State (ownership manifest) & Legacy Migration                              */
 /* -------------------------------------------------------------------------- */
 
 function newState() {
@@ -403,18 +420,18 @@ function migrateLegacyState() {
   state.migratedFrom = 'v1';
   fs.mkdirSync(BACKUP_DIR, { recursive: true });
   fs.mkdirSync(BASE_DIR, { recursive: true });
+  fs.mkdirSync(USER_DIR, { recursive: true });
   for (const f of USER_LAYER_FILES) {
     const legacyBak = path.join(LEGACY_BACKUP_DIR, f);
-    const live = path.join(THEME_USER_DIR, f);
+    const live = path.join(LEGACY_THEME_USER_DIR, f);
     const hasBak = hasLegacyBackup && fs.existsSync(legacyBak);
     if (hasBak) fs.copyFileSync(legacyBak, path.join(BACKUP_DIR, f));
     if (fs.existsSync(live)) {
-      /* v1 deployed whatever is live now; treat it as the merge base */
+      fs.copyFileSync(live, path.join(USER_DIR, f));
       fs.copyFileSync(live, path.join(BASE_DIR, f));
-      state.files[f] = { existedBefore: hasBak ? true : null, deployedSha: sha256File(live) };
+      state.files[f] = { existedBefore: false, deployedSha: sha256File(live) };
     }
   }
-  /* v1 did not record previous settings: unknown -> never auto-revert */
   state.settings = { legacyUnknown: true };
   if (legacySync) {
     state.installedAt = Number(legacySync.lastSyncAt) || state.installedAt;
@@ -455,6 +472,79 @@ function migrateLegacyV2State() {
   return legacyState;
 }
 
+/**
+ * Migrate live user customizations from legacy `~/.gemini/antigravity/theme-patch/user/`
+ * into `~/.gemini/antigravity/anti-claude/user/`, then retire the external `theme-patch`
+ * daemon, wrapper scripts, and directory.
+ */
+function retireLegacyThemePatch(state) {
+  const out = { migratedFiles: [], retiredDaemon: false, removedDir: false };
+  const hadLegacyUserDir = fs.existsSync(LEGACY_THEME_USER_DIR);
+  const hadExistingState = state && Object.keys(state.files || {}).length > 0;
+
+  if (hadLegacyUserDir && hadExistingState) {
+    fs.mkdirSync(USER_DIR, { recursive: true });
+    for (const f of USER_LAYER_FILES) {
+      const legacyLive = path.join(LEGACY_THEME_USER_DIR, f);
+      const newLive = path.join(USER_DIR, f);
+      if (!fs.existsSync(newLive) && fs.existsSync(legacyLive)) {
+        fs.copyFileSync(legacyLive, newLive);
+        out.migratedFiles.push(f);
+      }
+      /* Legacy backups were only stock upstream theme-patch files; once theme-patch is retired, uninstall should remove USER_DIR cleanly */
+      if (state.files[f] && !state.retiredThemePatch) {
+        state.files[f].existedBefore = false;
+        fs.rmSync(path.join(BACKUP_DIR, f), { force: true });
+      }
+    }
+    state.retiredThemePatch = true;
+  }
+
+  /* Stop legacy com.antigravity.theme LaunchAgent / Windows VBS / PID if present */
+  if (process.platform === 'darwin' && fs.existsSync(LEGACY_THEME_DAEMON_PLIST)) {
+    if (!NO_LAUNCHD) {
+      const uid = typeof process.getuid === 'function' ? process.getuid() : 501;
+      try {
+        execFileSync('launchctl', ['bootout', `gui/${uid}`, LEGACY_THEME_DAEMON_PLIST], { stdio: 'ignore' });
+      } catch {}
+    }
+    fs.rmSync(LEGACY_THEME_DAEMON_PLIST, { force: true });
+    out.retiredDaemon = true;
+  } else if (process.platform === 'win32' && !NO_LAUNCHD) {
+    const appData = process.env.APPDATA || path.join(HOME, 'AppData', 'Roaming');
+    const legacyVbs = path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'AntigravityThemeDaemon.vbs');
+    if (fs.existsSync(legacyVbs)) {
+      fs.rmSync(legacyVbs, { force: true });
+      out.retiredDaemon = true;
+    }
+  }
+
+  const legacyPidFile = path.join(AGY_DIR, 'theme-daemon.pid');
+  if (fs.existsSync(legacyPidFile)) {
+    const pid = parseInt(readTextSafe(legacyPidFile) || '0', 10);
+    if (pid > 0 && !NO_LAUNCHD) {
+      try {
+        process.kill(pid, 'SIGTERM');
+      } catch {}
+    }
+    fs.rmSync(legacyPidFile, { force: true });
+    out.retiredDaemon = true;
+  }
+
+  for (const oldScript of [LEGACY_DAEMON_WRAPPER_FILE, LEGACY_AG2_SYNC_SCRIPT]) {
+    if (fs.existsSync(oldScript)) {
+      fs.rmSync(oldScript, { force: true });
+    }
+  }
+  removeDirIfEmpty(path.join(AGY_DIR, 'scripts'));
+
+  if (fs.existsSync(LEGACY_THEME_PATCH_DIR)) {
+    fs.rmSync(LEGACY_THEME_PATCH_DIR, { recursive: true, force: true });
+    out.removedDir = true;
+  }
+  return out;
+}
+
 function loadState() {
   const st = readJsonSafe(STATE_FILE, null);
   if (st && st.schema === STATE_SCHEMA) return st;
@@ -466,65 +556,24 @@ function saveState(state) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Source validation & repos                                                  */
+/* Source validation & git self-pull                                          */
 /* -------------------------------------------------------------------------- */
 
 function validateSourceRoot(root = __dirname) {
   const problems = [];
-  for (const rel of ['install.mjs', 'user/custom.js', 'cli/statusline.mjs']) {
+  for (const rel of ['install.mjs', 'core/daemon.mjs', 'core/runtime.js', 'user/custom.js', 'cli/statusline.mjs']) {
     try {
       execFileSync(process.execPath, ['--check', path.join(root, rel)], { stdio: 'pipe' });
     } catch (err) {
       problems.push(`${rel}: ${String(err.stderr || err.message).split('\n')[0]}`);
     }
   }
-  for (const rel of ['user/config.json', 'user/i18n.override.json']) {
+  for (const rel of ['core/i18n.json', 'user/config.json', 'user/i18n.override.json']) {
     if (readJsonSafe(path.join(root, rel), undefined) === undefined) problems.push(`${rel}: invalid JSON`);
   }
+  if (!fs.existsSync(path.join(root, 'core', 'base.css'))) problems.push('core/base.css missing');
   if (!fs.existsSync(path.join(root, 'rules', 'claude-execution-sync.md'))) problems.push('rules/claude-execution-sync.md missing');
   return { ok: problems.length === 0, problems };
-}
-
-function cloneUpstreamAtRef(tmpDir, quiet) {
-  const stdio = quiet ? 'pipe' : 'inherit';
-  if (UPSTREAM_REF === 'HEAD') {
-    execFileSync('git', ['clone', '--depth', '1', UPSTREAM_REPO, tmpDir], { stdio, timeout: 30000 });
-    return;
-  }
-  execFileSync('git', ['init', '-q', tmpDir], { stdio, timeout: 10000 });
-  execFileSync('git', ['-C', tmpDir, 'fetch', '--depth', '1', '--quiet', UPSTREAM_REPO, UPSTREAM_REF], { stdio, timeout: 30000 });
-  execFileSync('git', ['-C', tmpDir, 'checkout', '-q', 'FETCH_HEAD'], { stdio, timeout: 10000 });
-}
-
-/**
- * Install the upstream core if missing; with `upgrade`, move it to the pinned ref only when the pinned
- * manifest version is newer than the local one (never downgrades a manually upgraded core).
- */
-function ensureUpstreamCore({ upgrade = false } = {}) {
-  const upstreamEntry = path.join(THEME_PATCH_DIR, 'install.mjs');
-  const localInstalled = fs.existsSync(upstreamEntry);
-  if (localInstalled && (!upgrade || NO_NETWORK)) return { installed: true, upgraded: false };
-  if (!localInstalled && NO_NETWORK) throw new Error('upstream core missing and CLAUDE_UX_NO_NETWORK=1');
-
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chuanban-base-'));
-  try {
-    cloneUpstreamAtRef(tmpDir, localInstalled);
-    const remoteVer = readJsonSafe(path.join(tmpDir, 'core', 'manifest.json'), {})?.version;
-    const localVer = readJsonSafe(path.join(THEME_PATCH_DIR, 'core', 'manifest.json'), {})?.version;
-    if (localInstalled && compareSemver(remoteVer, localVer) <= 0) {
-      return { installed: true, upgraded: false, upToDate: true, localVersion: localVer, pinnedVersion: remoteVer };
-    }
-    execFileSync(process.execPath, [path.join(tmpDir, 'install.mjs'), 'install'], {
-      stdio: localInstalled ? 'pipe' : 'inherit',
-      timeout: 60000
-    });
-    return { installed: true, upgraded: localInstalled, freshInstall: !localInstalled, ref: UPSTREAM_REF, version: remoteVer };
-  } catch (err) {
-    if (localInstalled) return { installed: true, upgraded: false, error: String(err?.message || err).split('\n')[0] };
-    throw err;
-  } finally {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
 }
 
 function pullSelfRepoIfGit() {
@@ -773,7 +822,7 @@ function injectAgentsMdRule(state, { allowInsert }) {
     return next !== existing ? 'updated_marked_block' : 'unchanged';
   }
   if (existing.includes(LEGACY_HEADING)) return 'already_present_unmarked';
-  if (!allowInsert) return 'absent_respected'; // user removed it: background sync never re-adds
+  if (!allowInsert) return 'absent_respected';
   const sep = existing.trim() ? '\n\n---\n\n' : '';
   writeFileAtomic(AGENTS_MD, `${ruleBlock}${sep}${existing}`);
   state.agentsRule = { inserted: true };
@@ -793,24 +842,24 @@ function removeAgentsMdRule() {
 }
 
 /* -------------------------------------------------------------------------- */
-/* User layer deploy / restore                                                */
+/* User layer deploy / restore (`~/.gemini/antigravity/anti-claude/user/`)    */
 /* -------------------------------------------------------------------------- */
 
 function deployFile(f, text, state) {
-  writeFileAtomic(path.join(THEME_USER_DIR, f), text);
+  writeFileAtomic(path.join(USER_DIR, f), text);
   writeFileAtomic(path.join(BASE_DIR, f), text);
   state.files[f].deployedSha = sha256Text(text);
   fs.rmSync(path.join(INCOMING_DIR, f), { force: true });
 }
 
 function installUserLayer(state, { sourceRoot = __dirname, overwriteLocal = false } = {}) {
-  fs.mkdirSync(THEME_USER_DIR, { recursive: true });
+  fs.mkdirSync(USER_DIR, { recursive: true });
   const result = { created: [], updated: [], merged: [], conflicts: [], unchanged: [] };
   for (const f of USER_LAYER_FILES) {
     const src = path.join(sourceRoot, 'user', f);
     const srcText = readTextSafe(src);
     if (srcText === null) continue;
-    const dst = path.join(THEME_USER_DIR, f);
+    const dst = path.join(USER_DIR, f);
     const localText = readTextSafe(dst);
     let entry = state.files[f];
 
@@ -852,7 +901,7 @@ function installUserLayer(state, { sourceRoot = __dirname, overwriteLocal = fals
         const merged = threeWayMergeJson(JSON.parse(baseText), JSON.parse(localText), JSON.parse(srcText));
         const mergedText = `${JSON.stringify(merged, null, 2)}\n`;
         if (mergedText !== localText) writeFileAtomic(dst, mergedText);
-        writeFileAtomic(path.join(BASE_DIR, f), srcText); // base tracks the template, local keeps user overrides
+        writeFileAtomic(path.join(BASE_DIR, f), srcText);
         entry.deployedSha = sha256Text(mergedText);
         result.merged.push(f);
         continue;
@@ -874,7 +923,7 @@ function restoreUserLayer(state) {
   for (const f of USER_LAYER_FILES) {
     const entry = state.files?.[f];
     if (!entry) continue;
-    const dst = path.join(THEME_USER_DIR, f);
+    const dst = path.join(USER_DIR, f);
     const cur = readTextSafe(dst);
     const base = readTextSafe(path.join(BASE_DIR, f));
     if (cur !== null && base !== null && cur !== base) {
@@ -884,6 +933,7 @@ function restoreUserLayer(state) {
     }
     const bak = path.join(BACKUP_DIR, f);
     if (entry.existedBefore === true && fs.existsSync(bak)) {
+      fs.mkdirSync(USER_DIR, { recursive: true });
       fs.copyFileSync(bak, dst);
       out.restored.push(f);
     } else if (entry.existedBefore === false) {
@@ -899,15 +949,23 @@ function restoreUserLayer(state) {
   return out;
 }
 
-function runUpstreamVerify() {
-  const upstreamEntry = path.join(THEME_PATCH_DIR, 'install.mjs');
-  if (!fs.existsSync(upstreamEntry)) return { ok: false, reason: 'upstream_missing' };
+function runLiveVerify() {
+  const fakeEnv = process.env.ANTI_CLAUDE_FAKE_VERIFY_OK ?? process.env.FAKE_VERIFY_OK;
+  if (NO_CDP && fakeEnv === undefined) {
+    return { ok: true, skipped: 'cdp_disabled' };
+  }
+  if (!fs.existsSync(CORE_DAEMON_SCRIPT)) {
+    return { ok: false, reason: 'core_daemon_missing' };
+  }
   let stdout = '';
   let exitStatus = 0;
+  const env = Object.assign({}, process.env);
+  if (fakeEnv !== undefined) env.ANTI_CLAUDE_FAKE_VERIFY_OK = String(fakeEnv);
   try {
-    stdout = execFileSync(process.execPath, [upstreamEntry, 'verify'], {
+    stdout = execFileSync(process.execPath, [CORE_DAEMON_SCRIPT, '--verify-once', '--user-dir', USER_DIR], {
       encoding: 'utf8',
       timeout: 20000,
+      env,
       stdio: ['ignore', 'pipe', 'pipe']
     });
   } catch (err) {
@@ -922,157 +980,216 @@ function runUpstreamVerify() {
     ok,
     exitStatus,
     themeStyle: parsed.themeStyle ?? null,
+    customStyle: parsed.customStyle ?? null,
     reachable: parsed.live?.reachable ?? null,
     reason: ok ? undefined : parsed.live?.reachable === false ? 'app_not_running_or_unreachable' : 'verify_reported_not_ok'
   };
 }
 
-/* -------------------------------------------------------------------------- */
-/* macOS LaunchAgent & Antigravity 2.33+ CDP Bootstrap Wrapper                */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Antigravity 2.33.0+ stopped appending `--remote-debugging-port=0` by default in C++,
- * and modifying `/Applications/Antigravity.app` breaks Google's Developer ID signature
- * (Gatekeeper + Squirrel.Mac auto-updates). Instead, wrap `antigravity-font-daemon.mjs`
- * with a zero-overhead check: when `DevToolsActivePort` is missing and a freshly launched
- * (`<= 25s` old) `/Applications/Antigravity.app` main process is running without
- * `--remote-debugging-port`, gracefully relaunch it with `--args --remote-debugging-port=0`.
- * Long-running sessions (`> 25s`) are never interrupted.
- */
-function ensureMacCdpBootstrapWrapper() {
-  if (process.platform !== 'darwin') return { skipped: 'not_darwin' };
-  const coreDaemonPath = path.join(THEME_PATCH_DIR, 'core', 'daemon.mjs');
-  if (!fs.existsSync(coreDaemonPath)) return { skipped: 'core_daemon_missing' };
-  const coreUrl = `file://${coreDaemonPath}`;
-  const wrapperSrc = `#!/usr/bin/env node
-// Auto-generated wrapper -> ${coreDaemonPath} (with Antigravity 2.33.0+ CDP bootstrap)
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
-import { execFile } from 'node:child_process';
-
-if (process.platform === 'darwin' && !process.argv.includes('--once')) {
-  const portFile = path.join(os.homedir(), 'Library', 'Application Support', 'Antigravity', 'DevToolsActivePort');
-  const mainBin = '/Applications/Antigravity.app/Contents/MacOS/Antigravity';
-  let busy = false;
-  let lastRelaunchAt = 0;
-
-  const parseEtimeSec = (raw) => {
-    const s = String(raw || '').trim();
-    let days = 0;
-    let rest = s;
-    if (s.includes('-')) {
-      const [d, r] = s.split('-', 2);
-      days = parseInt(d, 10) || 0;
-      rest = r;
-    }
-    const parts = rest.split(':').map((x) => parseInt(x, 10) || 0);
-    if (parts.length === 3) return days * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2];
-    if (parts.length === 2) return days * 86400 + parts[0] * 60 + parts[1];
-    return Infinity;
-  };
-
-  const checkFreshLaunch = () => {
-    if (busy || fs.existsSync(portFile) || Date.now() - lastRelaunchAt < 25000) return;
-    busy = true;
-    execFile('ps', ['-axo', 'pid=,etime=,command='], { timeout: 2500 }, (err, stdout) => {
-      if (err || !stdout) {
-        busy = false;
-        return;
-      }
-      let targetPid = 0;
-      let targetAge = Infinity;
-      for (const line of String(stdout).split('\\n')) {
-        const m = line.trim().match(/^(\\d+)\\s+(\\S+)\\s+(.+)$/);
-        if (!m) continue;
-        const pid = Number(m[1]);
-        const age = parseEtimeSec(m[2]);
-        const cmd = m[3];
-        if ((cmd === mainBin || cmd.startsWith(mainBin + ' ')) && !cmd.includes('--remote-debugging-port')) {
-          targetPid = pid;
-          targetAge = age;
-          break;
-        }
-      }
-      if (!targetPid || targetAge > 25) {
-        busy = false;
-        return;
-      }
-      lastRelaunchAt = Date.now();
-      console.log(\`[CDP-Bootstrap] Relaunching fresh Antigravity (PID \${targetPid}, age=\${targetAge}s) with --remote-debugging-port=0\`);
-      try {
-        process.kill(targetPid, 'SIGTERM');
-      } catch {
-        busy = false;
-        return;
-      }
-      const deadline = Date.now() + 4500;
-      const waitExit = () => {
-        let alive = false;
-        try {
-          process.kill(targetPid, 0);
-          alive = true;
-        } catch {}
-        if (alive && Date.now() < deadline) {
-          setTimeout(waitExit, 120);
-          return;
-        }
-        execFile('/usr/bin/open', ['-a', '/Applications/Antigravity.app', '--args', '--remote-debugging-port=0'], () => {
-          busy = false;
-        });
-      };
-      setTimeout(waitExit, 150);
+function runLiveTeardownOnce() {
+  if (NO_CDP || !fs.existsSync(CORE_DAEMON_SCRIPT)) return { skipped: true };
+  const tmpTeardownDir = fs.mkdtempSync(path.join(os.tmpdir(), 'anti-claude-teardown-'));
+  try {
+    fs.writeFileSync(path.join(tmpTeardownDir, 'config.json'), JSON.stringify({ enabled: false }), 'utf8');
+    execFileSync(process.execPath, [CORE_DAEMON_SCRIPT, '--once', '--user-dir', tmpTeardownDir], {
+      timeout: 8000,
+      stdio: 'ignore'
     });
-  };
-
-  setInterval(checkFreshLaunch, 1200).unref();
-  checkFreshLaunch();
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  } finally {
+    fs.rmSync(tmpTeardownDir, { recursive: true, force: true });
+  }
 }
 
-await import(${JSON.stringify(coreUrl)});
+/* -------------------------------------------------------------------------- */
+/* Standalone Core Daemon & Auto-Update Service Management                    */
+/* -------------------------------------------------------------------------- */
+
+function getWinStartupVbsPath() {
+  const appData = process.env.APPDATA || path.join(HOME, 'AppData', 'Roaming');
+  return path.join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup', 'Anti-Claude-Daemon.vbs');
+}
+
+function getLinuxSystemdUnitPath() {
+  return path.join(HOME, '.config', 'systemd', 'user', 'anti-claude-daemon.service');
+}
+
+function spawnDetachedDaemon(nodePath) {
+  const child = spawn(nodePath, [CORE_DAEMON_SCRIPT, '--user-dir', USER_DIR], {
+    detached: true,
+    windowsHide: true,
+    stdio: 'ignore'
+  });
+  child.unref();
+  return child.pid;
+}
+
+function ensureCoreDaemon() {
+  if (NO_LAUNCHD) return { ok: true, skipped: 'launchd_disabled' };
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  fs.mkdirSync(USER_DIR, { recursive: true });
+  const nodePath = stableNodePath();
+
+  if (process.platform === 'darwin') {
+    const tmpRoot = fs.realpathSync(os.tmpdir());
+    if (fs.realpathSync(__dirname).startsWith(tmpRoot)) {
+      const pid = spawnDetachedDaemon(nodePath);
+      return { ok: true, mode: 'detached_temp', pid };
+    }
+    fs.mkdirSync(path.dirname(DAEMON_PLIST), { recursive: true });
+    const envPath = Array.from(
+      new Set(['/opt/homebrew/bin', '/usr/local/bin', path.dirname(nodePath), '/usr/bin', '/bin', '/usr/sbin', '/sbin'])
+    ).join(':');
+    const plistXml = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${DAEMON_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${xmlEscape(nodePath)}</string>
+    <string>${xmlEscape(CORE_DAEMON_SCRIPT)}</string>
+    <string>--user-dir</string>
+    <string>${xmlEscape(USER_DIR)}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${xmlEscape(envPath)}</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <key>StandardOutPath</key>
+  <string>${xmlEscape(DAEMON_LOG_FILE)}</string>
+  <key>StandardErrorPath</key>
+  <string>${xmlEscape(DAEMON_LOG_FILE)}</string>
+</dict>
+</plist>
 `;
-  const prev = readTextSafe(DAEMON_WRAPPER_FILE);
-  if (prev === wrapperSrc) return { ok: true, updated: false };
-  writeFileAtomic(DAEMON_WRAPPER_FILE, wrapperSrc);
-  try {
-    fs.chmodSync(DAEMON_WRAPPER_FILE, 0o755);
-  } catch {}
-  if (!NO_LAUNCHD) {
+    writeFileAtomic(DAEMON_PLIST, plistXml);
     const uid = typeof process.getuid === 'function' ? process.getuid() : 501;
     try {
-      execFileSync('launchctl', ['kickstart', '-k', `gui/${uid}/${THEME_DAEMON_LABEL}`], { stdio: 'ignore' });
+      execFileSync('launchctl', ['bootout', `gui/${uid}`, DAEMON_PLIST], { stdio: 'ignore' });
     } catch {}
-  }
-  return { ok: true, updated: true };
-}
-
-function restorePlainDaemonWrapper() {
-  if (process.platform !== 'darwin') return { skipped: 'not_darwin' };
-  const coreDaemonPath = path.join(THEME_PATCH_DIR, 'core', 'daemon.mjs');
-  if (!fs.existsSync(DAEMON_WRAPPER_FILE) || !fs.existsSync(coreDaemonPath)) return { restored: false };
-  const plain = `#!/usr/bin/env node\n// Auto-generated wrapper -> ${coreDaemonPath}\nawait import(${JSON.stringify(`file://${coreDaemonPath}`)});\n`;
-  writeFileAtomic(DAEMON_WRAPPER_FILE, plain);
-  if (!NO_LAUNCHD) {
-    const uid = typeof process.getuid === 'function' ? process.getuid() : 501;
     try {
-      execFileSync('launchctl', ['kickstart', '-k', `gui/${uid}/${THEME_DAEMON_LABEL}`], { stdio: 'ignore' });
-    } catch {}
+      execFileSync('launchctl', ['bootstrap', `gui/${uid}`, DAEMON_PLIST], { stdio: 'pipe' });
+      execFileSync('launchctl', ['kickstart', '-k', `gui/${uid}/${DAEMON_LABEL}`], { stdio: 'ignore' });
+    } catch (err) {
+      return { ok: false, reason: `launchctl_bootstrap_failed: ${String(err?.stderr || err?.message).trim()}`, plist: DAEMON_PLIST };
+    }
+    return { ok: true, label: DAEMON_LABEL, plist: DAEMON_PLIST, node: nodePath };
   }
-  return { restored: true };
+
+  if (process.platform === 'win32') {
+    const vbsPath = getWinStartupVbsPath();
+    const q = (s) => String(s).replace(/"/g, '""');
+    const vbs = `Set sh = CreateObject("WScript.Shell")\r\nsh.Run """${q(nodePath)}"" ""${q(CORE_DAEMON_SCRIPT)}"" --user-dir ""${q(USER_DIR)}""", 0, False\r\n`;
+    try {
+      writeFileAtomic(vbsPath, vbs);
+    } catch {}
+    const pid = spawnDetachedDaemon(nodePath);
+    return { ok: true, startupVbs: vbsPath, pid };
+  }
+
+  const unitPath = getLinuxSystemdUnitPath();
+  const unit = `[Unit]\nDescription=Anti-Claude CDP Daemon\nAfter=default.target\n\n[Service]\nExecStart="${nodePath}" "${CORE_DAEMON_SCRIPT}" --user-dir "${USER_DIR}"\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n`;
+  try {
+    writeFileAtomic(unitPath, unit);
+    execFileSync('systemctl', ['--user', 'daemon-reload'], { stdio: 'ignore', timeout: 4000 });
+    execFileSync('systemctl', ['--user', 'enable', '--now', 'anti-claude-daemon.service'], { stdio: 'ignore', timeout: 5000 });
+    return { ok: true, systemdUnit: unitPath };
+  } catch {
+    const pid = spawnDetachedDaemon(nodePath);
+    return { ok: true, mode: 'detached', pid };
+  }
 }
 
-function syncAntigravity2IfInstalled() {
-  if (process.platform !== 'darwin' || NO_LAUNCHD) return { skipped: true };
-  if (!fs.existsSync('/Applications/Antigravity 2.app') || !fs.existsSync(AG2_SYNC_SCRIPT)) {
-    return { skipped: 'not_present' };
+function disableCoreDaemon() {
+  let stopped = false;
+  if (process.platform === 'darwin' && fs.existsSync(DAEMON_PLIST)) {
+    if (!NO_LAUNCHD) {
+      const uid = typeof process.getuid === 'function' ? process.getuid() : 501;
+      try {
+        execFileSync('launchctl', ['bootout', `gui/${uid}`, DAEMON_PLIST], { stdio: 'ignore' });
+      } catch {}
+    }
+    fs.rmSync(DAEMON_PLIST, { force: true });
+    stopped = true;
+  } else if (process.platform === 'win32') {
+    const vbsPath = getWinStartupVbsPath();
+    if (fs.existsSync(vbsPath)) {
+      fs.rmSync(vbsPath, { force: true });
+      stopped = true;
+    }
+  } else {
+    const unitPath = getLinuxSystemdUnitPath();
+    if (fs.existsSync(unitPath)) {
+      if (!NO_LAUNCHD) {
+        try {
+          execFileSync('systemctl', ['--user', 'disable', '--now', 'anti-claude-daemon.service'], { stdio: 'ignore', timeout: 4000 });
+        } catch {}
+      }
+      fs.rmSync(unitPath, { force: true });
+      stopped = true;
+    }
   }
-  try {
-    execFileSync(process.execPath, [AG2_SYNC_SCRIPT], { stdio: 'pipe', timeout: 90000 });
-    return { ok: true, synced: true };
-  } catch (err) {
-    return { ok: false, error: String(err?.message || err).split('\n')[0] };
+
+  if (fs.existsSync(PID_FILE)) {
+    const pid = parseInt(readTextSafe(PID_FILE) || '0', 10);
+    if (pid > 0 && !NO_LAUNCHD) {
+      try {
+        process.kill(pid, 'SIGTERM');
+      } catch {}
+    }
+    fs.rmSync(PID_FILE, { force: true });
+    stopped = true;
   }
+  return { stopped };
+}
+
+function inspectCoreDaemon() {
+  let pidAlive = false;
+  let pid = null;
+  if (fs.existsSync(PID_FILE)) {
+    const parsed = parseInt(readTextSafe(PID_FILE) || '0', 10);
+    if (parsed > 0) {
+      pid = parsed;
+      try {
+        process.kill(parsed, 0);
+        pidAlive = true;
+      } catch {}
+    }
+  }
+  if (process.platform === 'darwin') {
+    const xml = fs.existsSync(DAEMON_PLIST) ? readTextSafe(DAEMON_PLIST) : null;
+    if (!xml) return { installed: false, running: pidAlive, pid };
+    const m = xml.match(/<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]+)<\/string>\s*<string>([^<]+)<\/string>/);
+    const nodePath = m ? m[1].replace(/&amp;/g, '&') : null;
+    const scriptPath = m ? m[2].replace(/&amp;/g, '&') : null;
+    return {
+      installed: true,
+      running: pidAlive,
+      pid,
+      label: DAEMON_LABEL,
+      nodePath,
+      nodeExists: Boolean(nodePath && fs.existsSync(nodePath)),
+      scriptPath,
+      scriptExists: Boolean(scriptPath && fs.existsSync(scriptPath))
+    };
+  }
+  if (process.platform === 'win32') {
+    const vbsPath = getWinStartupVbsPath();
+    return { installed: fs.existsSync(vbsPath), running: pidAlive, pid, startupVbs: vbsPath };
+  }
+  const unitPath = getLinuxSystemdUnitPath();
+  return { installed: fs.existsSync(unitPath), running: pidAlive, pid, systemdUnit: unitPath };
 }
 
 function enableMacAutoUpdateAgent() {
@@ -1367,8 +1484,11 @@ async function cmdDoctor() {
   const cfg = readJsonSafe(AGY_CONFIG_JSON, null);
   const agentsRaw = readTextSafe(AGENTS_MD) || '';
   const incoming = fs.existsSync(INCOMING_DIR) ? fs.readdirSync(INCOMING_DIR) : [];
+  const daemon = inspectCoreDaemon();
   const agent = inspectAutoUpdateAgent();
   const antigravityCli = detectAntigravityCli();
+  const pkgVersion = readJsonSafe(path.join(__dirname, 'package.json'), {})?.version || null;
+  const legacyThemePatchPresent = fs.existsSync(LEGACY_THEME_PATCH_DIR) || fs.existsSync(LEGACY_THEME_DAEMON_PLIST);
   const mode = state
     ? state.options?.desktop === false
       ? 'cli-only'
@@ -1377,25 +1497,35 @@ async function cmdDoctor() {
         : 'desktop'
     : null;
   const warnings = [];
+  if (daemon.installed && daemon.nodeExists === false) warnings.push('core daemon LaunchAgent points to a missing node binary: run `install` again');
+  if (daemon.installed && daemon.scriptExists === false) warnings.push('core daemon LaunchAgent points to a missing core/daemon.mjs');
   if (agent.installed && !agent.nodeExists) warnings.push('auto-update LaunchAgent points to a missing node binary: run auto-update-on again');
   if (agent.installed && !agent.scriptExists) warnings.push('auto-update LaunchAgent points to a missing install.mjs');
   if (incoming.length) warnings.push(`template updates held back because of local edits: ${incoming.join(', ')} (see ${INCOMING_DIR})`);
   if (!state && (fs.existsSync(LEGACY_V2_STATE_FILE) || fs.existsSync(LEGACY_BACKUP_DIR))) {
     warnings.push('legacy claude-ux install detected: run `install` once to migrate the install state to anti-claude');
   }
+  if (legacyThemePatchPresent) {
+    warnings.push('legacy theme-patch installation detected: run `install` once to migrate customizations and retire theme-patch');
+  }
   if (agent.legacyPlist) warnings.push('legacy claude-ux LaunchAgent detected: run `install` or `auto-update-on` to migrate to com.antigravity.anti-claude.autosync');
   return finalize(
     {
       platform: process.platform,
       node: process.version,
+      version: pkgVersion,
       mode,
       antigravityAppVersion: getAntigravityAppFingerprint().version,
       antigravityCli,
-      baseThemePatchInstalled: fs.existsSync(path.join(THEME_PATCH_DIR, 'install.mjs')),
-      baseThemePatchVersion: readJsonSafe(path.join(THEME_PATCH_DIR, 'core', 'manifest.json'), {})?.version || null,
-      pinnedUpstreamRef: UPSTREAM_REF,
+      coreEngine: {
+        standalone: true,
+        scriptExists: fs.existsSync(CORE_DAEMON_SCRIPT),
+        userDir: USER_DIR,
+        daemon
+      },
+      legacyThemePatchPresent,
       installState: state ? { installedAt: state.installedAt, options: state.options, files: Object.keys(state.files || {}) } : null,
-      userLayerInstalled: (readTextSafe(path.join(THEME_USER_DIR, 'custom.js')) || '').includes('ag-claude-todo-card'),
+      userLayerInstalled: (readTextSafe(path.join(USER_DIR, 'custom.js')) || '').includes('ag-claude-todo-card'),
       autoUpdate: agent,
       lastSync: state?.sync || null,
       fonts: checkFontsInstalled(),
@@ -1443,12 +1573,8 @@ async function cmdInstall(flags) {
     return finalize({ mode: 'cli-only', antigravityCli: detectAntigravityCli(), cliLayer, ruleStatus }, { critical, warnings });
   }
 
-  let base;
-  try {
-    base = ensureUpstreamCore({ upgrade: false });
-  } catch (err) {
-    return finalize({}, { critical: [`upstream core install failed: ${String(err?.message || err).split('\n')[0]}`] });
-  }
+  /* Migrate any user overrides from legacy theme-patch/user and retire upstream theme-patch */
+  const legacyMigration = retireLegacyThemePatch(state);
 
   const fontsBefore = checkFontsInstalled();
   const fontSync = fontsBefore.hasAnthropicSans || NO_FONTS ? null : syncFontsFromLocalClaudeApp();
@@ -1463,13 +1589,15 @@ async function cmdInstall(flags) {
   if (layer.conflicts.length) warnings.push(`local edits kept, new versions saved to ${INCOMING_DIR}: ${layer.conflicts.join(', ')} (use --overwrite-local to replace)`);
   saveState(state);
 
+  const coreDaemon = ensureCoreDaemon();
+  if (!coreDaemon.ok) warnings.push(`core daemon: ${coreDaemon.reason}`);
+
   let stepUnlock = { skipped: 'disabled_by_option' };
   if (state.options.stepUnlock) {
     stepUnlock = await applyStepUnlock(state);
     if (!stepUnlock.live.ok && stepUnlock.live.appRunning !== false) warnings.push(`live step unlock: ${stepUnlock.live.reason}`);
   }
   const ruleStatus = state.options.agentsRule ? injectAgentsMdRule(state, { allowInsert: true }) : 'disabled_by_option';
-  const cdpBootstrap = ensureMacCdpBootstrapWrapper();
 
   let cliLayer = { skipped: noCli ? 'disabled_by_option' : 'agy_cli_not_detected' };
   if (state.options.cli) {
@@ -1481,8 +1609,8 @@ async function cmdInstall(flags) {
     }
   }
 
-  const verify = runUpstreamVerify();
-  if (!verify.ok) warnings.push(`upstream verify: ${verify.reason}`);
+  const verify = runLiveVerify();
+  if (!verify.ok) warnings.push(`live verify: ${verify.reason}`);
 
   const fp = getAntigravityAppFingerprint();
   state.sync = Object.assign({}, state.sync, { appVersion: fp.version, appSig: fp.sig, cliVersion: antigravityCli.version, lastAppliedAt: Date.now() });
@@ -1501,13 +1629,13 @@ async function cmdInstall(flags) {
       mode: state.options.cli ? 'desktop+cli' : 'desktop',
       antigravityVersion: fp.version,
       antigravityCli: detectAntigravityCli(),
-      base,
+      legacyMigration,
       fontSync,
       userLayer: layer,
       cliLayer,
+      coreDaemon,
       stepUnlock,
       ruleStatus,
-      cdpBootstrap,
       autoUpdate,
       verify
     },
@@ -1524,14 +1652,13 @@ async function cmdSyncUpgrade(flags) {
   const isDesktop = state.options?.desktop !== false;
   const fp = isDesktop ? getAntigravityAppFingerprint() : { version: 'none', sig: 'cli-only', changedAtMs: 0 };
   if (isDesktop && fp.changedAtMs > 0 && Date.now() - fp.changedAtMs < 12000) {
-    await new Promise((r) => setTimeout(r, 4500)); // let a freshly updated app finish its cold start
+    await new Promise((r) => setTimeout(r, 4500));
   }
   const warnings = [];
   const appChanged = isDesktop && state.sync?.appSig !== fp.sig;
   const now = Date.now();
 
   let selfPull = { skipped: true };
-  let core = { skipped: true };
   if (!afterPull && !NO_NETWORK && shouldCheckRemote(state.sync, { now, force, appChanged })) {
     state.sync = Object.assign({}, state.sync, { lastRemoteCheckAt: now });
     selfPull = pullSelfRepoIfGit();
@@ -1544,7 +1671,6 @@ async function cmdSyncUpgrade(flags) {
       }
       state.sync.lastRemoteCheckOk = true;
       saveState(state);
-      /* re-exec so the freshly pulled installer logic applies to this run */
       const args = [path.join(__dirname, 'install.mjs'), 'sync-upgrade', '--after-pull', ...[...flags].filter((f) => f !== '--after-pull')];
       try {
         execFileSync(process.execPath, args, { stdio: 'inherit', timeout: 180000 });
@@ -1553,11 +1679,7 @@ async function cmdSyncUpgrade(flags) {
       }
       return null;
     }
-    if (isDesktop) {
-      core = ensureUpstreamCore({ upgrade: true });
-      if (core.error) warnings.push(`upstream core: ${core.error}`);
-    }
-    state.sync.lastRemoteCheckOk = !selfPull.error && !core.error;
+    state.sync.lastRemoteCheckOk = !selfPull.error;
   }
 
   const validation = validateSourceRoot();
@@ -1585,44 +1707,45 @@ async function cmdSyncUpgrade(flags) {
     return finalize({ mode: 'cli-only', summary, selfPull, cliLayer, ruleStatus }, { warnings });
   }
 
+  const legacyMigration = retireLegacyThemePatch(state);
   const layer = installUserLayer(state, { overwriteLocal: flags.has('--overwrite-local') });
   if (layer.conflicts.length) warnings.push(`local edits kept, new versions in ${INCOMING_DIR}: ${layer.conflicts.join(', ')}`);
 
-  /* Only re-assert step settings after an app update (which may reset them); a user's later choice is respected otherwise. */
+  const coreDaemon = ensureCoreDaemon();
+  if (!coreDaemon.ok) warnings.push(`core daemon: ${coreDaemon.reason}`);
+
   let stepUnlock = { skipped: appChanged ? 'disabled_by_option' : 'app_unchanged' };
   if (appChanged && state.options.stepUnlock) stepUnlock = await applyStepUnlock(state);
-  const cdpBootstrap = ensureMacCdpBootstrapWrapper();
   if (state.options.autoUpdate && process.platform === 'darwin' && !NO_LAUNCHD && fs.existsSync(LEGACY_AUTOSYNC_PLIST)) {
     enableMacAutoUpdateAgent();
   }
-  const ag2Sync = appChanged ? syncAntigravity2IfInstalled() : { skipped: 'app_unchanged' };
-  if (ag2Sync.error) warnings.push(`antigravity-2 sync: ${ag2Sync.error}`);
 
   let verify = { skipped: true };
   const changed = layer.created.length + layer.updated.length + layer.merged.length > 0;
-  if (force || appChanged || core.upgraded || changed) {
-    verify = runUpstreamVerify();
-    if (!verify.ok) warnings.push(`upstream verify: ${verify.reason}`);
+  if (force || appChanged || afterPull || changed || legacyMigration.removedDir) {
+    verify = runLiveVerify();
+    if (!verify.ok) warnings.push(`live verify: ${verify.reason}`);
   }
 
   state.sync = Object.assign({}, state.sync, { appVersion: fp.version, appSig: fp.sig, lastAppliedAt: now });
   saveState(state);
-  const summary = `sync-upgrade | agy=${fp.version} | appChanged=${appChanged} | remoteChecked=${!selfPull.skipped} | coreUpgraded=${Boolean(core.upgraded)} | updated=${layer.updated.length + layer.merged.length} | conflicts=${layer.conflicts.length}`;
+  const summary = `sync-upgrade | agy=${fp.version} | appChanged=${appChanged} | remoteChecked=${!selfPull.skipped} | updated=${layer.updated.length + layer.merged.length} | conflicts=${layer.conflicts.length}`;
   appendSyncLog(summary);
-  return finalize({ summary, selfPull, core, userLayer: layer, cliLayer, stepUnlock, ruleStatus, cdpBootstrap, ag2Sync, verify }, { warnings });
+  return finalize({ summary, selfPull, legacyMigration, userLayer: layer, cliLayer, coreDaemon, stepUnlock, ruleStatus, verify }, { warnings });
 }
 
 async function cmdUninstall() {
   const state = loadState();
   if (!state) {
     const autoUpdateRemoved = disableMacAutoUpdateAgent();
-    const wrapperRestored = restorePlainDaemonWrapper();
-    return finalize({ noop: true, reason: 'not_installed', autoUpdateRemoved, wrapperRestored });
+    const daemonStopped = disableCoreDaemon();
+    return finalize({ noop: true, reason: 'not_installed', autoUpdateRemoved, daemonStopped });
   }
   const warnings = [];
   const isDesktop = state.options?.desktop !== false || Object.keys(state.files || {}).length > 0;
   const autoUpdateRemoved = disableMacAutoUpdateAgent();
-  const wrapperRestored = isDesktop ? restorePlainDaemonWrapper() : { restored: false };
+  const daemonStopped = isDesktop ? disableCoreDaemon() : { stopped: false };
+  const liveTeardown = isDesktop ? runLiveTeardownOnce() : { skipped: 'cli_only' };
   const settings = isDesktop ? await revertStepUnlock(state) : { skipped: 'cli_only' };
   if (settings.live && !settings.live.ok && settings.live.appRunning !== false) warnings.push(`live settings revert: ${settings.live.reason}`);
   const files = isDesktop ? restoreUserLayer(state) : { restored: [], removed: [], stubbed: [], kept: [], savedLocalEdits: [] };
@@ -1630,11 +1753,17 @@ async function cmdUninstall() {
   const cli = restoreCliLayer(state);
   if (cli.savedLocalEdits.length) warnings.push(`your post-install CLI edits were saved: ${cli.savedLocalEdits.join(', ')}`);
   const ruleRemoved = removeAgentsMdRule();
-  fs.rmSync(STATE_DIR, { recursive: true, force: true });
+
+  /* Remove owned state artifacts while preserving USER_DIR if pre-existing user files were restored into it */
+  for (const p of [STATE_FILE, PID_FILE, BACKUP_DIR, BASE_DIR, INCOMING_DIR, LOCAL_SAVE_DIR, SYNC_LOG_FILE, LAUNCHD_LOG_FILE, DAEMON_LOG_FILE]) {
+    fs.rmSync(p, { recursive: true, force: true });
+  }
+  removeDirIfEmpty(USER_DIR);
+  removeDirIfEmpty(STATE_DIR);
   fs.rmSync(LEGACY_V2_STATE_DIR, { recursive: true, force: true });
   fs.rmSync(LEGACY_SYNC_LOG_FILE, { force: true });
-  const verify = isDesktop ? runUpstreamVerify() : { skipped: 'cli_only' };
-  return finalize({ autoUpdateRemoved, wrapperRestored, settings, files, cli, ruleRemoved, verify }, { warnings });
+
+  return finalize({ autoUpdateRemoved, daemonStopped, liveTeardown, settings, files, cli, ruleRemoved }, { warnings });
 }
 
 async function main(argv) {

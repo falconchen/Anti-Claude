@@ -57,10 +57,10 @@ The installer never touches `/Applications/Antigravity.app`. It only manages the
 
 - `~/.gemini/AGENTS.md`: Adds the execution-sync, `TodoWrite`, and `ask_question` collaboration rule block (skip with `--no-agents-rule`).
 - `antigravity_state.pbtxt` & `~/.gemini/config/config.json`: Enables detailed step visibility (skip with `--no-step-unlock`).
-- `~/.gemini/antigravity/theme-patch/user/`: Deploys CSS, JS, and config (auto-installs [`chuanban-antigravity-theme-patch`](https://github.com/Anarcadia/chuanban-antigravity-theme-patch) if absent; preserves local customizations via 3-way merge).
+- `~/.gemini/antigravity/anti-claude/user/`: Deploys standalone CSS, JS, and config powered by Anti-Claude's built-in zero-dependency `core/` CDP runtime (preserves local customizations via 3-way JSON merge; legacy `theme-patch` installs are migrated and retired automatically).
 - `~/.gemini/antigravity-cli/anti-claude-statusline.mjs` & `~/.gemini/antigravity-cli/settings.json`: Deploys the zero-dependency CLI status bar and enables `statusLine` when `agy` is detected or `--cli` / `--cli-only` is passed (skip with `--no-cli` or `--no-cli-statusline`).
-- `~/Library/LaunchAgents/com.antigravity.anti-claude.autosync.plist`: Watches client upgrades and syncs periodically (skip with `--no-auto-update`).
+- `~/Library/LaunchAgents/com.antigravity.anti-claude.{daemon,autosync}.plist`: Runs the standalone CDP injection & metrics daemon and watches client upgrades periodically (`--no-auto-update` skips periodic git sync).
 
 ## Credits & License
 
-Built on top of the CDP runtime and telemetry core from [@Anarcadia/chuanban-antigravity-theme-patch](https://github.com/Anarcadia/chuanban-antigravity-theme-patch), with color palette inspiration from [@AlexByoung/Claudized-Antigravity](https://github.com/AlexByoung/Claudized-Antigravity). MIT License.
+Self-contained zero-dependency CDP runtime and telemetry engine, with early architecture & color inspiration from [@Anarcadia/chuanban-antigravity-theme-patch](https://github.com/Anarcadia/chuanban-antigravity-theme-patch) and [@AlexByoung/Claudized-Antigravity](https://github.com/AlexByoung/Claudized-Antigravity). MIT License.

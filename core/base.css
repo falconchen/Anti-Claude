@@ -1,0 +1,303 @@
+/**
+ * Anti-Claude — core/base.css
+ * Self-contained base stylesheet injected as #ag-custom-fonts before user/custom.css:
+ * 1. Local @font-face bindings for Anthropic Sans, Anthropic Serif, and Anthropic Mono.
+ * 2. Browser-hole-safe surface & sidebar background bindings (preserves WebContentsView cutouts).
+ * 3. Base layout for the composer live metrics pill (#ag-live-metrics-pill) and hover card (#ag-live-metrics-tooltip).
+ */
+
+@font-face {
+  font-family: 'Anthropic Serif';
+  src: local('AnthropicSerifWebWeb-TextRegular'), local('AnthropicSerifWebWeb-TextLight'), local('Anthropic Serif Web'), local('Anthropic Serif Web Text Light'), local('Anthropic Serif Web Display Light'), local('Anthropic Serif'), local('Anthropic Serif Text'), local('Anthropic Serif Text Regular'), local('AnthropicSerifText-Regular');
+  font-weight: 300 599;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Anthropic Serif';
+  src: local('AnthropicSerifWebWeb-TextSemibold'), local('AnthropicSerifWebWeb-TextBold'), local('Anthropic Serif Bold'), local('Anthropic Serif Web Bold'), local('Anthropic Serif Text Bold'), local('AnthropicSerifText-Bold'), local('Anthropic Serif Web Display Light'), local('AnthropicSerifWebWeb-TextRegular'), local('AnthropicSerifWebWeb-TextLight'), local('Anthropic Serif Web Text Light');
+  font-weight: 600 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Anthropic Sans';
+  src: local('AnthropicSansWebVariable-TextRegular'), local('Anthropic Sans Web Text Regular'), local('AnthropicSansWebVariable-TextLight'), local('Anthropic Sans Web'), local('Anthropic Sans Web Text'), local('Anthropic Sans Web Display Light'), local('Anthropic Sans'), local('Anthropic Sans Text'), local('Anthropic Sans Text Regular'), local('AnthropicSansText-Regular');
+  font-weight: 300 599;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Anthropic Sans';
+  src: local('AnthropicSansWebVariable-TextSemibold'), local('AnthropicSansWebVariable-TextBold'), local('Anthropic Sans Bold'), local('Anthropic Sans Web Bold'), local('Anthropic Sans Text Bold'), local('AnthropicSansText-Bold'), local('Anthropic Sans Web Display Light'), local('Anthropic Sans Web Text Regular'), local('AnthropicSansWebVariable-TextRegular');
+  font-weight: 600 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Anthropic Mono';
+  src: local('AnthropicMonoWebWeb-Regular'), local('Anthropic Mono Web Regular'), local('Anthropic Mono Web'), local('Anthropic Mono');
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --ag-chat-font-size: 16px;
+}
+
+/* Browser-hole-safe surface bindings (never paint opaque backgrounds when a native browser WebContentsView hole is open) */
+body:not([data-has-browser-hole="true"]):not([data-has-drawer-browser-hole="true"]) {
+  background-color: var(--background) !important;
+  color: var(--foreground) !important;
+}
+
+.bg-sidebar:not([data-has-browser-hole="true"]):not([data-has-drawer-browser-hole="true"]) {
+  background-color: var(--sidebar) !important;
+}
+
+.surface-glass {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* Keep voice live pill hidden when inactive (.opacity-0) */
+[data-testid="voice-live-pill"].opacity-0 {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+[data-testid="voice-live-pill"].opacity-100 {
+  opacity: 1 !important;
+}
+
+/* Composer footer flex guards & live metrics pill (#ag-live-metrics-pill) */
+#antigravity\.agentSidePanelInputBox div[data-ag-row-mode] > div:first-child {
+  overflow: hidden !important;
+  min-width: 0 !important;
+}
+
+#antigravity\.agentSidePanelInputBox div[data-ag-row-mode="middle"] > div:first-child > *:not(#ag-live-metrics-pill) {
+  flex-shrink: 0 !important;
+}
+
+#antigravity\.agentSidePanelInputBox div[data-ag-row-mode] > div:last-child {
+  flex-shrink: 0 !important;
+  margin-left: auto !important;
+}
+
+#ag-live-metrics-pill {
+  position: relative;
+  display: none;
+  align-items: center;
+  flex: 1 1 0% !important;
+  max-width: max-content !important;
+  min-width: 0 !important;
+  height: 22px;
+  margin-left: 2px;
+  margin-right: 0;
+  padding: 0 2px 0 5px;
+  border-left: 1px solid rgba(0, 0, 0, 0.16);
+  font-family: var(--font-mono) !important;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px !important;
+  font-weight: 450 !important;
+  letter-spacing: -0.015em !important;
+  color: var(--muted-foreground, #73726C) !important;
+  opacity: 0.92 !important;
+  line-height: 1 !important;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+  cursor: default;
+}
+
+#ag-live-metrics-pill:hover,
+#ag-live-metrics-pill:hover #ag-live-metrics-text {
+  opacity: 1 !important;
+  color: var(--foreground, #141413) !important;
+}
+
+#ag-live-metrics-pill[data-ag-row-mode="bottom"] {
+  flex: 0 0 auto !important;
+  align-self: stretch !important;
+  box-sizing: border-box !important;
+  width: calc(100% - 8px) !important;
+  max-width: calc(100% - 8px) !important;
+  height: 22px !important;
+  min-height: 22px !important;
+  max-height: 22px !important;
+  margin: 2px 4px 1px 4px !important;
+  padding: 2px 4px 0 6px !important;
+  border-left: none !important;
+  border-top: 1px dashed rgba(0, 0, 0, 0.12) !important;
+}
+
+#ag-live-metrics-pill #ag-live-metrics-text {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono) !important;
+  font-size: inherit !important;
+  font-weight: inherit !important;
+  letter-spacing: inherit !important;
+  color: inherit !important;
+}
+
+#antigravity\.agentSidePanelInputBox #ag-live-metrics-pill .ag-sep,
+#ag-live-metrics-pill .ag-sep {
+  margin: 0 3px;
+  opacity: 0.45 !important;
+}
+
+#antigravity\.agentSidePanelInputBox #ag-live-metrics-pill .ag-ctx-warn,
+#ag-live-metrics-pill .ag-ctx-warn {
+  color: #B45309 !important;
+  font-weight: 600 !important;
+}
+
+#antigravity\.agentSidePanelInputBox #ag-live-metrics-pill .ag-ctx-crit,
+#ag-live-metrics-pill .ag-ctx-crit {
+  color: #DC2626 !important;
+  font-weight: 700 !important;
+}
+
+#antigravity\.agentSidePanelInputBox #ag-live-metrics-pill .ag-sub-badge,
+#ag-live-metrics-pill .ag-sub-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 9.5px !important;
+  font-weight: 600 !important;
+  line-height: 1;
+  background-color: rgba(217, 119, 87, 0.12);
+  border: 1px solid rgba(217, 119, 87, 0.28);
+  color: #9E3E22 !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-pill {
+  color: var(--muted-foreground, #9C9A92) !important;
+  border-left-color: rgba(255, 255, 255, 0.14) !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-pill:hover,
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-pill:hover #ag-live-metrics-text {
+  color: var(--foreground, #FAF9F5) !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-pill[data-ag-row-mode="bottom"] {
+  border-top-color: rgba(255, 255, 255, 0.12) !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #antigravity\.agentSidePanelInputBox #ag-live-metrics-pill .ag-ctx-warn,
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-pill .ag-ctx-warn {
+  color: #FBBF24 !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #antigravity\.agentSidePanelInputBox #ag-live-metrics-pill .ag-ctx-crit,
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-pill .ag-ctx-crit {
+  color: #F87171 !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #antigravity\.agentSidePanelInputBox #ag-live-metrics-pill .ag-sub-badge,
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-pill .ag-sub-badge {
+  background-color: rgba(217, 119, 87, 0.16);
+  border-color: rgba(217, 119, 87, 0.34);
+  color: #F0B29A !important;
+}
+
+/* Hover metrics tooltip (#ag-live-metrics-tooltip) */
+#ag-live-metrics-tooltip {
+  position: fixed;
+  z-index: 2147483647;
+  min-width: 340px;
+  max-width: 450px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background-color: var(--popover, #FFFFFF) !important;
+  border: 1px solid var(--border, rgba(31, 30, 29, 0.12)) !important;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.06);
+  font-family: var(--font-mono) !important;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px !important;
+  line-height: 1.55 !important;
+  color: var(--foreground, #141413) !important;
+  text-align: left;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s;
+}
+
+#ag-live-metrics-tooltip[data-visible="1"] {
+  opacity: 1 !important;
+  visibility: visible !important;
+  transform: translateY(0);
+}
+
+#ag-live-metrics-tooltip .ag-tt-hdr {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600 !important;
+  font-size: 11px !important;
+  color: var(--foreground, #141413) !important;
+  border-bottom: 1px solid rgba(31, 30, 29, 0.1);
+  padding-bottom: 4px;
+  margin-bottom: 6px;
+}
+
+#ag-live-metrics-tooltip .ag-tt-sec {
+  margin-top: 8px;
+}
+
+#ag-live-metrics-tooltip .ag-tt-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px !important;
+  font-weight: 450 !important;
+}
+
+#ag-live-metrics-tooltip .ag-tt-lbl {
+  color: var(--muted-foreground, #73726C) !important;
+  flex-shrink: 0;
+}
+
+#ag-live-metrics-tooltip .ag-tt-val {
+  color: var(--foreground, #141413) !important;
+  font-weight: 500 !important;
+  text-align: right;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-tooltip {
+  background-color: var(--popover, #30302E) !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.35) !important;
+  color: var(--foreground, #FAF9F5) !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-tooltip .ag-tt-hdr {
+  color: var(--foreground, #FAF9F5) !important;
+  border-bottom-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-tooltip .ag-tt-lbl {
+  color: var(--muted-foreground, #9C9A92) !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-tooltip .ag-tt-val {
+  color: var(--foreground, #FAF9F5) !important;
+}
