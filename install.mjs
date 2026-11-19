@@ -4,7 +4,7 @@
  * Zero-dependency CLI installer, step-stream unlocker, auto-updater, doctor & uninstaller (Node.js >= 22)
  *
  * Commands:
- *   node install.mjs install [--no-auto-update] [--no-step-unlock] [--no-agents-rule] [--overwrite-local]
+ *   node install.mjs install [--cli] [--cli-only] [--no-cli] [--no-cli-statusline] [--no-auto-update] [--no-step-unlock] [--no-agents-rule] [--overwrite-local]
  *   node install.mjs sync-upgrade [--force] [--overwrite-local]
  *   node install.mjs auto-update-on | auto-update-off
  *   node install.mjs doctor
@@ -38,6 +38,10 @@ const THEME_USER_DIR = path.join(THEME_PATCH_DIR, 'user');
 const AGY_STATE_PBTXT = path.join(AGY_DIR, 'antigravity_state.pbtxt');
 const AGY_CONFIG_JSON = path.join(GEMINI_DIR, 'config', 'config.json');
 const AGENTS_MD = path.join(GEMINI_DIR, 'AGENTS.md');
+const AGY_CLI_DIR = path.join(GEMINI_DIR, 'antigravity-cli');
+const AGY_CLI_SETTINGS_JSON = path.join(AGY_CLI_DIR, 'settings.json');
+const AGY_CLI_STATUSLINE_NAME = 'anti-claude-statusline.mjs';
+const AGY_CLI_STATUSLINE_FILE = path.join(AGY_CLI_DIR, AGY_CLI_STATUSLINE_NAME);
 
 const STATE_DIR = path.join(AGY_DIR, 'anti-claude');
 const STATE_FILE = path.join(STATE_DIR, 'install-state.json');
@@ -80,6 +84,7 @@ const NO_NETWORK = process.env.ANTI_CLAUDE_NO_NETWORK === '1' || process.env.CLA
 const NO_LAUNCHD = process.env.ANTI_CLAUDE_NO_LAUNCHD === '1' || process.env.CLAUDE_UX_NO_LAUNCHD === '1';
 const NO_CDP = process.env.ANTI_CLAUDE_NO_CDP === '1' || process.env.CLAUDE_UX_NO_CDP === '1';
 const NO_FONTS = process.env.ANTI_CLAUDE_NO_FONTS === '1' || process.env.CLAUDE_UX_NO_FONTS === '1';
+const NO_CLI = process.env.ANTI_CLAUDE_NO_CLI === '1' || process.env.CLAUDE_UX_NO_CLI === '1';
 const CDP_TIMEOUT_MS = Number(process.env.ANTI_CLAUDE_CDP_TIMEOUT_MS || process.env.CLAUDE_UX_CDP_TIMEOUT_MS) || 5000;
 const STATE_SCHEMA = 2;
 
@@ -308,6 +313,52 @@ function syncFontsFromLocalClaudeApp() {
   return { synced: true, copied, note: 'Fonts are copied from your own local Claude.app for personal use only.' };
 }
 
+function findAgyCliBinary() {
+  if (NO_CLI) return null;
+  const cmd = process.platform === 'win32' ? 'where' : 'which';
+  try {
+    const out = execFileSync(cmd, ['agy'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    const first = out.split(/\r?\n/)[0]?.trim();
+    if (first && fs.existsSync(first)) return first;
+  } catch {}
+  const fallbacks =
+    process.platform === 'win32'
+      ? [path.join(HOME, '.local', 'bin', 'agy.exe')]
+      : [path.join(HOME, '.local', 'bin', 'agy'), '/opt/homebrew/bin/agy', '/usr/local/bin/agy'];
+  for (const p of fallbacks) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+function detectAntigravityCli() {
+  const configDirExists = fs.existsSync(AGY_CLI_DIR);
+  const settingsExists = fs.existsSync(AGY_CLI_SETTINGS_JSON);
+  const binary = findAgyCliBinary();
+  let version = null;
+  if (binary) {
+    try {
+      version = execFileSync(binary, ['--version'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null;
+    } catch {}
+  }
+  const settings = settingsExists ? readJsonSafe(AGY_CLI_SETTINGS_JSON, null) : null;
+  const statusLineInstalled = fs.existsSync(AGY_CLI_STATUSLINE_FILE);
+  const statusLineEnabled = Boolean(
+    settings?.statusLine?.enabled === true &&
+      String(settings?.statusLine?.command || '').includes(AGY_CLI_STATUSLINE_NAME)
+  );
+  return {
+    detected: Boolean(binary || configDirExists),
+    binary,
+    version,
+    configDir: AGY_CLI_DIR,
+    configDirExists,
+    settingsExists,
+    statusLineInstalled,
+    statusLineEnabled
+  };
+}
+
 /** Prefer a version-independent node path so `brew upgrade node` does not break the LaunchAgent. */
 export function stableNodePath(execPath = process.execPath) {
   const candidates = ['/opt/homebrew/bin/node', '/usr/local/bin/node'];
@@ -335,8 +386,9 @@ function newState() {
     schema: STATE_SCHEMA,
     installedAt: Date.now(),
     repoUrl: SELF_REPO,
-    options: { stepUnlock: true, agentsRule: true, autoUpdate: true },
+    options: { desktop: true, cli: false, cliStatusLine: true, stepUnlock: true, agentsRule: true, autoUpdate: true },
     files: {},
+    cli: {},
     settings: {},
     agentsRule: { inserted: false },
     sync: {}
@@ -419,7 +471,7 @@ function saveState(state) {
 
 function validateSourceRoot(root = __dirname) {
   const problems = [];
-  for (const rel of ['install.mjs', 'user/custom.js']) {
+  for (const rel of ['install.mjs', 'user/custom.js', 'cli/statusline.mjs']) {
     try {
       execFileSync(process.execPath, ['--check', path.join(root, rel)], { stdio: 'pipe' });
     } catch (err) {
@@ -1126,6 +1178,186 @@ function inspectAutoUpdateAgent() {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Antigravity CLI (agy) layer deploy / restore                               */
+/* -------------------------------------------------------------------------- */
+
+export function buildCliStatusLineCommand(nodePath = stableNodePath(), scriptPath = AGY_CLI_STATUSLINE_FILE) {
+  return `"${nodePath}" "${scriptPath}"`;
+}
+
+function deployCliStatusLineScript(text, state) {
+  writeFileAtomic(AGY_CLI_STATUSLINE_FILE, text);
+  try {
+    fs.chmodSync(AGY_CLI_STATUSLINE_FILE, 0o755);
+  } catch {}
+  writeFileAtomic(path.join(BASE_DIR, AGY_CLI_STATUSLINE_NAME), text);
+  state.cli.statusLineScript.deployedSha = sha256Text(text);
+  fs.rmSync(path.join(INCOMING_DIR, AGY_CLI_STATUSLINE_NAME), { force: true });
+}
+
+function installCliLayer(state, { sourceRoot = __dirname, overwriteLocal = false, allowSettingsEnable = true } = {}) {
+  state.cli = state.cli || {};
+  if (state.options.cliStatusLine === false) {
+    return { skipped: 'disabled_by_option' };
+  }
+  const srcPath = path.join(sourceRoot, 'cli', 'statusline.mjs');
+  const srcText = readTextSafe(srcPath);
+  if (srcText === null) {
+    return { error: 'cli_statusline_source_missing' };
+  }
+
+  fs.mkdirSync(AGY_CLI_DIR, { recursive: true });
+  const localText = readTextSafe(AGY_CLI_STATUSLINE_FILE);
+  let scriptAction = 'unchanged';
+  let conflict = false;
+
+  if (!state.cli.statusLineScript) {
+    if (localText !== null) {
+      fs.mkdirSync(BACKUP_DIR, { recursive: true });
+      fs.writeFileSync(path.join(BACKUP_DIR, AGY_CLI_STATUSLINE_NAME), localText, 'utf8');
+    }
+    state.cli.statusLineScript = { existedBefore: localText !== null, deployedSha: '' };
+    deployCliStatusLineScript(srcText, state);
+    scriptAction = 'created';
+  } else if (localText === null) {
+    deployCliStatusLineScript(srcText, state);
+    scriptAction = 'updated';
+  } else if (localText === srcText) {
+    if (readTextSafe(path.join(BASE_DIR, AGY_CLI_STATUSLINE_NAME)) !== srcText) {
+      deployCliStatusLineScript(srcText, state);
+    }
+    scriptAction = 'unchanged';
+  } else {
+    const baseText = readTextSafe(path.join(BASE_DIR, AGY_CLI_STATUSLINE_NAME));
+    const localUntouched =
+      baseText !== null ? localText === baseText : sha256Text(localText) === state.cli.statusLineScript.deployedSha;
+    if (localUntouched) {
+      deployCliStatusLineScript(srcText, state);
+      scriptAction = 'updated';
+    } else if (overwriteLocal) {
+      writeFileAtomic(
+        path.join(LOCAL_SAVE_DIR, `${new Date().toISOString().replace(/[:.]/g, '-')}-${AGY_CLI_STATUSLINE_NAME}`),
+        localText
+      );
+      deployCliStatusLineScript(srcText, state);
+      scriptAction = 'overwritten';
+    } else if (baseText === srcText) {
+      scriptAction = 'unchanged (local edits kept)';
+    } else {
+      writeFileAtomic(path.join(INCOMING_DIR, AGY_CLI_STATUSLINE_NAME), srcText);
+      scriptAction = 'conflict';
+      conflict = true;
+    }
+  }
+
+  const cmd = buildCliStatusLineCommand();
+  const settingsExisted = fs.existsSync(AGY_CLI_SETTINGS_JSON);
+  let cfg = {};
+  if (settingsExisted) {
+    const parsed = readJsonSafe(AGY_CLI_SETTINGS_JSON, null);
+    if (!isPlainObject(parsed)) {
+      return { script: scriptAction, conflict, settings: { error: 'invalid_json', path: AGY_CLI_SETTINGS_JSON } };
+    }
+    cfg = parsed;
+  }
+
+  const currentStatusLine = cfg.statusLine;
+  const isOurs = String(currentStatusLine?.command || '').includes(AGY_CLI_STATUSLINE_NAME);
+  let settingsAction = 'unchanged';
+
+  if (allowSettingsEnable) {
+    if (!state.cli.settings) {
+      state.cli.settings = {
+        existedBefore: settingsExisted,
+        changed: true,
+        hadStatusLine: Object.prototype.hasOwnProperty.call(cfg, 'statusLine'),
+        beforeStatusLine: clone(cfg.statusLine),
+        deployedCommand: cmd
+      };
+    } else {
+      state.cli.settings.changed = true;
+      state.cli.settings.deployedCommand = cmd;
+    }
+    const desired = { type: 'command', command: cmd, enabled: true };
+    if (!deepEqual(cfg.statusLine, desired)) {
+      cfg.statusLine = desired;
+      writeJsonAtomic(AGY_CLI_SETTINGS_JSON, cfg);
+      settingsAction = settingsExisted ? 'updated' : 'created';
+    }
+  } else if (isOurs && currentStatusLine?.enabled === true && currentStatusLine.command !== cmd) {
+    cfg.statusLine = Object.assign({}, currentStatusLine, { command: cmd });
+    writeJsonAtomic(AGY_CLI_SETTINGS_JSON, cfg);
+    if (state.cli.settings) state.cli.settings.deployedCommand = cmd;
+    settingsAction = 'command_refreshed';
+  } else if (!isOurs) {
+    settingsAction = 'user_override_respected';
+  }
+
+  return {
+    script: scriptAction,
+    scriptPath: AGY_CLI_STATUSLINE_FILE,
+    conflict,
+    settings: { action: settingsAction, path: AGY_CLI_SETTINGS_JSON }
+  };
+}
+
+function restoreCliLayer(state) {
+  const out = { script: 'not_managed', settings: 'not_managed', savedLocalEdits: [] };
+  const cliState = state?.cli;
+  if (!cliState || (!cliState.statusLineScript && !cliState.settings)) return out;
+
+  if (cliState.settings?.changed && fs.existsSync(AGY_CLI_SETTINGS_JSON)) {
+    const cfg = readJsonSafe(AGY_CLI_SETTINGS_JSON, null);
+    if (isPlainObject(cfg)) {
+      const currentCmd = String(cfg.statusLine?.command || '');
+      if (currentCmd.includes(AGY_CLI_STATUSLINE_NAME)) {
+        if (cliState.settings.hadStatusLine) {
+          cfg.statusLine = clone(cliState.settings.beforeStatusLine);
+          writeJsonAtomic(AGY_CLI_SETTINGS_JSON, cfg);
+          out.settings = 'restored';
+        } else {
+          delete cfg.statusLine;
+          if (cliState.settings.existedBefore === false && Object.keys(cfg).length === 0) {
+            fs.rmSync(AGY_CLI_SETTINGS_JSON, { force: true });
+            out.settings = 'removed';
+          } else {
+            writeJsonAtomic(AGY_CLI_SETTINGS_JSON, cfg);
+            out.settings = 'statusline_removed';
+          }
+        }
+      } else {
+        out.settings = 'user_override_kept';
+      }
+    }
+  }
+
+  const scriptEntry = cliState.statusLineScript;
+  if (scriptEntry) {
+    const cur = readTextSafe(AGY_CLI_STATUSLINE_FILE);
+    const base = readTextSafe(path.join(BASE_DIR, AGY_CLI_STATUSLINE_NAME));
+    if (cur !== null && base !== null && cur !== base) {
+      const saveDir = path.join(AGY_DIR, `anti-claude-uninstall-saved-${new Date().toISOString().replace(/[:.]/g, '-')}`);
+      fs.mkdirSync(saveDir, { recursive: true });
+      const savedPath = path.join(saveDir, AGY_CLI_STATUSLINE_NAME);
+      fs.writeFileSync(savedPath, cur, 'utf8');
+      out.savedLocalEdits.push(savedPath);
+    }
+    const bak = path.join(BACKUP_DIR, AGY_CLI_STATUSLINE_NAME);
+    if (scriptEntry.existedBefore === true && fs.existsSync(bak)) {
+      fs.copyFileSync(bak, AGY_CLI_STATUSLINE_FILE);
+      out.script = 'restored';
+    } else if (scriptEntry.existedBefore === false) {
+      fs.rmSync(AGY_CLI_STATUSLINE_FILE, { force: true });
+      out.script = 'removed';
+    } else {
+      out.script = 'kept';
+    }
+  }
+
+  return out;
+}
+
+/* -------------------------------------------------------------------------- */
 /* Commands                                                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -1136,6 +1368,14 @@ async function cmdDoctor() {
   const agentsRaw = readTextSafe(AGENTS_MD) || '';
   const incoming = fs.existsSync(INCOMING_DIR) ? fs.readdirSync(INCOMING_DIR) : [];
   const agent = inspectAutoUpdateAgent();
+  const antigravityCli = detectAntigravityCli();
+  const mode = state
+    ? state.options?.desktop === false
+      ? 'cli-only'
+      : state.options?.cli
+        ? 'desktop+cli'
+        : 'desktop'
+    : null;
   const warnings = [];
   if (agent.installed && !agent.nodeExists) warnings.push('auto-update LaunchAgent points to a missing node binary: run auto-update-on again');
   if (agent.installed && !agent.scriptExists) warnings.push('auto-update LaunchAgent points to a missing install.mjs');
@@ -1148,7 +1388,9 @@ async function cmdDoctor() {
     {
       platform: process.platform,
       node: process.version,
+      mode,
       antigravityAppVersion: getAntigravityAppFingerprint().version,
+      antigravityCli,
       baseThemePatchInstalled: fs.existsSync(path.join(THEME_PATCH_DIR, 'install.mjs')),
       baseThemePatchVersion: readJsonSafe(path.join(THEME_PATCH_DIR, 'core', 'manifest.json'), {})?.version || null,
       pinnedUpstreamRef: UPSTREAM_REF,
@@ -1172,18 +1414,41 @@ async function cmdInstall(flags) {
   if (!validation.ok) {
     return finalize({ validation }, { critical: ['source validation failed, nothing deployed'] });
   }
+
+  const cliOnly = flags.has('--cli-only');
+  const explicitCli = flags.has('--cli') || cliOnly;
+  const noCli = flags.has('--no-cli') || (NO_CLI && !explicitCli);
+  const antigravityCli = detectAntigravityCli();
+
+  const state = loadState() || newState();
+  state.options.desktop = !cliOnly;
+  state.options.cli = !noCli && (explicitCli || antigravityCli.detected);
+  if (flags.has('--no-cli-statusline')) state.options.cliStatusLine = false;
+  else if (flags.has('--cli-statusline') || state.options.cliStatusLine === undefined) state.options.cliStatusLine = true;
+  if (flags.has('--no-step-unlock') || cliOnly) state.options.stepUnlock = false;
+  if (flags.has('--no-agents-rule')) state.options.agentsRule = false;
+  if (flags.has('--no-auto-update') || cliOnly) state.options.autoUpdate = false;
+  else if (flags.has('--auto-update')) state.options.autoUpdate = true;
+
+  if (cliOnly) {
+    const cliLayer = installCliLayer(state, { overwriteLocal: flags.has('--overwrite-local'), allowSettingsEnable: true });
+    if (cliLayer.error) critical.push(`cli layer deploy failed: ${cliLayer.error}`);
+    if (cliLayer.settings?.error) warnings.push(`cli settings (${cliLayer.settings.path}): ${cliLayer.settings.error}`);
+    if (cliLayer.conflict) {
+      warnings.push(`local edits kept, new version saved to ${INCOMING_DIR}: ${AGY_CLI_STATUSLINE_NAME} (use --overwrite-local to replace)`);
+    }
+    const ruleStatus = state.options.agentsRule ? injectAgentsMdRule(state, { allowInsert: true }) : 'disabled_by_option';
+    state.sync = Object.assign({}, state.sync, { cliVersion: antigravityCli.version, lastAppliedAt: Date.now() });
+    saveState(state);
+    return finalize({ mode: 'cli-only', antigravityCli: detectAntigravityCli(), cliLayer, ruleStatus }, { critical, warnings });
+  }
+
   let base;
   try {
     base = ensureUpstreamCore({ upgrade: false });
   } catch (err) {
     return finalize({}, { critical: [`upstream core install failed: ${String(err?.message || err).split('\n')[0]}`] });
   }
-
-  const state = loadState() || newState();
-  if (flags.has('--no-step-unlock')) state.options.stepUnlock = false;
-  if (flags.has('--no-agents-rule')) state.options.agentsRule = false;
-  if (flags.has('--no-auto-update')) state.options.autoUpdate = false;
-  else if (flags.has('--auto-update')) state.options.autoUpdate = true;
 
   const fontsBefore = checkFontsInstalled();
   const fontSync = fontsBefore.hasAnthropicSans || NO_FONTS ? null : syncFontsFromLocalClaudeApp();
@@ -1206,11 +1471,21 @@ async function cmdInstall(flags) {
   const ruleStatus = state.options.agentsRule ? injectAgentsMdRule(state, { allowInsert: true }) : 'disabled_by_option';
   const cdpBootstrap = ensureMacCdpBootstrapWrapper();
 
+  let cliLayer = { skipped: noCli ? 'disabled_by_option' : 'agy_cli_not_detected' };
+  if (state.options.cli) {
+    cliLayer = installCliLayer(state, { overwriteLocal: flags.has('--overwrite-local'), allowSettingsEnable: true });
+    if (cliLayer.error) warnings.push(`cli layer: ${cliLayer.error}`);
+    if (cliLayer.settings?.error) warnings.push(`cli settings (${cliLayer.settings.path}): ${cliLayer.settings.error}`);
+    if (cliLayer.conflict) {
+      warnings.push(`local edits kept, new version saved to ${INCOMING_DIR}: ${AGY_CLI_STATUSLINE_NAME} (use --overwrite-local to replace)`);
+    }
+  }
+
   const verify = runUpstreamVerify();
   if (!verify.ok) warnings.push(`upstream verify: ${verify.reason}`);
 
   const fp = getAntigravityAppFingerprint();
-  state.sync = Object.assign({}, state.sync, { appVersion: fp.version, appSig: fp.sig, lastAppliedAt: Date.now() });
+  state.sync = Object.assign({}, state.sync, { appVersion: fp.version, appSig: fp.sig, cliVersion: antigravityCli.version, lastAppliedAt: Date.now() });
   saveState(state);
 
   let autoUpdate = { skipped: true };
@@ -1222,7 +1497,20 @@ async function cmdInstall(flags) {
   }
 
   return finalize(
-    { antigravityVersion: fp.version, base, fontSync, userLayer: layer, stepUnlock, ruleStatus, cdpBootstrap, autoUpdate, verify },
+    {
+      mode: state.options.cli ? 'desktop+cli' : 'desktop',
+      antigravityVersion: fp.version,
+      antigravityCli: detectAntigravityCli(),
+      base,
+      fontSync,
+      userLayer: layer,
+      cliLayer,
+      stepUnlock,
+      ruleStatus,
+      cdpBootstrap,
+      autoUpdate,
+      verify
+    },
     { critical, warnings }
   );
 }
@@ -1233,12 +1521,13 @@ async function cmdSyncUpgrade(flags) {
   const state = loadState();
   if (!state) return finalize({ noop: true, reason: 'not_installed' });
 
-  const fp = getAntigravityAppFingerprint();
-  if (fp.changedAtMs > 0 && Date.now() - fp.changedAtMs < 12000) {
+  const isDesktop = state.options?.desktop !== false;
+  const fp = isDesktop ? getAntigravityAppFingerprint() : { version: 'none', sig: 'cli-only', changedAtMs: 0 };
+  if (isDesktop && fp.changedAtMs > 0 && Date.now() - fp.changedAtMs < 12000) {
     await new Promise((r) => setTimeout(r, 4500)); // let a freshly updated app finish its cold start
   }
   const warnings = [];
-  const appChanged = state.sync?.appSig !== fp.sig;
+  const appChanged = isDesktop && state.sync?.appSig !== fp.sig;
   const now = Date.now();
 
   let selfPull = { skipped: true };
@@ -1264,8 +1553,10 @@ async function cmdSyncUpgrade(flags) {
       }
       return null;
     }
-    core = ensureUpstreamCore({ upgrade: true });
-    if (core.error) warnings.push(`upstream core: ${core.error}`);
+    if (isDesktop) {
+      core = ensureUpstreamCore({ upgrade: true });
+      if (core.error) warnings.push(`upstream core: ${core.error}`);
+    }
     state.sync.lastRemoteCheckOk = !selfPull.error && !core.error;
   }
 
@@ -1274,13 +1565,32 @@ async function cmdSyncUpgrade(flags) {
     saveState(state);
     return finalize({ validation }, { critical: ['source validation failed; live files left untouched'] });
   }
+
+  let cliLayer = { skipped: 'disabled_by_option' };
+  if (state.options?.cli) {
+    cliLayer = installCliLayer(state, { overwriteLocal: flags.has('--overwrite-local'), allowSettingsEnable: false });
+    if (cliLayer.error) warnings.push(`cli layer: ${cliLayer.error}`);
+    if (cliLayer.settings?.error) warnings.push(`cli settings (${cliLayer.settings.path}): ${cliLayer.settings.error}`);
+    if (cliLayer.conflict) warnings.push(`local edits kept, new version in ${INCOMING_DIR}: ${AGY_CLI_STATUSLINE_NAME}`);
+  }
+
+  const ruleStatus = state.options.agentsRule ? injectAgentsMdRule(state, { allowInsert: false }) : 'disabled_by_option';
+
+  if (!isDesktop) {
+    const antigravityCli = detectAntigravityCli();
+    state.sync = Object.assign({}, state.sync, { cliVersion: antigravityCli.version, lastAppliedAt: now });
+    saveState(state);
+    const summary = `sync-upgrade | mode=cli-only | agyCli=${antigravityCli.version || 'unknown'} | remoteChecked=${!selfPull.skipped} | cliScript=${cliLayer.script || 'skipped'}`;
+    appendSyncLog(summary);
+    return finalize({ mode: 'cli-only', summary, selfPull, cliLayer, ruleStatus }, { warnings });
+  }
+
   const layer = installUserLayer(state, { overwriteLocal: flags.has('--overwrite-local') });
   if (layer.conflicts.length) warnings.push(`local edits kept, new versions in ${INCOMING_DIR}: ${layer.conflicts.join(', ')}`);
 
   /* Only re-assert step settings after an app update (which may reset them); a user's later choice is respected otherwise. */
   let stepUnlock = { skipped: appChanged ? 'disabled_by_option' : 'app_unchanged' };
   if (appChanged && state.options.stepUnlock) stepUnlock = await applyStepUnlock(state);
-  const ruleStatus = state.options.agentsRule ? injectAgentsMdRule(state, { allowInsert: false }) : 'disabled_by_option';
   const cdpBootstrap = ensureMacCdpBootstrapWrapper();
   if (state.options.autoUpdate && process.platform === 'darwin' && !NO_LAUNCHD && fs.existsSync(LEGACY_AUTOSYNC_PLIST)) {
     enableMacAutoUpdateAgent();
@@ -1299,7 +1609,7 @@ async function cmdSyncUpgrade(flags) {
   saveState(state);
   const summary = `sync-upgrade | agy=${fp.version} | appChanged=${appChanged} | remoteChecked=${!selfPull.skipped} | coreUpgraded=${Boolean(core.upgraded)} | updated=${layer.updated.length + layer.merged.length} | conflicts=${layer.conflicts.length}`;
   appendSyncLog(summary);
-  return finalize({ summary, selfPull, core, userLayer: layer, stepUnlock, ruleStatus, cdpBootstrap, ag2Sync, verify }, { warnings });
+  return finalize({ summary, selfPull, core, userLayer: layer, cliLayer, stepUnlock, ruleStatus, cdpBootstrap, ag2Sync, verify }, { warnings });
 }
 
 async function cmdUninstall() {
@@ -1310,18 +1620,21 @@ async function cmdUninstall() {
     return finalize({ noop: true, reason: 'not_installed', autoUpdateRemoved, wrapperRestored });
   }
   const warnings = [];
+  const isDesktop = state.options?.desktop !== false || Object.keys(state.files || {}).length > 0;
   const autoUpdateRemoved = disableMacAutoUpdateAgent();
-  const wrapperRestored = restorePlainDaemonWrapper();
-  const settings = await revertStepUnlock(state);
+  const wrapperRestored = isDesktop ? restorePlainDaemonWrapper() : { restored: false };
+  const settings = isDesktop ? await revertStepUnlock(state) : { skipped: 'cli_only' };
   if (settings.live && !settings.live.ok && settings.live.appRunning !== false) warnings.push(`live settings revert: ${settings.live.reason}`);
-  const files = restoreUserLayer(state);
+  const files = isDesktop ? restoreUserLayer(state) : { restored: [], removed: [], stubbed: [], kept: [], savedLocalEdits: [] };
   if (files.savedLocalEdits.length) warnings.push(`your post-install edits were saved: ${files.savedLocalEdits.join(', ')}`);
+  const cli = restoreCliLayer(state);
+  if (cli.savedLocalEdits.length) warnings.push(`your post-install CLI edits were saved: ${cli.savedLocalEdits.join(', ')}`);
   const ruleRemoved = removeAgentsMdRule();
   fs.rmSync(STATE_DIR, { recursive: true, force: true });
   fs.rmSync(LEGACY_V2_STATE_DIR, { recursive: true, force: true });
   fs.rmSync(LEGACY_SYNC_LOG_FILE, { force: true });
-  const verify = runUpstreamVerify();
-  return finalize({ autoUpdateRemoved, wrapperRestored, settings, files, ruleRemoved, verify }, { warnings });
+  const verify = isDesktop ? runUpstreamVerify() : { skipped: 'cli_only' };
+  return finalize({ autoUpdateRemoved, wrapperRestored, settings, files, cli, ruleRemoved, verify }, { warnings });
 }
 
 async function main(argv) {

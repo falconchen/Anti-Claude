@@ -39,4 +39,4 @@ node "$HOME/Developer/Anti-Claude/install.mjs" uninstall
 ```
 Removes the auto-update watcher, restores backed-up `theme-patch/user/` files (files that did not exist before are deleted; post-install edits are saved to a side folder first), reverts the step-stream settings it changed, removes the rule block from `~/.gemini/AGENTS.md`, and hot-reloads immediately. Running it twice is a no-op.
 
-Options: `install --no-auto-update | --no-step-unlock | --no-agents-rule | --overwrite-local`. Feature switches live in `user/config.json` → `modules.claudeUx*`. Never touches `/Applications/Antigravity.app/Contents/Resources/app.asar`.
+Options: `install [--cli | --cli-only | --no-cli | --no-cli-statusline] [--no-auto-update] [--no-step-unlock] [--no-agents-rule] [--overwrite-local]`. Feature switches live in `user/config.json` → `modules.claudeUx*`. Never touches `/Applications/Antigravity.app/Contents/Resources/app.asar`.
