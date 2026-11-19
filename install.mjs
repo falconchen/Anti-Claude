@@ -323,8 +323,8 @@ function findAgyCliBinary() {
   } catch {}
   const fallbacks =
     process.platform === 'win32'
-      ? [path.join(HOME, '.local', 'bin', 'agy.exe')]
-      : [path.join(HOME, '.local', 'bin', 'agy'), '/opt/homebrew/bin/agy', '/usr/local/bin/agy'];
+      ? [path.join(HOME, '.gemini', 'bin', 'agy.exe'), path.join(HOME, '.local', 'bin', 'agy.exe')]
+      : [path.join(HOME, '.gemini', 'bin', 'agy'), path.join(HOME, '.local', 'bin', 'agy'), '/opt/homebrew/bin/agy', '/usr/local/bin/agy'];
   for (const p of fallbacks) {
     if (fs.existsSync(p)) return p;
   }

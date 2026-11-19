@@ -67,6 +67,7 @@ function run(h, args, env = {}) {
       CLAUDE_UX_NO_LAUNCHD: '1',
       CLAUDE_UX_NO_CDP: '1',
       CLAUDE_UX_NO_FONTS: '1',
+      ANTI_CLAUDE_NO_CLI: '1',
       FAKE_VERIFY_OK: '1',
       ...env
     }
