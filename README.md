@@ -35,7 +35,7 @@ By default, Antigravity hides reasoning inside collapsed `thinking` blocks, runs
 
 - **Interleaved narration flow**: Strips empty filler; before each tool call, the agent writes 1–2 concise sentences explaining what it just found and what it is checking next, creating a clean `brief update → expandable tool row → next update` rhythm. Progress updates, command summaries, and checklists automatically match the user's conversation language (defaulting to English).
 - **Unfolded step stream & live elapsed timers**: Automatically unlocks the client's full step-detail engine and unwraps the outer end-of-turn `Worked for Xm` collapse. Actively running tool rows show orbiting blue dots with a live elapsed timer, while expanded thinking blocks step back into muted grey prose.
-- **In-flow `TodoWrite` progress card**: For multi-phase tasks (3+ steps), the agent outputs an initial checklist that renders as a rounded white card following the active turn inline. Hidden HTML phase comments advance checkmarks silently without repeating the checklist mid-turn, interrupted tasks show a `Paused` badge, and completed tasks archive cleanly. Ordinary Markdown checklists in normal replies remain untouched.
+- **In-flow `TodoWrite` progress card**: For multi-phase tasks (3+ steps), the agent outputs an initial checklist that renders as a rounded white card following the active turn inline. Hidden HTML phase comments advance checkmarks silently without repeating the checklist, interrupted tasks show a `Paused` badge, and the card disappears cleanly once finished (just like Claude Desktop). Ordinary Markdown checklists in normal replies remain untouched.
 
 ### 2. Desktop UI & Everyday Controls
 
