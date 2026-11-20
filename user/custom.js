@@ -4082,6 +4082,8 @@
     '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="7" width="9" height="6" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>';
   const PENDING_BELL_SVG =
     '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.5 6.5a3.5 3.5 0 1 0-7 0c0 3.2-1.3 4.3-1.3 4.3h9.6s-1.3-1.1-1.3-4.3"/><path d="M6.8 13a1.3 1.3 0 0 0 2.4 0"/></svg>';
+  const RECENT_CHEVRON_SVG =
+    '<svg class="ag-recent-chevron" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 -960 960 960" fill="currentColor" aria-hidden="true"><path d="M517.85-480l-184-184L376-706.15L602.15-480L376-253.85L333.85-296l184-184Z"/></svg>';
   const RECENT_PLUS_SVG =
     '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>';
   const RECENT_PIN_SVG =
@@ -4101,7 +4103,6 @@
   let sidebarStoreUnsub = null;
   let sidebarSyncTimer = 0;
   let cachedSidebarActionsCtx = null;
-  let recentExpanded = false;
   let recentPageLimit = 50;
   let recentLastSig = '';
   let recentRenamingId = '';
@@ -4511,6 +4512,18 @@
     return { host, container: host && host.parentElement };
   }
 
+  // Mount inside the native spacer, whose ResizeObserver updates virtual row offsets.
+  // Do not place shortcuts in a sticky section header or manually shift virtual rows.
+  function getRecentShortcutHost(sidebar) {
+    const list = sidebar && sidebar.firstElementChild;
+    if (!list) return null;
+    const header = list.querySelector('[data-sidebar-section-drop-id="main-section-header"]');
+    const spacer = header && header.previousElementSibling;
+    if (!spacer || !spacer.hasAttribute('data-index') ||
+        spacer.querySelector('[data-testid="section-header"], [data-testid="conversation-row-sidebar"]')) return null;
+    return spacer;
+  }
+
   function resolveSummaryProjectInfo(summary, projectLabels, state) {
     const meta = (summary && summary.trajectoryMetadata) || {};
     const pid = String(meta.projectId || (summary && summary.projectId) || '');
@@ -4552,7 +4565,7 @@
         return;
       } catch {}
     }
-    const link = document.querySelector(`a[href*="/c/${id}"]`);
+    const link = document.querySelector(`[data-testid="conversation-row-sidebar"] a[href*="/c/${id}"]`);
     if (link && typeof link.click === 'function') {
       link.click();
       return;
@@ -4790,12 +4803,19 @@
     }
     const { host: sbParent, container: sbGrand } = getSidebarListHost(bindings.sidebar);
     if (!sbParent || !sbGrand) return;
+    const shortcutHost = !isUnified && getRecentShortcutHost(bindings.sidebar);
+    // A virtual spacer can be unmounted while scrolled away; wait for its remount.
+    if (!isUnified && !shortcutHost && bindings.sidebar.querySelector('[data-index]')) {
+      removeRecentSection();
+      return;
+    }
+    const sectionParent = shortcutHost || sbGrand;
 
     const summaries = (state && state.trajectorySummaries && state.trajectorySummaries.summaries) || {};
     const list = [];
     for (const [id, summary] of Object.entries(summaries)) {
       if (!isSidebarVisibleSummary(id, summary, state)) continue;
-      if (isSummaryPinned(id, summary, state)) continue;
+      if (isUnified && isSummaryPinned(id, summary, state)) continue;
       const rawTitle = (summary.annotations && summary.annotations.title) || summary.summary;
       if (!rawTitle) continue;
       const title = String(rawTitle);
@@ -4817,9 +4837,9 @@
       removeRecentSection();
       return;
     }
-    list.sort((a, b) => b.priority - a.priority || b.updatedAt - a.updatedAt);
+    list.sort((a, b) => (isUnified ? b.priority - a.priority : 0) || b.updatedAt - a.updatedAt || a.id.localeCompare(b.id));
     recentItemsById = new Map(list.map((it) => [it.id, it]));
-    const limit = isUnified ? recentPageLimit : recentExpanded ? 8 : 4;
+    const limit = isUnified ? recentPageLimit : 20;
     const items = list.slice(0, limit);
     const total = list.length;
     const nowBucket = Math.floor(Date.now() / 30000);
@@ -4827,12 +4847,12 @@
     const mode = isUnified ? 'unified' : 'compact';
 
     let sec = document.getElementById('ag-claude-recent-section');
-    const desiredRef = isUnified ? sbParent.nextSibling : sbParent;
-    const wrongParent = !sec || sec.parentElement !== sbGrand;
+    const desiredRef = shortcutHost ? null : isUnified ? sbParent.nextSibling : sbParent;
+    const wrongParent = !sec || sec.parentElement !== sectionParent;
     const wrongPosition =
       sec &&
-      sec.parentElement === sbGrand &&
-      (isUnified ? sec.previousSibling !== sbParent : sec.nextSibling !== sbParent);
+      sec.parentElement === sectionParent &&
+      (shortcutHost ? sec.nextSibling !== null : isUnified ? sec.previousSibling !== sbParent : sec.nextSibling !== sbParent);
 
     if (wrongParent) {
       if (sec) sec.remove();
@@ -4871,8 +4891,6 @@
         if (more) {
           if (sec.getAttribute('data-mode') === 'unified') {
             recentPageLimit += 50;
-          } else {
-            recentExpanded = !recentExpanded;
           }
           recentLastSig = '';
           syncSidebarEnhancements();
@@ -4903,6 +4921,10 @@
         }
         const row = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-id]');
         if (row) {
+          if (row.tagName === 'A') {
+            if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+            ev.preventDefault();
+          }
           const cid = row.getAttribute('data-ag-recent-id');
           if (recentRenamingId && recentRenamingId === cid) return;
           closeRecentRowMenu();
@@ -4938,7 +4960,7 @@
           return;
         }
         const row = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-id]');
-        if (row && (ev.key === 'Enter' || ev.key === ' ')) {
+        if (row && row.tagName !== 'A' && (ev.key === 'Enter' || ev.key === ' ')) {
           ev.preventDefault();
           const cid = row.getAttribute('data-ag-recent-id');
           navigateSidebarConversation(cid, findSidebarBindings() || bindings);
@@ -4953,10 +4975,10 @@
         },
         true
       );
-      sbGrand.insertBefore(sec, desiredRef);
+      sectionParent.insertBefore(sec, desiredRef);
       recentLastSig = '';
     } else if (wrongPosition) {
-      sbGrand.insertBefore(sec, desiredRef);
+      sectionParent.insertBefore(sec, desiredRef);
       recentLastSig = '';
     }
 
@@ -4970,7 +4992,7 @@
     }
 
     const isCollapsed = isUnified ? unifiedRecentCollapsed : recentCollapsed;
-    const sig = `${mode}|${FEAT.i18n ? 1 : 0}|${isCollapsed ? 1 : 0}|${isUnified ? recentPageLimit : recentExpanded ? 1 : 0}|${recentRenamingId}|${activeId}|${nowBucket}|${total}|${items
+    const sig = `${mode}|${FEAT.i18n ? 1 : 0}|${isCollapsed ? 1 : 0}|${isUnified ? recentPageLimit : 20}|${recentRenamingId}|${activeId}|${nowBucket}|${total}|${items
       .map((it) => `${it.id}:${it.title}:${it.project}:${it.status ? `${it.status.kind}-${it.status.subkind}` : 'idle'}:${Math.floor(it.updatedAt / 60)}`)
       .join(';')}`;
     if (sig === recentLastSig) return;
@@ -4978,8 +5000,8 @@
     sec.setAttribute('aria-label', L('最近对话', 'Recents'));
 
     const headerHtml = isUnified
-      ? `<div class="ag-recent-hdr-bar"><button type="button" class="ag-recent-hdr" data-ag-recent-toggle aria-expanded="${!isCollapsed}"><span>${L('最近对话', 'Recents')}</span><span class="ag-recent-chevron">▾</span></button><button type="button" class="ag-recent-new-btn" data-ag-recent-new title="${escapeHtml(L('新建对话', 'New conversation'))}" aria-label="${escapeHtml(L('新建对话', 'New conversation'))}">${RECENT_PLUS_SVG}</button></div>`
-      : `<button type="button" class="ag-recent-hdr" data-ag-recent-toggle aria-expanded="${!isCollapsed}"><span>${L('最近对话', 'Recents')}</span><span class="ag-recent-chevron">▾</span></button>`;
+      ? `<div class="ag-recent-hdr-bar"><button type="button" class="ag-recent-hdr" data-ag-recent-toggle aria-expanded="${!isCollapsed}"><span>${L('最近对话', 'Recents')}</span>${RECENT_CHEVRON_SVG}</button><button type="button" class="ag-recent-new-btn" data-ag-recent-new title="${escapeHtml(L('新建对话', 'New conversation'))}" aria-label="${escapeHtml(L('新建对话', 'New conversation'))}">${RECENT_PLUS_SVG}</button></div>`
+      : `<button type="button" class="ag-recent-hdr" data-ag-recent-toggle aria-expanded="${!isCollapsed}"><span>${L('最近对话', 'Recents')}</span>${RECENT_CHEVRON_SVG}</button>`;
 
     const moreHtml = isUnified
       ? total > items.length
@@ -4987,9 +5009,7 @@
             FEAT.i18n ? `显示更多（还有 ${total - items.length} 条）` : `Show more (${total - items.length} left)`
           )}</button>`
         : ''
-      : total > 4
-        ? `<button type="button" class="ag-recent-more" data-ag-recent-more>${recentExpanded ? L('收起', 'Show less') : L('展开更多', 'Show more')}</button>`
-        : '';
+      : '';
 
     const rowsHtml = isCollapsed
       ? ''
@@ -5015,6 +5035,9 @@
               const mainInner = isRenaming
                 ? `<input type="text" class="ag-recent-rename-input" data-ag-recent-rename-input="${escapeHtml(it.id)}" data-orig-title="${escapeHtml(it.title)}" value="${escapeHtml(it.title)}" />`
                 : `<div class="ag-recent-title">${escapeHtml(it.title)}</div>`;
+              if (!isUnified) {
+                return `<a class="ag-recent-row" href="/c/${encodeURIComponent(it.id)}" aria-label="${escapeHtml(it.title)}"${isAct ? ' aria-current="page"' : ''} data-ag-recent-id="${escapeHtml(it.id)}" data-updated-at="${it.updatedAt}" data-active="${isAct ? 'true' : 'false'}" title="${escapeHtml(tip)}"><div class="ag-recent-main">${mainInner}</div><div class="ag-recent-side" aria-hidden="true">${sideHtml}</div></a>`;
+              }
               return `<div class="ag-recent-row" role="button" tabindex="0" data-ag-recent-id="${escapeHtml(it.id)}" data-active="${isAct ? 'true' : 'false'}"${it.project ? ` data-has-project="true"` : ''}${isRenaming ? ' data-renaming="true"' : ''} title="${escapeHtml(tip)}"><div class="ag-recent-main">${mainInner}</div>${isRenaming ? '' : `<div class="ag-recent-side">${sideHtml}</div>${actionsHtml}`}</div>`;
             })
             .join('')}</div>` + moreHtml
@@ -5510,6 +5533,14 @@
           'Projects Workspace & Local Context',
           '在「自动化任务」与「技能与自定义」之间加入 Claude 风格项目入口，纯本地管理指令（AGENTS.md）、参考文件与定时任务',
           'Adds a Claude-style Projects nav entry between Automations and Skills to manage local AGENTS.md, context files & scheduled tasks'
+        ],
+        [
+          'claudeUxRecentSection',
+          'recentSection',
+          '最近 20 条对话快捷入口',
+          'Recent 20 Conversation Shortcuts',
+          '在置顶对话和项目之间显示按更新时间排序的最近 20 条对话，保留原生项目列表',
+          'Shows the 20 most recently updated conversations between Pinned and Projects, keeping the native project list'
         ],
         [
           'claudeUxHideSidebarProjects',

@@ -2637,11 +2637,20 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) .ag-claude-folder-badge[da
   background-color: #78A9FF !important;
 }
 
-/* 顶部最近对话区块：使下方虚拟列表自适应高度（compact 模式） */
-#ag-claude-recent-section[data-mode="compact"] + div {
-  height: auto !important;
-  flex: 1 1 0% !important;
-  min-height: 0 !important;
+/* Shortcut section lives inside the native measured spacer before Projects. */
+#ag-claude-recent-section[data-mode="compact"] {
+  padding: 0 0 16px !important;
+  margin: 0 !important;
+}
+
+#ag-claude-recent-section a.ag-recent-row {
+  color: inherit !important;
+  text-decoration: none !important;
+}
+
+#ag-claude-recent-section a.ag-recent-row:focus-visible {
+  outline: 2px solid var(--ring, #2F71E3) !important;
+  outline-offset: -2px !important;
 }
 
 /* 统一侧栏模式（unified）：原生虚拟列表仅承接顶部的置顶对话，高度严丝合缝，与下方全量「最近对话」共享外层单一滚动条 */
@@ -2684,8 +2693,7 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) .ag-claude-folder-badge[da
   flex: 1 0 auto !important;
 }
 
-#ag-claude-recent-section:has(> .ag-recent-hdr[aria-expanded="false"]),
-#ag-claude-recent-section:has(> .ag-recent-hdr-bar > .ag-recent-hdr[aria-expanded="false"]) {
+#ag-claude-recent-section[data-mode="unified"]:has(> .ag-recent-hdr-bar > .ag-recent-hdr[aria-expanded="false"]) {
   margin-bottom: 8px !important;
 }
 
@@ -2783,14 +2791,27 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-recent-section 
 }
 
 #ag-claude-recent-section .ag-recent-chevron {
-  display: inline-block !important;
-  font-size: 11px !important;
-  transition: transform 140ms ease, opacity 140ms ease !important;
-  opacity: 0.7 !important;
+  display: block !important;
+  width: 14px !important;
+  height: 14px !important;
+  flex-shrink: 0 !important;
+  transform: rotate(90deg) !important;
+  transition: transform 150ms ease, opacity 150ms ease !important;
+  opacity: 0.5 !important;
 }
 
 #ag-claude-recent-section .ag-recent-hdr[aria-expanded="false"] .ag-recent-chevron {
-  transform: rotate(-90deg) !important;
+  transform: rotate(0deg) !important;
+}
+
+/* Match the native 24px section headers; the spacer supplies 16px above,
+   and section padding supplies the same 16px below when collapsed. */
+#ag-claude-recent-section[data-mode="compact"] .ag-recent-hdr {
+  height: 24px !important;
+  padding: 4px 8px !important;
+  margin: 0 !important;
+  justify-content: flex-start !important;
+  gap: 2px !important;
 }
 
 #ag-claude-recent-section .ag-recent-list {

@@ -609,7 +609,7 @@ test('inline undo & edit: expands in-bubble editor, previews modified files, tog
   h.close();
 });
 
-test('sidebar folder status badges & top Recents: aggregates collapsed folders, sorts pending > running > recent, and navigates via router', { skip }, async () => {
+test('sidebar folder badges & shortcut Recents: aggregates status, sorts by updated time, and navigates via router', { skip }, async () => {
   const h = mount(
     `
     <div class="sidebar-grand">
@@ -704,22 +704,25 @@ test('sidebar folder status badges & top Recents: aggregates collapsed folders, 
   assert.equal(badgesB.length, 0, 'expanded proj-b suppresses folder badges');
 
   const recentRows = h.doc.querySelectorAll('#ag-claude-recent-section .ag-recent-row');
-  assert.equal(recentRows.length, 3);
+  assert.equal(recentRows.length, 4);
   assert.deepEqual(
     Array.from(recentRows).map((r) => r.getAttribute('data-ag-recent-id')),
-    ['conv-pending', 'conv-running', 'conv-idle-unread'],
-    'sorted by pending > running > recent and excludes hidden workflow & already-pinned sessions'
+    ['conv-pinned', 'conv-idle-unread', 'conv-running', 'conv-pending'],
+    'shortcuts sort strictly by updated time, include pinned chats, and exclude hidden workflows'
   );
   assert.equal(h.doc.documentElement.getAttribute('lang'), 'zh-CN', 'sets zh-CN root locale for CJK shaping & line-break rules');
   assert.equal(
-    h.doc.querySelector('#ag-claude-recent-section .ag-recent-row:nth-child(3) .ag-recent-title').textContent,
+    h.doc.querySelector('#ag-claude-recent-section .ag-recent-row:nth-child(2) .ag-recent-title').textContent,
     '恢复谷歌浏览器Gemini侧边栏',
     'keeps raw title untouched so native CSS text-autospace provides uniform 1/8em spacing'
   );
   assert.equal(h.doc.querySelector('[data-testid="conversation-row-sidebar"] span.truncate').textContent, '恢复谷歌浏览器Gemini侧边栏');
   assert.equal(h.doc.querySelectorAll('#ag-claude-recent-section .ag-recent-proj').length, 0, 'Variant A uses pure single-line rows');
-  assert.match(recentRows[1].getAttribute('title') || '', /Project: 项目B/, 'hover title exposes project name in default English UI');
-  recentRows[1].click();
+  assert.match(recentRows[2].getAttribute('title') || '', /Project: 项目B/, 'hover title exposes project name in default English UI');
+  assert.equal(recentRows[2].tagName, 'A');
+  assert.equal(recentRows[2].getAttribute('href'), '/c/conv-running');
+  assert.equal(recentRows[2].getAttribute('aria-label'), '正在后台编译');
+  recentRows[2].click();
   assert.deepEqual(JSON.parse(JSON.stringify(navigatedTo)), { to: '/c/$cascadeId', params: { cascadeId: 'conv-running' } });
   h.cleanups.forEach((fn) => fn());
   assert.equal(h.doc.documentElement.hasAttribute('lang'), false, 'dispose restores original html lang state');
@@ -2140,5 +2143,58 @@ test('customizations layout enhancement: mounts category tabs, frames skills lis
   assert.equal(h.doc.getElementById('ag-cust-cat-bar'), null);
   assert.equal(h.doc.getElementById('ag-cust-skill-actions'), null);
   assert.equal(h.doc.getElementById('ag-cust-agent-actions'), null);
+  h.close();
+});
+
+
+test('20 recent shortcuts use the measured spacer between Pinned and Projects and survive virtual remount', { skip }, async () => {
+  const h = mount(`<div class="sidebar-grand"><div class="sidebar-parent">
+    <div data-testid="conversation-list-sidebar"><div>
+      <div data-index="0" data-sidebar-section-drop-id="pinned"><div data-testid="section-header">Pinned</div></div>
+      <div data-index="1"><div style="height:16px"></div></div>
+      <div data-index="2" data-sidebar-section-drop-id="main-section-header"><div data-testid="section-header">Projects</div></div>
+      <div data-index="3"><div data-testid="project-header" data-project-label="Project A">Project A</div></div>
+    </div></div></div></div>`, { modules: { claudeUxRecentSection: true, claudeUxHideSidebarProjects: false } });
+  const summaries = {};
+  for (let i = 0; i < 25; i++) {
+    summaries[`chat-${i}`] = { annotations: { title: `Chat ${i}` }, lastModifiedTime: { seconds: 1000 + i }, trajectoryMetadata: { projectId: 'project-a' }, status: 1 };
+  }
+  summaries.hidden = { annotations: { title: 'Hidden', archived: true }, lastModifiedTime: { seconds: 9999 } };
+  const sb = h.doc.querySelector('[data-testid="conversation-list-sidebar"]');
+  const list = sb.firstElementChild;
+  const store = { getState: () => ({ trajectorySummaries: { summaries } }), subscribe: () => () => {} };
+  list.__reactFiber$sb = { memoizedProps: { sidebarStore: store, sidebarRouter: { navigate() {} }, sidebarGroups: [] }, return: null };
+  const sync = async () => { h.window.__t.scheduleSync(); await settle(h); };
+  await sync();
+  const spacer = list.querySelector('[data-index="1"]');
+  let section = h.doc.getElementById('ag-claude-recent-section');
+  assert.equal(section.parentElement, spacer);
+  assert.ok(section.querySelector('.ag-recent-hdr > svg.ag-recent-chevron[aria-hidden="true"]'));
+  assert.equal(section.querySelector('.ag-recent-hdr').getAttribute('aria-expanded'), 'true');
+  assert.equal(spacer.previousElementSibling.getAttribute('data-sidebar-section-drop-id'), 'pinned');
+  assert.equal(spacer.nextElementSibling.getAttribute('data-sidebar-section-drop-id'), 'main-section-header');
+  assert.equal(section.querySelectorAll('a.ag-recent-row').length, 20);
+  assert.deepEqual([...section.querySelectorAll('a.ag-recent-row')].map(e => e.getAttribute('href')), Array.from({ length: 20 }, (_, i) => `/c/chat-${24 - i}`));
+  assert.equal(section.querySelector('[data-ag-recent-more]'), null);
+  section.querySelector('[data-ag-recent-toggle]').click();
+  assert.equal(section.querySelectorAll('a.ag-recent-row').length, 0);
+  assert.equal(section.querySelector('.ag-recent-hdr').getAttribute('aria-expanded'), 'false');
+  assert.ok(section.querySelector('.ag-recent-hdr > svg.ag-recent-chevron'));
+  section.querySelector('[data-ag-recent-toggle]').click();
+  assert.equal(section.querySelectorAll('a.ag-recent-row').length, 20);
+  // The native virtualizer can discard and recreate its spacer while scrolling.
+  spacer.remove();
+  await sync();
+  assert.equal(h.doc.getElementById('ag-claude-recent-section'), null);
+  const freshSpacer = h.doc.createElement('div');
+  freshSpacer.setAttribute('data-index', '1');
+  list.insertBefore(freshSpacer, list.querySelector('[data-index="2"]'));
+  await sync();
+  section = h.doc.getElementById('ag-claude-recent-section');
+  assert.equal(section.parentElement, freshSpacer);
+  assert.equal(section.querySelectorAll('a.ag-recent-row').length, 20);
+  h.cleanups.forEach(fn => fn());
+  assert.equal(h.doc.getElementById('ag-claude-recent-section'), null);
+  assert.ok(list.querySelector('[data-sidebar-section-drop-id="main-section-header"]'));
   h.close();
 });
