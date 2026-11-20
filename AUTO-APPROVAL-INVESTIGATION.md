@@ -2,6 +2,8 @@
 
 检查日期：2026-11-20。对象：本机 Antigravity Desktop 2.33.0、Anti-Claude 3.0.4。
 
+本文件保留初步只读检查的证据和当时的验证边界。后续独立模块的使用与实现说明见 [AUTO-APPROVAL.md](AUTO-APPROVAL.md)。
+
 ## 结论与验证边界
 
 客户端存在按对话 ID、轨迹 ID、步骤索引提交权限决定的内部接口，代码路径支持处理非当前对话，无需寻找侧栏链接或先导航到目标对话。Anti-Claude 现有 React Context 服务发现方式能够取得该接口。

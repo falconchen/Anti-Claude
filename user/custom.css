@@ -3165,6 +3165,57 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) :is(#ag-recent-row-menu, #
 /* ============================================================================
  * 3.14 客户端原生 Settings 内嵌「界面增强 (Anti-Claude)」可视化开关页
  * ============================================================================ */
+[data-ag-auto-approval-open="true"] > *:not(#ag-auto-approval-panel) {
+  display: none !important;
+}
+
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sidebar"][data-ag-auto-approval-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-AutoApproval"]).bg-sidebar-secondary,
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [data-testid="settings-sidebar"][data-ag-auto-approval-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-AutoApproval"]).bg-sidebar-secondary,
+html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sidebar"][data-ag-auto-approval-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-AutoApproval"]).bg-sidebar-secondary span,
+:is(html[data-ag-theme-mode="dark"] body, body.dark) [data-testid="settings-sidebar"][data-ag-auto-approval-nav-open="true"] button[data-testid^="settings-nav-item-"]:not([data-testid="settings-nav-item-AutoApproval"]).bg-sidebar-secondary span {
+  background-color: transparent !important;
+  font-weight: 400 !important;
+}
+
+#ag-auto-approval-panel {
+  color: var(--foreground) !important;
+  font-family: var(--font-sans) !important;
+}
+
+#ag-auto-approval-panel [data-ag-approval-delay] {
+  width: 88px;
+  padding: 6px 8px;
+  border: 1px solid var(--border, #ccc);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+#ag-auto-approval-panel [type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #2f71e3;
+}
+
+#ag-auto-approval-badge {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin: 4px 12px 8px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+  flex-shrink: 0;
+}
+
+#ag-auto-approval-badge[hidden] { display: none !important; }
+#ag-auto-approval-badge > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#ag-auto-approval-badge button { flex-shrink: 0; border: 0; background: transparent; color: inherit; cursor: pointer; }
+
+#ag-auto-approval-panel [data-status="conflict"],
+#ag-auto-approval-panel [data-status="uncertain"],
+#ag-auto-approval-panel [data-status="error"] { color: var(--destructive, #c93b3b); }
+
 [data-ag-claude-settings-open="true"] > *:not(#ag-claude-ux-settings-panel) {
   display: none !important;
 }

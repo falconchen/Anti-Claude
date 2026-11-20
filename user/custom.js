@@ -5808,7 +5808,7 @@
     if (
       e.target &&
       e.target.closest &&
-      !e.target.closest('#ag-claude-ux-settings-nav, #ag-settings-stats-wrap, [data-ag-stats-subhdr="1"]') &&
+      !e.target.closest('#ag-claude-ux-settings-nav, #ag-auto-approval-nav, #ag-settings-stats-wrap, [data-ag-stats-subhdr="1"]') &&
       e.target.closest('button')
     ) {
       closeClaudeUxSettingsPane();
@@ -5817,6 +5817,7 @@
   }
 
   function openClaudeUxSettingsPane() {
+    window.__agAutoApproval?.closeSettings();
     if (!settingsSidebarRef || !settingsRightRef || !settingsNavBtn) return;
     settingsSidebarRef.setAttribute('data-ag-claude-nav-open', 'true');
     settingsRightRef.setAttribute('data-ag-claude-settings-open', 'true');
@@ -6006,6 +6007,7 @@
   }
 
   function detachSettingsPanel() {
+    window.__agAutoApproval?.detachSettings();
     closeClaudeUxSettingsPane();
     cleanupSettingsStatsGroup(settingsSidebarRef || document.querySelector('[data-testid="settings-sidebar"]'));
     if (settingsSidebarRef) {
@@ -6033,6 +6035,7 @@
       return;
     }
     if (settingsNavWrap && settingsNavWrap.isConnected && settingsSidebarRef === sb) {
+      window.__agAutoApproval?.attachSettings(sb, settingsRightRef, settingsNavWrap, closeClaudeUxSettingsPane);
       syncSettingsStatsGroup(sb);
       return;
     }
@@ -6071,6 +6074,7 @@
     sb.addEventListener('click', onNativeSettingsNavClick, true);
     settingsNavWrap = navWrap;
     settingsNavBtn = btn;
+    window.__agAutoApproval?.attachSettings(sb, rightContent, navWrap, closeClaudeUxSettingsPane);
     syncSettingsStatsGroup(sb);
   }
 
@@ -10884,7 +10888,7 @@
   }
 
   const OWN_SEL =
-    '.ag-claude-todo-card, .ag-claude-todo-live-dock, .ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, .ag-claude-inline-editor, .ag-claude-folder-badges, #ag-claude-recent-section, #ag-recent-row-menu, #ag-project-action-menu, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-settings-stats-wrap, .ag-settings-subhdr-chev, #ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal';
+    '.ag-claude-todo-card, .ag-claude-todo-live-dock, #ag-auto-approval-nav, #ag-auto-approval-panel, #ag-auto-approval-badge, .ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, .ag-claude-inline-editor, .ag-claude-folder-badges, #ag-claude-recent-section, #ag-recent-row-menu, #ag-project-action-menu, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-settings-stats-wrap, .ag-settings-subhdr-chev, #ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal';
   const CLASS_WATCH_SEL =
     'ul.contains-task-list, [id="antigravity.agentSidePanelInputBox"], [data-testid="tool-group-collapsible"], [data-testid="worked-for-collapsible"], [data-testid="progress-updates-collapsible"], [data-testid="ephemeral-tool-status"]';
 

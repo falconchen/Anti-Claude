@@ -10,6 +10,7 @@
  */
 
 import crypto from 'node:crypto';
+import { AutoApprovalCoordinator, normalizeApprovalSettings } from './auto-approval.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -53,6 +54,7 @@ const BASE_CONFIG_FILE = path.join(STATE_DIR, 'base', 'config.json');
 const CORE_BASE_CSS_FILE = path.join(__dirname, 'base.css');
 const CORE_I18N_FILE = path.join(__dirname, 'i18n.json');
 const CORE_RUNTIME_FILE = path.join(__dirname, 'runtime.js');
+const CORE_AUTO_APPROVAL_CLIENT_FILE = path.join(__dirname, 'auto-approval-client.js');
 const PKG_FILE = path.join(REPO_ROOT, 'package.json');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -95,7 +97,8 @@ const ALLOWED_UI_MODULE_KEYS = new Set([
   'claudeUxRecentSection',
   'claudeUxProjects',
   'claudeUxHideSidebarProjects',
-  'claudeUxCustomizations'
+  'claudeUxCustomizations',
+  'autoApproval'
 ]);
 const VALID_CJK_SCALES = new Set(['94.5', '95', '100']);
 const INLINE_TEXT_EXTS = new Set([
@@ -648,7 +651,8 @@ function sanitizeUiPrefs(raw) {
     }
   }
   const updatedAt = Number(raw.updatedAt) > 0 ? Math.floor(Number(raw.updatedAt)) : 0;
-  return { modules, cjkFontScale, uiState, updatedAt };
+  return { modules, cjkFontScale, uiState, updatedAt,
+    ...(raw.autoApproval && typeof raw.autoApproval === 'object' ? { autoApproval: normalizeApprovalSettings(raw.autoApproval) } : {}) };
 }
 
 function resolveEffectiveUserConfig(userConfigFile, rawCfg) {
@@ -681,6 +685,7 @@ function resolveEffectiveUserConfig(userConfigFile, rawCfg) {
   );
   const out = Object.assign({}, baseObj, {
     modules: mergedModules,
+    autoApproval: normalizeApprovalSettings(manualConfigNewer ? (baseObj.autoApproval || prefs.autoApproval) : (prefs.autoApproval || baseObj.autoApproval)),
     uiState: mergedUiState,
     uiPrefsUpdatedAt: prefs.updatedAt || Date.now()
   });
@@ -708,6 +713,7 @@ export function saveUiPrefs(payload) {
     schema: 1,
     updatedAt,
     modules: Object.assign({}, cur.modules, incoming.modules),
+    autoApproval: normalizeApprovalSettings(incoming.autoApproval || cur.autoApproval),
     ...(incoming.cjkFontScale || cur.cjkFontScale
       ? { cjkFontScale: incoming.cjkFontScale || cur.cjkFontScale }
       : {}),
@@ -719,6 +725,7 @@ export function saveUiPrefs(payload) {
     ok: true,
     updatedAt,
     modules: next.modules,
+    autoApproval: next.autoApproval,
     cjkFontScale: next.cjkFontScale || null,
     uiState: next.uiState
   };
@@ -735,6 +742,7 @@ function rebuildBundleIfNeeded() {
     statSig(CORE_BASE_CSS_FILE),
     statSig(CORE_I18N_FILE),
     statSig(CORE_RUNTIME_FILE),
+    statSig(CORE_AUTO_APPROVAL_CLIENT_FILE),
     statSig(userConfigFile),
     statSig(UI_PREFS_FILE),
     statSig(userCssFile),
@@ -784,6 +792,7 @@ function rebuildBundleIfNeeded() {
     contextLimit: Number(rawCfg?.contextLimit) > 0 ? Number(rawCfg.contextLimit) : 256000,
     contextLimitOverride: Number(rawCfg?.contextLimitOverride) > 0 ? Number(rawCfg.contextLimitOverride) : 0,
     modules,
+    autoApproval: normalizeApprovalSettings(rawCfg.autoApproval),
     endpoints
   };
 
@@ -798,6 +807,7 @@ function rebuildBundleIfNeeded() {
     cssText: baseCss,
     customCss,
     customJs,
+    autoApprovalJs: readTextOrEmpty(CORE_AUTO_APPROVAL_CLIENT_FILE),
     dict: mergedDict
   };
 
@@ -2371,6 +2381,55 @@ async function importLocalAgentNative() {
   return { ok: true, canceled: false, imported, dirPath: GLOBAL_AGENTS_DIR };
 }
 
+let autoApprovalCoordinator = null;
+let externalApprovalCheck = { at: 0, active: false };
+function externalApprovalIsActive() {
+  if (process.platform !== 'darwin') return false;
+  if (Date.now() - externalApprovalCheck.at < 2000) return externalApprovalCheck.active;
+  let active = false;
+  try {
+    execFileSync('/usr/bin/pgrep', ['-f', '/Antigravity Auto Approve.app/Contents/MacOS/AntigravityAutoApprove$'], { timeout: 800, stdio: 'ignore' });
+    const file = path.join(HOME, 'Library/Application Support/AntigravityAutoApprove/config.json');
+    active = readJsonOrFallback(file, {}).enabled !== false;
+  } catch (err) {
+    // pgrep exit 1 means absent. A failed inspection must not silently permit two executors.
+    active = err?.status !== 1;
+  }
+  externalApprovalCheck = { at: Date.now(), active };
+  return active;
+}
+function approvalCoordinator() {
+  if (autoApprovalCoordinator) return autoApprovalCoordinator;
+  const file = path.join(STATE_DIR, 'auto-approval-ledger.json');
+  let records = [];
+  if (fs.existsSync(file)) {
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (saved.schema !== 1 || !Array.isArray(saved.records)) throw new Error('invalid_approval_journal');
+    records = saved.records;
+  }
+  autoApprovalCoordinator = new AutoApprovalCoordinator({ records, persist: next => {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    const tmp = `${file}.tmp-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
+    let fd;
+    try {
+      fd = fs.openSync(tmp, 'wx', 0o600);
+      fs.writeFileSync(fd, JSON.stringify({ schema: 1, records: next }) + '\n');
+      fs.fsyncSync(fd);
+      fs.closeSync(fd); fd = undefined;
+      fs.renameSync(tmp, file);
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+      try { fs.unlinkSync(tmp); } catch {}
+    }
+  } });
+  return autoApprovalCoordinator;
+}
+function currentApprovalPolicy() {
+  rebuildBundleIfNeeded();
+  const enabled = !RUN_ONCE && activeConfig.enabled && activeConfig.modules.customJs !== false && activeConfig.modules.autoApproval === true;
+  return { enabled, settings: activeConfig.autoApproval, conflict: enabled && externalApprovalIsActive() };
+}
+
 async function handleProjectRpcRequest(rawPayload, callerEntry = null) {
   let req;
   try {
@@ -2384,6 +2443,14 @@ async function handleProjectRpcRequest(rawPayload, callerEntry = null) {
   if (!reqId || !action) return null;
 
   try {
+    if (['autoApprovalPoll', 'autoApprovalCommit', 'autoApprovalResult'].includes(action)) {
+      if (!callerEntry?.hostConfirmed || callerEntry.type !== 'page') return { reqId, result: { ok: false, error: 'unauthorized_context' } };
+      const coordinator = approvalCoordinator();
+      const result = action === 'autoApprovalPoll' ? coordinator.observe(callerEntry.id, payload, currentApprovalPolicy())
+        : action === 'autoApprovalCommit' ? coordinator.commit(callerEntry.id, payload, currentApprovalPolicy())
+        : coordinator.result(callerEntry.id, payload);
+      return { reqId, result };
+    }
     if (action === 'saveUiPrefs') {
       const res = saveUiPrefs(payload);
       rebuildBundleIfNeeded();

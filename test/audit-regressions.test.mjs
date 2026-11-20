@@ -640,7 +640,7 @@ test('[Audit #11 & R2-M6] validateSourceRoot rejects missing/corrupt JSON and un
     fs.mkdirSync(path.join(fakeRoot, 'user'), { recursive: true });
     fs.mkdirSync(path.join(fakeRoot, 'cli'), { recursive: true });
     fs.mkdirSync(path.join(fakeRoot, 'rules'), { recursive: true });
-    for (const rel of ['install.mjs', 'core/daemon.mjs', 'core/runtime.js', 'user/custom.js', 'cli/statusline.mjs']) {
+    for (const rel of ['install.mjs', 'core/daemon.mjs', 'core/runtime.js', 'core/auto-approval.mjs', 'core/auto-approval-client.js', 'user/custom.js', 'cli/statusline.mjs']) {
       fs.writeFileSync(path.join(fakeRoot, rel), 'export const ok = 1;\n');
     }
     fs.writeFileSync(path.join(fakeRoot, 'core', 'base.css'), '/* css */\n');
