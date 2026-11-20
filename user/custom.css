@@ -4791,9 +4791,309 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) .ag-cux-seg-btn[aria-check
 }
 
 
-/* Claude-Style Project Folder Picker Dropdown (`Work in a project or folder v`) */
+/* Claude-Style Project Folder Picker Dropdown & @ Mention Menu */
 #ag-claude-projects-view .ag-pd-composer-anchor {
   position: relative !important;
+}
+
+#ag-claude-projects-view .ag-pd-composer-box[data-drag="true"] {
+  border-color: #2F75C3 !important;
+  box-shadow: 0 0 0 2px rgba(47, 117, 195, 0.16) !important;
+}
+
+#ag-claude-projects-view .ag-pd-media-strip {
+  display: flex;
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  gap: 8px !important;
+  margin-bottom: 10px !important;
+}
+
+#ag-claude-projects-view .ag-pd-media-card {
+  position: relative !important;
+  width: 56px !important;
+  height: 56px !important;
+  border-radius: 10px !important;
+  overflow: visible !important;
+  flex-shrink: 0 !important;
+}
+
+#ag-claude-projects-view .ag-pd-media-img {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover !important;
+  border-radius: 10px !important;
+  border: 1px solid rgba(31, 30, 29, 0.12) !important;
+  background-color: #F4F3EE !important;
+  display: block !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-projects-view .ag-pd-media-img {
+  border-color: rgba(255, 255, 255, 0.14) !important;
+  background-color: #323230 !important;
+}
+
+#ag-claude-projects-view .ag-pd-media-rm {
+  position: absolute !important;
+  top: -5px !important;
+  right: -5px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 18px !important;
+  height: 18px !important;
+  padding: 0 !important;
+  border-radius: 999px !important;
+  border: 1.5px solid #FFFFFF !important;
+  background-color: #141413 !important;
+  color: #FFFFFF !important;
+  font-size: 12px !important;
+  line-height: 1 !important;
+  cursor: pointer !important;
+  opacity: 0;
+  transition: opacity 120ms ease, transform 120ms ease !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2) !important;
+}
+
+#ag-claude-projects-view .ag-pd-media-card:hover .ag-pd-media-rm,
+#ag-claude-projects-view .ag-pd-media-rm:focus-visible {
+  opacity: 1 !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-projects-view .ag-pd-media-rm {
+  border-color: #282826 !important;
+  background-color: #ECECEA !important;
+  color: #141413 !important;
+}
+
+#ag-claude-projects-view .ag-pd-chat-pin {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  margin-right: 5px !important;
+  color: #73726C !important;
+  vertical-align: -1.5px !important;
+}
+
+#ag-claude-projects-view .ag-pd-chat-pin svg {
+  width: 12px !important;
+  height: 12px !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-pills {
+  display: flex;
+  flex-wrap: wrap !important;
+  align-items: center !important;
+  gap: 6px !important;
+  margin-bottom: 8px !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-pill {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 5px !important;
+  max-width: 240px !important;
+  height: 24px !important;
+  padding: 0 7px 0 8px !important;
+  border-radius: 7px !important;
+  background-color: #F4F3EE !important;
+  border: 1px solid rgba(31, 30, 29, 0.1) !important;
+  color: #141413 !important;
+  font-size: 12.5px !important;
+  line-height: 1 !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-projects-view .ag-pd-mention-pill {
+  background-color: #383835 !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+  color: #ECECEA !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-pill-icon {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  color: #73726C !important;
+  flex-shrink: 0 !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-pill-lbl {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-pill-rm {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 15px !important;
+  height: 15px !important;
+  padding: 0 !important;
+  border: none !important;
+  border-radius: 4px !important;
+  background: transparent !important;
+  color: #73726C !important;
+  font-size: 13px !important;
+  line-height: 1 !important;
+  cursor: pointer !important;
+  flex-shrink: 0 !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-pill-rm:hover {
+  background-color: rgba(31, 30, 29, 0.08) !important;
+  color: #141413 !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-popover {
+  position: absolute !important;
+  left: 0 !important;
+  right: 0 !important;
+  top: calc(100% + 6px) !important;
+  z-index: 65 !important;
+  display: none;
+  flex-direction: column !important;
+  max-height: 332px !important;
+  overflow-y: auto !important;
+  padding: 6px !important;
+  border-radius: 14px !important;
+  background-color: #FFFFFF !important;
+  border: 1px solid rgba(31, 30, 29, 0.11) !important;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.1), 0 2px 6px rgba(0, 0, 0, 0.04) !important;
+  box-sizing: border-box !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-popover[data-open="true"] {
+  display: flex !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-projects-view .ag-pd-mention-popover {
+  background-color: #282826 !important;
+  border-color: rgba(255, 255, 255, 0.12) !important;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.48) !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-sec-hdr {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  padding: 5px 10px 4px !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  color: #73726C !important;
+  user-select: none !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-projects-view .ag-pd-mention-sec-hdr {
+  color: #9A9994 !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-back {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 4px !important;
+  padding: 2px 6px !important;
+  margin-left: -4px !important;
+  border: none !important;
+  border-radius: 5px !important;
+  background: transparent !important;
+  color: #575652 !important;
+  font-size: 12px !important;
+  cursor: pointer !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-back:hover {
+  background-color: rgba(31, 30, 29, 0.06) !important;
+  color: #141413 !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-projects-view .ag-pd-mention-back {
+  color: #B4B3AE !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-row {
+  display: flex !important;
+  align-items: center !important;
+  gap: 9px !important;
+  width: 100% !important;
+  min-height: 34px !important;
+  padding: 5px 10px !important;
+  border: none !important;
+  border-radius: 8px !important;
+  background: transparent !important;
+  text-align: left !important;
+  cursor: pointer !important;
+  box-sizing: border-box !important;
+  transition: background-color 80ms ease !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-row:hover,
+#ag-claude-projects-view .ag-pd-mention-row[data-active="true"] {
+  background-color: #F2F1ED !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-projects-view .ag-pd-mention-row:hover,
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-projects-view .ag-pd-mention-row[data-active="true"] {
+  background-color: rgba(255, 255, 255, 0.08) !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-icon {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 16px !important;
+  height: 16px !important;
+  color: #575652 !important;
+  flex-shrink: 0 !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-projects-view .ag-pd-mention-icon {
+  color: #A8A7A1 !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-icon img {
+  width: 14px !important;
+  height: 14px !important;
+  object-fit: contain !important;
+  border-radius: 3px !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-label {
+  font-size: 13.5px !important;
+  font-weight: 400 !important;
+  color: #141413 !important;
+  max-width: 58% !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-projects-view .ag-pd-mention-label {
+  color: #ECECEA !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-desc {
+  font-size: 12.5px !important;
+  color: #8E8D88 !important;
+  flex: 1 1 0% !important;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-chev {
+  font-size: 14px !important;
+  color: #9A9994 !important;
+  flex-shrink: 0 !important;
+}
+
+#ag-claude-projects-view .ag-pd-mention-empty {
+  padding: 12px 10px !important;
+  font-size: 12.5px !important;
+  color: #8E8D88 !important;
+  text-align: center !important;
 }
 
 #ag-claude-projects-view .ag-pd-folder-bar {

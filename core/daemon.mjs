@@ -62,6 +62,9 @@ const PROJECT_FILES_REL = path.join('.anti-claude', 'files');
 const SIDECARS_DIR = path.resolve(
   process.env.ANTI_CLAUDE_SIDECARS_DIR || path.join(HOME, '.gemini', 'config', 'sidecars')
 );
+const NATIVE_PROJECTS_DIR = path.resolve(
+  process.env.ANTI_CLAUDE_NATIVE_PROJECTS_DIR || path.join(HOME, '.gemini', 'config', 'projects')
+);
 const GLOBAL_SKILLS_DIR = path.resolve(
   process.env.ANTI_CLAUDE_SKILLS_DIR || path.join(HOME, '.gemini', 'config', 'skills')
 );
@@ -1294,7 +1297,10 @@ function readProjectContext(rawDir) {
   }
 
   let lastModifiedMs = 0;
+  let dirMtimeMs = 0;
   try {
+    const dst = fs.statSync(dirPath, { throwIfNoEntry: false });
+    if (dst) dirMtimeMs = Math.floor(dst.mtimeMs);
     const mst = fs.statSync(metaPath, { throwIfNoEntry: false });
     if (mst) lastModifiedMs = Math.max(lastModifiedMs, Math.floor(mst.mtimeMs));
     const ast = fs.statSync(agentsPath, { throwIfNoEntry: false });
@@ -1325,7 +1331,8 @@ function readProjectContext(rawDir) {
     scheduledTasks,
     hasAgentsMd,
     hasOtherAgentsMd: Boolean(outsideText),
-    lastModifiedMs
+    lastModifiedMs,
+    dirMtimeMs
   };
 }
 
@@ -2254,12 +2261,24 @@ async function handleProjectRpcRequest(rawPayload) {
   try {
     if (action === 'listContexts') {
       const paths = Array.isArray(payload.paths) ? payload.paths.slice(0, 80) : [];
+      const projectIds = Array.isArray(payload.projectIds) ? payload.projectIds.slice(0, 120) : [];
       const contexts = {};
       for (const raw of paths) {
         const res = readProjectContext(raw);
         if (res.ok) contexts[raw] = res;
       }
-      return { reqId, result: { ok: true, contexts } };
+      const projectMtimes = {};
+      for (const rawId of projectIds) {
+        const id = String(rawId || '').trim();
+        if (!id || !/^[a-zA-Z0-9._-]+$/.test(id)) continue;
+        const projFile = path.join(NATIVE_PROJECTS_DIR, `${id}.json`);
+        if (!isPathInsideDir(NATIVE_PROJECTS_DIR, projFile)) continue;
+        try {
+          const st = fs.statSync(projFile, { throwIfNoEntry: false });
+          if (st && st.isFile()) projectMtimes[id] = Math.floor(st.mtimeMs);
+        } catch {}
+      }
+      return { reqId, result: { ok: true, contexts, projectMtimes } };
     }
     if (action === 'readContext') {
       return { reqId, result: readProjectContext(payload.dirPath) };
