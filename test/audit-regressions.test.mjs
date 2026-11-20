@@ -912,3 +912,313 @@ test('[Audit #16] CLI statusline measures CJK East Asian display column width ac
   );
   assert.ok(stringDisplayWidth(ultraLong) <= 26, `truncated CJK model width <= 26, got ${stringDisplayWidth(ultraLong)}`);
 });
+
+test('[v2.33 New Project] clicking New project bypasses sidebar multi-item popover, keeps Projects view open on Escape, enters created project, and falls back to Redux when sidebar button is virtualized out', { skip: skipDom }, async () => {
+  const customJsSrc = fs.readFileSync(path.join(REPO, 'user', 'custom.js'), 'utf8');
+  const dom = new JSDOM(
+    `<!doctype html><body>
+      <aside class="bg-sidebar">
+        <div data-testid="project-header"></div>
+        <button data-testid="automations-button">Automations</button>
+        <button data-testid="sidebar-add-project-button" data-base-ui-click-trigger="" aria-haspopup="dialog"></button>
+      </aside>
+      <main><div id="antigravity.agentSidePanelInputBox"></div></main>
+    </body>`,
+    { runScripts: 'outside-only', url: 'http://127.0.0.1/', pretendToBeVisual: true }
+  );
+  const { window } = dom;
+  const doc = window.document;
+
+  const listeners = new Set();
+  const dispatched = [];
+  const state = {
+    newProject: { currentStep: 'folderSelection', selectedFolders: [], isOpen: false },
+    sidebarProjects: {
+      projects: [{ id: 'proj-existing', name: 'Existing Project', folderUris: ['file:///tmp/existing'] }]
+    },
+    trajectorySummaries: { summaries: {}, indexes: { byProject: {} } }
+  };
+  const notify = () => {
+    for (const fn of [...listeners]) fn();
+  };
+  const fakeStore = {
+    getState: () => state,
+    subscribe: (fn) => {
+      listeners.add(fn);
+      return () => listeners.delete(fn);
+    },
+    dispatch: (act) => {
+      dispatched.push(act);
+      if (act?.type === 'newProject/setIsOpen') {
+        state.newProject.isOpen = Boolean(act.payload);
+        notify();
+      }
+    }
+  };
+
+  const headerEl = doc.querySelector('[data-testid="project-header"]');
+  headerEl.__reactFiber$test = {
+    dependencies: { firstContext: { memoizedValue: { store: fakeStore }, next: null } },
+    return: null
+  };
+
+  let sidebarPopoverClicked = 0;
+  let newProjEntryCalled = 0;
+  let sshEntryCalled = 0;
+  const addBtn = doc.querySelector('[data-testid="sidebar-add-project-button"]');
+  addBtn.addEventListener('click', () => {
+    sidebarPopoverClicked += 1;
+  });
+  addBtn.__reactFiber$test = {
+    memoizedState: null,
+    return: {
+      memoizedState: {
+        memoizedState: [
+          [
+            {
+              type: 'NEW_PROJECT',
+              label: 'New Project',
+              disabled: false,
+              onClick: () => {
+                newProjEntryCalled += 1;
+                state.newProject.isOpen = true;
+                const dlg = doc.createElement('div');
+                dlg.className = 'agy-dialog';
+                dlg.setAttribute('role', 'dialog');
+                doc.body.appendChild(dlg);
+                notify();
+              }
+            },
+            {
+              type: 'SSH_HOST',
+              label: 'SSH Host…',
+              disabled: false,
+              onClick: () => {
+                sshEntryCalled += 1;
+              }
+            }
+          ]
+        ],
+        next: null
+      },
+      return: null
+    }
+  };
+
+  window.__agProjectCall = async () => ({
+    ok: true,
+    contexts: {},
+    instructions: '',
+    files: [],
+    extraFolders: [],
+    scheduledTasks: []
+  });
+  window.ctx = { modules: { i18n: false }, onCleanup: () => {} };
+  window.eval(customJsSrc);
+
+  try {
+    doc.getElementById('ag-claude-projects-nav-btn').click();
+    const view = doc.getElementById('ag-claude-projects-view');
+    assert.equal(view.getAttribute('data-open'), 'true');
+
+    /* 1. Clicking New project invokes NEW_PROJECT entry directly without clicking the sidebar popover trigger or closing Projects view */
+    view.querySelector('[data-ag-proj-new]').click();
+    assert.equal(newProjEntryCalled, 1, 'invoked NEW_PROJECT entry handler directly');
+    assert.equal(sshEntryCalled, 0, 'did not invoke SSH_HOST');
+    assert.equal(sidebarPopoverClicked, 0, 'did not trigger sidebar Base UI dropdown menu');
+    assert.equal(view.getAttribute('data-open'), 'true', 'Projects view remains open behind the native modal');
+
+    /* 2. Pressing Escape while native .agy-dialog is open does NOT close Projects view */
+    const escWhileModal = new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    doc.dispatchEvent(escWhileModal);
+    assert.equal(view.getAttribute('data-open'), 'true', 'Escape does not dismiss Projects view while native dialog is open');
+
+    /* 3. Completing project creation automatically enters the newly created project detail view */
+    doc.querySelector('.agy-dialog').remove();
+    state.newProject.isOpen = false;
+    state.sidebarProjects.projects.push({
+      id: 'proj-brand-new',
+      name: 'Brand New Case',
+      folderUris: ['file:///tmp/brand-new-case']
+    });
+    notify();
+
+    assert.equal(view.getAttribute('data-open'), 'true');
+    assert.equal(
+      view.querySelector('.ag-pd-crumb-cur')?.textContent?.trim(),
+      'Brand New Case',
+      'automatically navigated into the newly created project detail workspace'
+    );
+
+    /* 4. Return to Projects grid, remove sidebar-add-project-button (virtual scroll unmounted), and verify Redux fallback */
+    view.querySelector('[data-ag-pd-back]').click();
+    addBtn.remove();
+    dispatched.length = 0;
+    view.querySelector('[data-ag-proj-new]').click();
+    assert.deepEqual(
+      dispatched.map((a) => a.type),
+      ['newProject/reset', 'newProject/setCurrentStep', 'newProject/setIsOpen'],
+      'dispatches native newProject Redux actions when sidebar button is virtualized out of DOM'
+    );
+    assert.equal(state.newProject.isOpen, true);
+  } finally {
+    window.close();
+  }
+});
+
+test('[Projects Context Menu & Topbar] right-click / more menu renames & deletes projects (including folderless Skip projects), and collapsed sidebar applies safe topbar inset', { skip: skipDom }, async () => {
+  const customJsSrc = fs.readFileSync(path.join(REPO, 'user', 'custom.js'), 'utf8');
+  const dom = new JSDOM(
+    `<!doctype html><body>
+      <div id="root">
+        <div class="app-shell">
+          <aside class="bg-sidebar">
+            <div data-testid="project-header"></div>
+            <button data-testid="automations-button">Automations</button>
+          </aside>
+          <main><div id="antigravity.agentSidePanelInputBox"></div></main>
+        </div>
+      </div>
+    </body>`,
+    { runScripts: 'outside-only', url: 'http://127.0.0.1/?project=proj-folderless', pretendToBeVisual: true }
+  );
+  const { window } = dom;
+  const doc = window.document;
+
+  const state = {
+    sidebarProjects: {
+      projects: [
+        { id: 'proj-legal', name: '李小丽法务', folderUris: ['file:///tmp/lixiaoli'] },
+        { id: 'proj-folderless', name: '1', folderUris: [] },
+        { id: 'default-cli-project', name: 'CLI Project', folderUris: [] }
+      ]
+    },
+    trajectorySummaries: { summaries: {}, indexes: { byProject: {} } }
+  };
+
+  const deletedIds = [];
+  const updatedProjects = [];
+  const rawRecords = new Map([
+    ['proj-legal', { $typeName: 'exa.project_pb.Project', id: 'proj-legal', name: '李小丽法务' }],
+    ['proj-folderless', { $typeName: 'exa.project_pb.Project', id: 'proj-folderless', name: '1' }]
+  ]);
+  const mockPmSvc = {
+    getProjectStateProvider: (id) => ({
+      getState: () => ({ project: rawRecords.get(id) || null })
+    }),
+    updateProject: async (proj) => {
+      updatedProjects.push(proj);
+      rawRecords.set(proj.id, proj);
+      const hit = state.sidebarProjects.projects.find((p) => p.id === proj.id);
+      if (hit) Object.assign(hit, { name: proj.name, archived: Boolean(proj.archived) });
+    },
+    deleteProject: async (id) => {
+      deletedIds.push(id);
+      rawRecords.delete(id);
+      state.sidebarProjects.projects = state.sidebarProjects.projects.filter((p) => p.id !== id);
+    }
+  };
+
+  const navigated = [];
+  const mockRouter = {
+    state: { location: { pathname: '/', search: { project: 'proj-folderless' } } },
+    navigate: (opts) => {
+      navigated.push(opts);
+      if (opts && typeof opts.search === 'function') {
+        mockRouter.state.location.search = opts.search(mockRouter.state.location.search);
+      }
+    }
+  };
+  const fakeStore = {
+    getState: () => state,
+    subscribe: () => () => {},
+    dispatch: () => {}
+  };
+
+  const sidebarEl = doc.querySelector('.bg-sidebar');
+  sidebarEl.__reactFiber$test = {
+    memoizedProps: { sidebarStore: fakeStore, sidebarRouter: mockRouter },
+    dependencies: {
+      firstContext: {
+        memoizedValue: { store: fakeStore },
+        next: {
+          memoizedValue: { core: { projectManagementService: mockPmSvc } },
+          next: null
+        }
+      }
+    },
+    return: null
+  };
+  doc.querySelector('[data-testid="project-header"]').__reactFiber$test = sidebarEl.__reactFiber$test;
+
+  window.__agProjectCall = async () => ({
+    ok: true,
+    contexts: {},
+    instructions: '',
+    files: [],
+    extraFolders: [],
+    scheduledTasks: []
+  });
+  window.ctx = { modules: { i18n: true }, onCleanup: () => {} };
+  window.eval(customJsSrc);
+
+  try {
+    doc.getElementById('ag-claude-projects-nav-btn').click();
+    const view = doc.getElementById('ag-claude-projects-view');
+    /* JSDOM sidebar has 0x0 rect -> simulates collapsed sidebar (leftPx = 0) */
+    assert.equal(view.getAttribute('data-sidebar-collapsed'), 'true');
+    assert.equal(view.style.getPropertyValue('--ag-proj-topbar-pl'), '224px');
+
+    /* Folderless user project "1" is shown alongside folder project & CLI Project, while CLI Project has no destructive menu */
+    const cards = [...view.querySelectorAll('.ag-proj-card')];
+    assert.equal(cards.length, 3);
+    const cliCard = cards.find((c) => c.getAttribute('data-ag-proj-id') === 'default-cli-project');
+    assert.equal(cliCard.querySelector('[data-ag-proj-menu]'), null, 'builtin CLI Project hides destructive menu');
+
+    /* Right-click on "李小丽法务" card opens #ag-project-action-menu -> Rename updates title immediately */
+    const legalCard = cards.find((c) => c.getAttribute('data-ag-proj-id') === 'proj-legal');
+    legalCard.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 320, clientY: 220 }));
+    const menu = doc.getElementById('ag-project-action-menu');
+    assert.ok(menu, 'right-click opened #ag-project-action-menu');
+    menu.querySelector('[data-ag-pm-act="rename"]').click();
+    assert.equal(doc.getElementById('ag-project-action-menu'), null, 'context menu closed on rename');
+
+    const renameInput = doc.getElementById('ag-pm-rename-input');
+    assert.ok(renameInput, 'rename modal opened');
+    renameInput.value = '李小丽法务（二审）';
+    renameInput.dispatchEvent(new window.Event('input', { bubbles: true }));
+    doc.querySelector('[data-ag-pm-rename-save]').click();
+    await new Promise((r) => setTimeout(r, 20));
+
+    assert.equal(updatedProjects.length, 1);
+    assert.equal(updatedProjects[0].name, '李小丽法务（二审）');
+    assert.match(view.querySelector('[data-ag-proj-id="proj-legal"]').textContent, /李小丽法务（二审）/);
+
+    /* Enter folderless project "1" -> verify breadcrumb back works -> re-enter and delete via Detail ⋯ menu (2-step confirm) */
+    view.querySelector('[data-ag-proj-id="proj-folderless"]').click();
+    assert.equal(view.querySelector('.ag-pd-crumb-cur')?.textContent?.trim(), '1');
+    view.querySelector('[data-ag-pd-back]').click();
+    assert.ok(view.querySelector('.ag-proj-grid'), 'clicking breadcrumb root returns to Projects grid');
+
+    view.querySelector('[data-ag-proj-id="proj-folderless"]').click();
+    view.querySelector('[data-ag-pd-proj-menu]').click();
+    const detailMenu = doc.getElementById('ag-project-action-menu');
+    assert.ok(detailMenu, 'detail header ⋯ button opened #ag-project-action-menu');
+    detailMenu.querySelector('[data-ag-pm-act="delete"]').click();
+    assert.equal(
+      detailMenu.querySelector('[data-ag-pm-act="delete"]').getAttribute('data-confirm'),
+      '1',
+      'first click arms confirmation'
+    );
+    assert.equal(deletedIds.length, 0, 'does not delete on first click');
+
+    detailMenu.querySelector('[data-ag-pm-act="delete"]').click();
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(deletedIds, ['proj-folderless'], 'second click invokes projectManagementService.deleteProject');
+    assert.ok(view.querySelector('.ag-proj-grid'), 'deleting active project returns cleanly to Projects grid');
+    assert.equal(view.querySelector('[data-ag-proj-id="proj-folderless"]'), null, 'deleted project card removed immediately');
+    assert.equal(mockRouter.state.location.search.project, undefined, 'active URL search.project cleared when deleted');
+  } finally {
+    window.close();
+  }
+});

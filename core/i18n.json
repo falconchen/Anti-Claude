@@ -1738,5 +1738,11 @@
   "Workspace setting": "工作区设置",
   "Default needs the terminal sandbox, which isn't available on this host.": "“默认”预设需要终端沙盒支持，当前主机暂不可用。",
   "Default and Auto need the terminal sandbox, which isn't available on this host.": "“默认”与“自动判断”预设需要终端沙盒支持，当前主机暂不可用。",
-  "Workspace File Explorer": "工作区文件资源管理器"
+  "Workspace File Explorer": "工作区文件资源管理器",
+  "Select Folder(s)": "选择文件夹",
+  "Select Resource(s)": "选择资源",
+  "Skip": "跳过",
+  "Creating...": "创建中…",
+  "Open SSH Host": "打开 SSH 主机",
+  "SSH Host…": "SSH 主机…"
 }
