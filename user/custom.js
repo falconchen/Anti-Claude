@@ -4123,6 +4123,29 @@
     return 'bell';
   }
 
+  function hasIndexKey(idxCol, id) {
+    if (!idxCol || !id) return false;
+    if (typeof idxCol.has === 'function') return idxCol.has(id);
+    if (Array.isArray(idxCol)) return idxCol.includes(id);
+    if (typeof idxCol === 'object') return Object.prototype.hasOwnProperty.call(idxCol, id);
+    return false;
+  }
+
+  function getIndexSize(idxCol) {
+    if (!idxCol) return 0;
+    if (typeof idxCol.size === 'number') return idxCol.size;
+    if (Array.isArray(idxCol)) return idxCol.length;
+    if (typeof idxCol === 'object') return Object.keys(idxCol).length;
+    return 0;
+  }
+
+  function isSummaryPinned(id, summary, state) {
+    if (summary && summary.annotations && summary.annotations.pinned) return true;
+    const idxPinned =
+      state && state.trajectorySummaries && state.trajectorySummaries.indexes && state.trajectorySummaries.indexes.pinned;
+    return hasIndexKey(idxPinned, id);
+  }
+
   function isSidebarVisibleSummary(id, summary, state) {
     if (!id || !summary) return false;
     if (summary.annotations && summary.annotations.archived) return false;
@@ -4136,28 +4159,19 @@
       return false;
     }
     if (SIDEBAR_IGNORED_TYPES.has(summary.trajectoryType)) return false;
+    /* Antigravity partitions top-level conversations between `indexes.pinned` and `indexes.sidebar`
+     * (`indexes.sidebar` excludes pinned conversations). Pinned items and external summaries are still visible. */
+    if (isSummaryPinned(id, summary, state)) return true;
+    const primarySummaries = state && state.trajectorySummaries && state.trajectorySummaries.summaries;
+    if (primarySummaries && !Object.prototype.hasOwnProperty.call(primarySummaries, id)) {
+      return true;
+    }
     const idxSidebar =
       state && state.trajectorySummaries && state.trajectorySummaries.indexes && state.trajectorySummaries.indexes.sidebar;
-    if (idxSidebar) {
-      if (typeof idxSidebar.has === 'function') {
-        if (idxSidebar.size > 0 && !idxSidebar.has(id)) return false;
-      } else if (typeof idxSidebar === 'object') {
-        const keys = Object.keys(idxSidebar);
-        if (keys.length > 0 && !Object.prototype.hasOwnProperty.call(idxSidebar, id)) return false;
-      }
+    if (idxSidebar && getIndexSize(idxSidebar) > 0 && !hasIndexKey(idxSidebar, id)) {
+      return false;
     }
     return true;
-  }
-
-  function isSummaryPinned(id, summary, state) {
-    if (summary && summary.annotations && summary.annotations.pinned) return true;
-    const idxPinned =
-      state && state.trajectorySummaries && state.trajectorySummaries.indexes && state.trajectorySummaries.indexes.pinned;
-    if (idxPinned) {
-      if (typeof idxPinned.has === 'function') return idxPinned.has(id);
-      if (typeof idxPinned === 'object') return Object.prototype.hasOwnProperty.call(idxPinned, id);
-    }
-    return false;
   }
 
   /* Left sidebar & Recents rely on native CSS `text-autospace: normal` (1/8em optical boundary, matching right-pane prose
@@ -5988,7 +6002,30 @@
   let projectsSearchQuery = '';
   let projectsSortMode = 'recent'; // 'recent' | 'name'
   let projectsContextMap = {};
+  let projectsNativeMtimeMap = {};
   const projectComposerDrafts = new Map();
+  const projectComposerMentions = new Map(); // projectId -> Map<token, { token, label, kind, scopeItem }>
+  const projectComposerMedia = new Map(); // projectId -> Array<{ id, file, name, mimeType, dataUrl, bytes }>
+  let pdMediaSeq = 0;
+  let cascadeRpcSvcRef = null;
+  let pdMentionState = {
+    open: false,
+    projectId: '',
+    startIdx: -1,
+    endIdx: -1,
+    rawQuery: '',
+    category: '',
+    subQuery: '',
+    items: [],
+    activeIndex: 0,
+    loading: false,
+    reqSeq: 0
+  };
+  const pdMentionCache = {
+    rulesByKey: new Map(),
+    pluginsByKey: new Map(),
+    hasDriveProvider: null
+  };
   let projectsSidebarRo = null;
   let projectsSidebarRoTarget = null;
   let projectsViewEl = null;
@@ -6008,6 +6045,1003 @@
 
   const SVG_PROJ_SETTINGS =
     '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.9v1.5M8 12.6v1.5M1.9 8h1.5M12.6 8h1.5M3.7 3.7l1.1 1.1M11.2 11.2l1.1 1.1M12.3 3.7l-1.1 1.1M4.8 11.2l-1.1 1.1"/></svg>';
+
+  const SVG_PD_MENTION_FILE =
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 2.2h5.2L12.5 5.5v8.3a1 1 0 0 1-1 1h-7.5a1 1 0 0 1-1-1V3.2a1 1 0 0 1 1-1Z"/><path d="M9 2.2v3.4h3.4"/></svg>';
+  const SVG_PD_MENTION_RULE =
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.2 2.6A1.4 1.4 0 0 1 4.6 1.2h8.2v12.2H4.6a1.4 1.4 0 0 0-1.4 1.4V2.6Z"/><path d="M3.2 13.4A1.4 1.4 0 0 1 4.6 12h8.2"/><path d="M6 4.8h4.2M6 7.4h4.2"/></svg>';
+  const SVG_PD_MENTION_CHAT =
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 3.5a1.5 1.5 0 0 1 1.5-1.5h8a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5H6.2L3.2 13.6V11H4a1.5 1.5 0 0 1-1.5-1.5v-6Z"/></svg>';
+  const SVG_PD_MENTION_PLUGIN =
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.3 2.5a1.5 1.5 0 0 1 3 0v.9h2.2a1 1 0 0 1 1 1v2.2h.9a1.5 1.5 0 0 1 0 3h-.9v2.2a1 1 0 0 1-1 1H9.3v-.9a1.5 1.5 0 0 0-3 0v.9H3.5a1 1 0 0 1-1-1V9.6h.9a1.5 1.5 0 0 0 0-3h-.9V4.4a1 1 0 0 1 1-1h2.8v-.9Z"/></svg>';
+  const SVG_PD_MENTION_DRIVE =
+    '<svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path fill="#0066DA" d="M3.4 18.5l2.5 4.3c.3.5.7.9 1.2 1.1L12 15.5H2c0 .6.2 1.1.5 1.6l.9 1.4z"/><path fill="#00AC47" d="M12 7.2L7.1 15.5H2l6.9-12c.5-.3 1-.5 1.6-.5h3c.6 0 1.1.2 1.6.5L12 7.2z"/><path fill="#EA4335" d="M16.9 23.9c.5-.2.9-.6 1.2-1.1l3.4-5.9c.3-.5.5-1 .5-1.6h-10l4.9 8.6z"/><path fill="#00832D" d="M12 7.2l3.1-4.2c-.5-.3-1-.5-1.6-.5h-3c-.6 0-1.1.2-1.6.5L12 7.2z"/><path fill="#2684FC" d="M12 15.5h10l-3.1-5.4L15.8 15l-3.8.5z"/><path fill="#FFBA00" d="M22 15.5c0-.6-.2-1.1-.5-1.6L15.1 2.7c-.3-.5-.7-.9-1.2-1.1L12 7.2l4.9 8.3H22z"/></svg>';
+
+  function encodePathToFileUri(absPath) {
+    const raw = String(absPath || '').trim();
+    if (!raw) return '';
+    if (raw.startsWith('file://')) return raw;
+    const norm = raw.replace(/\\/g, '/');
+    const withLead = norm.startsWith('/') ? norm : `/${norm}`;
+    const parts = withLead.split('/').map((seg, i) => {
+      if (i === 1 && /^[A-Za-z]:$/.test(seg)) return seg;
+      return encodeURIComponent(seg);
+    });
+    return `file://${parts.join('/')}`;
+  }
+
+  function resolveCascadeRpcService() {
+    if (
+      cascadeRpcSvcRef &&
+      (typeof cascadeRpcSvcRef.searchFiles === 'function' ||
+        typeof cascadeRpcSvcRef.getAllRules === 'function' ||
+        typeof cascadeRpcSvcRef.getAllPlugins === 'function')
+    ) {
+      return cascadeRpcSvcRef;
+    }
+    const rootEl = document.getElementById('root');
+    const anchors = [
+      document.querySelector('.bg-sidebar'),
+      document.querySelector('[data-testid="automations-button"]'),
+      document.querySelector('[data-testid="project-header"]'),
+      rootEl && rootEl.firstElementChild
+    ];
+    const isRpc = (v) =>
+      v &&
+      typeof v === 'object' &&
+      (typeof v.searchFiles === 'function' || typeof v.getAllRules === 'function' || typeof v.getAllPlugins === 'function');
+    for (const anchor of anchors) {
+      let cur = anchor ? activeReactFiber(anchor) : null;
+      for (let d = 0; cur && d < 42; d++, cur = cur.return) {
+        const pv = cur.memoizedProps && cur.memoizedProps.value;
+        if (isRpc(pv)) {
+          cascadeRpcSvcRef = pv;
+          return pv;
+        }
+        for (let dep = cur.dependencies && cur.dependencies.firstContext; dep; dep = dep.next) {
+          if (isRpc(dep.memoizedValue)) {
+            cascadeRpcSvcRef = dep.memoizedValue;
+            return dep.memoizedValue;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  function getProjectMentionMap(projectId, create = false) {
+    if (!projectId) return null;
+    let m = projectComposerMentions.get(projectId);
+    if (!m && create) {
+      m = new Map();
+      projectComposerMentions.set(projectId, m);
+    }
+    return m || null;
+  }
+
+  function iconForMentionKind(kind, logoUrl = '') {
+    if (logoUrl && /^(https?:|data:|blob:)/i.test(logoUrl)) {
+      return `<img src="${escapeHtml(logoUrl)}" alt="" />`;
+    }
+    if (kind === 'directory') return SVG_PROJ_FOLDER_OPEN;
+    if (kind === 'file') return SVG_PD_MENTION_FILE;
+    if (kind === 'rule') return SVG_PD_MENTION_RULE;
+    if (kind === 'conversation') return SVG_PD_MENTION_CHAT;
+    if (kind === 'drive') return SVG_PD_MENTION_DRIVE;
+    return SVG_PD_MENTION_PLUGIN;
+  }
+
+  function closePdMentionMenu() {
+    pdMentionState.open = false;
+    pdMentionState.items = [];
+    pdMentionState.loading = false;
+    pdMentionState.reqSeq += 1;
+    const pop = document.getElementById('ag-pd-mention-popover');
+    if (pop) {
+      pop.setAttribute('data-open', 'false');
+      pop.innerHTML = '';
+    }
+  }
+
+  function parsePdMentionTrigger(text, caretPos) {
+    const pos = typeof caretPos === 'number' ? caretPos : String(text || '').length;
+    const before = String(text || '').slice(0, pos);
+    const catMatch = before.match(/(?:^|[\s(\[{"'，。；：！？])@(files|rules|conversation|drive):([^@\n]*)$/i);
+    if (catMatch) {
+      const sub = catMatch[2] || '';
+      const cat = catMatch[1].toLowerCase();
+      const tokenLen = 1 + catMatch[1].length + 1 + sub.length;
+      return {
+        startIdx: pos - tokenLen,
+        endIdx: pos,
+        rawQuery: `${cat}:${sub}`,
+        category: cat,
+        subQuery: sub
+      };
+    }
+    const rootMatch = before.match(/(?:^|[\s(\[{"'，。；：！？])@([^\s@\n\[]*)$/);
+    if (rootMatch) {
+      const q = rootMatch[1] || '';
+      return {
+        startIdx: pos - 1 - q.length,
+        endIdx: pos,
+        rawQuery: q,
+        category: '',
+        subQuery: q
+      };
+    }
+    return null;
+  }
+
+  function getProjectWorkspaceUris(project) {
+    if (!project) return [];
+    const dirs = [];
+    if (project.dirPath) dirs.push(project.dirPath);
+    const ctx = project.dirPath ? projectsContextMap[project.dirPath] : null;
+    if (ctx && Array.isArray(ctx.extraFolders)) {
+      for (const ef of ctx.extraFolders) {
+        if (ef && ef.absPath && !dirs.includes(ef.absPath)) dirs.push(ef.absPath);
+      }
+    }
+    return dirs.map(encodePathToFileUri).filter(Boolean);
+  }
+
+  function collectMentionConversationOptions(project, filterQuery) {
+    const { store } = resolveProjectsStoreAndBindings();
+    const state = store ? store.getState() : null;
+    const summaries = Object.assign(
+      {},
+      (state && state.trajectorySummaries && state.trajectorySummaries.summaries) || {},
+      (state && state.trajectorySummaries && state.trajectorySummaries.externalSummaries) || {}
+    );
+    const projNameById = new Map();
+    const rawProjs = (state && state.sidebarProjects && state.sidebarProjects.projects) || [];
+    for (const rp of rawProjs) {
+      if (rp && rp.id && rp.name) projNameById.set(rp.id, rp.name);
+    }
+    const q = String(filterQuery || '').trim().toLowerCase();
+    const rows = [];
+    for (const [cid, sum] of Object.entries(summaries)) {
+      if (!sum || !isSidebarVisibleSummary(cid, sum, state)) continue;
+      const title = String((sum.annotations && sum.annotations.title) || sum.summary || '').trim();
+      if (!title) continue;
+      const bodyPreview = String(sum.summary || '').trim();
+      if (q && !title.toLowerCase().includes(q) && !bodyPreview.toLowerCase().includes(q)) continue;
+      const pid = sum.projectId || (sum.trajectoryMetadata && sum.trajectoryMetadata.projectId) || '';
+      const inCurrentProj = Boolean(project && project.id && pid === project.id);
+      const isPinned = isSummaryPinned(cid, sum, state);
+      const ownerLabel = inCurrentProj
+        ? L('本项目', 'This project')
+        : pid && pid !== 'outside-of-project' && projNameById.get(pid)
+          ? projNameById.get(pid)
+          : L('项目外对话', 'Outside of project');
+      const lastSec = protoSeconds(sum.lastModifiedTime);
+      const timeStr = lastSec ? formatProjectTimeAgo(lastSec) : '';
+      rows.push({
+        kind: 'conversation',
+        label: title,
+        desc: [isPinned ? L('置顶', 'Pinned') : '', ownerLabel, timeStr].filter(Boolean).join(' · '),
+        inCurrentProj,
+        isPinned,
+        lastSec,
+        scopeItem: {
+          $typeName: 'exa.codeium_common_pb.ContextScopeItem',
+          scopeItem: {
+            case: 'conversation',
+            value: Object.assign(
+              {
+                $typeName: 'exa.codeium_common_pb.ConversationScopeItem',
+                id: cid,
+                title,
+                source: ''
+              },
+              sum.lastModifiedTime ? { lastModifiedTime: sum.lastModifiedTime } : {}
+            )
+          }
+        }
+      });
+    }
+    rows.sort((a, b) => {
+      if (a.inCurrentProj !== b.inCurrentProj) return a.inCurrentProj ? -1 : 1;
+      if (a.isPinned !== b.isPinned) return a.isPinned ? -1 : 1;
+      return b.lastSec - a.lastSec;
+    });
+    return rows.slice(0, 60);
+  }
+
+  async function fetchPdMentionRules(workspaceUris) {
+    const key = workspaceUris.join('|') || '__global__';
+    const cached = pdMentionCache.rulesByKey.get(key);
+    if (cached && Date.now() - cached.ts < 15000) return cached.items;
+    const rt = resolveCascadeRpcService();
+    if (!rt || typeof rt.getAllRules !== 'function') return [];
+    try {
+      const memories = (await rt.getAllRules(workspaceUris)) || [];
+      const items = memories
+        .map((d) => {
+          if (!d) return null;
+          const isProjScope = d.scope && d.scope.scope && d.scope.scope.case === 'projectScope';
+          const rulePath = isProjScope ? d.scope.scope.value.absoluteFilePath : d.memoryId || d.rulePath || '';
+          const ruleName = isProjScope ? d.scope.scope.value.filePath : d.memoryId || d.ruleName || '';
+          const rawContent = d.memory && d.memory.case === 'textMemory' ? d.memory.value.content : d.description || '';
+          const oneLine = String(rawContent || '')
+            .replace(/<!--[\s\S]*?-->/g, ' ')
+            .replace(/[#>*`\-\r\n]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 120);
+          if (!ruleName) return null;
+          return {
+            kind: 'rule',
+            label: ruleName,
+            desc: oneLine || rulePath,
+            scopeItem: {
+              $typeName: 'exa.codeium_common_pb.ContextScopeItem',
+              scopeItem: {
+                case: 'rule',
+                value: {
+                  $typeName: 'exa.codeium_common_pb.RuleScopeItem',
+                  rulePath,
+                  ruleName,
+                  description: String(rawContent || '')
+                }
+              }
+            }
+          };
+        })
+        .filter(Boolean);
+      pdMentionCache.rulesByKey.set(key, { ts: Date.now(), items });
+      return items;
+    } catch {
+      return [];
+    }
+  }
+
+  async function fetchPdMentionPlugins(workspaceUris) {
+    const key = workspaceUris.join('|') || '__global__';
+    const cached = pdMentionCache.pluginsByKey.get(key);
+    if (cached && Date.now() - cached.ts < 15000) return cached.items;
+    const rt = resolveCascadeRpcService();
+    if (!rt || typeof rt.getAllPlugins !== 'function') return [];
+    try {
+      const res = await rt.getAllPlugins({ workspaceUris });
+      const rawList = Array.isArray(res) ? res : (res && Array.isArray(res.plugins) ? res.plugins : []);
+      const items = rawList
+        .filter(
+          (p) =>
+            p &&
+            (p.name || p.displayName) &&
+            p.enabled !== false &&
+            ((Array.isArray(p.skills) && p.skills.length) ||
+              (Array.isArray(p.workflows) && p.workflows.length) ||
+              (Array.isArray(p.agents) && p.agents.length) ||
+              (Array.isArray(p.rules) && p.rules.length) ||
+              (Array.isArray(p.mcpServers) && p.mcpServers.length) ||
+              (Array.isArray(p.sidecars) && p.sidecars.length) ||
+              Boolean(p.hooksJson && String(p.hooksJson).trim()) ||
+              !('skills' in p))
+        )
+        .map((p) => ({
+          kind: 'plugin',
+          label: p.displayName || p.name,
+          desc: String(p.description || '').replace(/\s+/g, ' ').trim(),
+          logo: p.logo || '',
+          scopeItem: {
+            $typeName: 'exa.codeium_common_pb.ContextScopeItem',
+            scopeItem: {
+              case: 'plugin',
+              value: {
+                $typeName: 'exa.codeium_common_pb.PluginScopeItem',
+                name: p.name || p.displayName,
+                displayName: p.displayName || p.name,
+                path: p.path || '',
+                logo: p.logo || ''
+              }
+            }
+          }
+        }));
+      pdMentionCache.pluginsByKey.set(key, { ts: Date.now(), items });
+      return items;
+    } catch {
+      return [];
+    }
+  }
+
+  async function fetchPdMentionProjectFiles(project, subQuery, seq) {
+    const wsUris = getProjectWorkspaceUris(project);
+    if (!wsUris.length) return [];
+    const rt = resolveCascadeRpcService();
+    const q = String(subQuery || '').trim();
+    const out = [];
+    const seenUris = new Set();
+
+    if (rt && typeof rt.searchFiles === 'function') {
+      const batches = await Promise.all(
+        wsUris.map(async (wsUri, idx) => {
+          try {
+            const res = await rt.searchFiles({
+              query: q,
+              workspaceUri: wsUri,
+              includeDirectories: true,
+              cancelToken: BigInt(6767 + seq * 10 + idx),
+              maxResults: 28
+            });
+            return (res && Array.isArray(res.results) ? res.results : []).map((u) => ({ wsUri, u }));
+          } catch {
+            return [];
+          }
+        })
+      );
+      for (const { wsUri, u } of batches.flat()) {
+        if (!u || !u.absoluteUri || seenUris.has(u.absoluteUri)) continue;
+        seenUris.add(u.absoluteUri);
+        const relMap = u.workspaceUrisToRelativePaths || {};
+        const relPath = relMap[wsUri] || Object.values(relMap)[0] || decodeFileUriToPath(u.absoluteUri);
+        const cleanRel = String(relPath || '').replace(/\/+$/, '');
+        const baseName = cleanRel.split(/[\\/]/).pop() || cleanRel;
+        const isDir = Number(u.numFiles || 0) > 1;
+        out.push({
+          kind: isDir ? 'directory' : 'file',
+          label: baseName,
+          desc: cleanRel !== baseName ? cleanRel : formatShortHomePath(decodeFileUriToPath(u.absoluteUri)),
+          scopeItem: {
+            $typeName: 'exa.codeium_common_pb.ContextScopeItem',
+            scopeItem: {
+              case: isDir ? 'directory' : 'file',
+              value: {
+                $typeName: 'exa.codeium_common_pb.PathScopeItem',
+                absoluteUri: u.absoluteUri,
+                workspaceUrisToRelativePaths: Object.assign({}, relMap),
+                numFiles: Number(u.numFiles || 0)
+              }
+            }
+          }
+        });
+      }
+    }
+
+    /* Also surface attached project context files if not already returned */
+    const ctx = project.dirPath ? projectsContextMap[project.dirPath] : null;
+    if (ctx && Array.isArray(ctx.files)) {
+      const primaryUri = encodePathToFileUri(project.dirPath);
+      const qLower = q.toLowerCase();
+      for (const cf of ctx.files) {
+        if (!cf || !cf.name) continue;
+        if (qLower && !cf.name.toLowerCase().includes(qLower) && !String(cf.relPath || '').toLowerCase().includes(qLower)) continue;
+        const abs = cf.absPath || (project.dirPath && cf.relPath ? `${project.dirPath.replace(/\/+$/, '')}/${cf.relPath}` : '');
+        const uri = encodePathToFileUri(abs);
+        if (!uri || seenUris.has(uri)) continue;
+        seenUris.add(uri);
+        const rel = cf.relPath || cf.name;
+        out.push({
+          kind: 'file',
+          label: cf.name,
+          desc: rel,
+          scopeItem: {
+            $typeName: 'exa.codeium_common_pb.ContextScopeItem',
+            scopeItem: {
+              case: 'file',
+              value: {
+                $typeName: 'exa.codeium_common_pb.PathScopeItem',
+                absoluteUri: uri,
+                workspaceUrisToRelativePaths: primaryUri ? { [primaryUri]: rel } : {},
+                numFiles: 0
+              }
+            }
+          }
+        });
+      }
+    }
+    return out.slice(0, 28);
+  }
+
+  async function fetchPdMentionDriveItems(subQuery) {
+    const rt = resolveCascadeRpcService();
+    if (!rt || typeof rt.searchContext !== 'function') return [];
+    try {
+      const res = await rt.searchContext({ providerLabel: 'drive', query: String(subQuery || '').trim() });
+      const items = (res && (res.items || res.results)) || [];
+      return items.slice(0, 20).map((it) => {
+        const label = it.label || it.itemLabel || it.title || it.name || it.uri || 'Google Drive';
+        const desc = it.description || it.subtitle || it.uri || '';
+        return {
+          kind: 'drive',
+          label,
+          desc,
+          scopeItem: it.scopeItem && it.scopeItem.$typeName
+            ? it.scopeItem
+            : {
+                $typeName: 'exa.codeium_common_pb.ContextScopeItem',
+                scopeItem: {
+                  case: 'dynamicContext',
+                  value: {
+                    $typeName: 'exa.codeium_common_pb.DynamicContextScopeItem',
+                    providerLabel: 'drive',
+                    itemLabel: label,
+                    itemValue: it.value || it.itemValue || it.id || '',
+                    uri: it.uri || it.url || ''
+                  }
+                }
+              }
+        };
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  function renderPdMentionPopover() {
+    const pop = document.getElementById('ag-pd-mention-popover');
+    if (!pop) return;
+    if (!pdMentionState.open) {
+      pop.setAttribute('data-open', 'false');
+      pop.innerHTML = '';
+      return;
+    }
+    pop.setAttribute('data-open', 'true');
+    const items = pdMentionState.items || [];
+    if (pdMentionState.activeIndex >= items.length) {
+      pdMentionState.activeIndex = Math.max(0, items.length - 1);
+    }
+
+    const catLabels = {
+      files: L('项目文件', 'Project files'),
+      rules: L('项目规则', 'Rules'),
+      conversation: L('历史对话', 'Conversations'),
+      drive: 'Google Drive'
+    };
+
+    let html = '';
+    if (pdMentionState.category) {
+      html += `<div class="ag-pd-mention-sec-hdr">
+        <button type="button" class="ag-pd-mention-back" data-ag-pd-m-back="true">← ${escapeHtml(L('返回分类', 'Back'))}</button>
+        <span>${escapeHtml(catLabels[pdMentionState.category] || pdMentionState.category)}</span>
+      </div>`;
+    }
+
+    if (!items.length) {
+      const emptyMsg = pdMentionState.loading
+        ? L('正在加载选项…', 'Loading options…')
+        : L('没有匹配的引用项', 'No matching items');
+      html += `<div class="ag-pd-mention-empty">${escapeHtml(emptyMsg)}</div>`;
+    } else {
+      let lastSection = '';
+      items.forEach((it, idx) => {
+        if (it.section && it.section !== lastSection && !pdMentionState.category) {
+          lastSection = it.section;
+          html += `<div class="ag-pd-mention-sec-hdr"><span>${escapeHtml(it.section)}</span></div>`;
+        }
+        const active = idx === pdMentionState.activeIndex;
+        const iconHtml = iconForMentionKind(it.kind, it.logo || '');
+        html += `<button type="button" class="ag-pd-mention-row" role="option" aria-selected="${active ? 'true' : 'false'}" data-active="${active ? 'true' : 'false'}" data-ag-pd-m-idx="${idx}">
+          <span class="ag-pd-mention-icon">${iconHtml}</span>
+          <span class="ag-pd-mention-label">${escapeHtml(it.label)}</span>
+          ${it.desc ? `<span class="ag-pd-mention-desc">${escapeHtml(it.desc)}</span>` : '<span class="ag-pd-mention-desc"></span>'}
+          ${it.isCategory ? '<span class="ag-pd-mention-chev">›</span>' : ''}
+        </button>`;
+      });
+    }
+
+    pop.innerHTML = html;
+
+    pop.querySelectorAll('img').forEach((img) => {
+      img.addEventListener(
+        'error',
+        () => {
+          if (img.parentElement) img.parentElement.innerHTML = SVG_PD_MENTION_PLUGIN;
+        },
+        { once: true }
+      );
+    });
+
+    const backBtn = pop.querySelector('[data-ag-pd-m-back]');
+    if (backBtn) {
+      backBtn.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        resetPdMentionToRoot();
+      });
+    }
+
+    pop.querySelectorAll('[data-ag-pd-m-idx]').forEach((row) => {
+      const idx = Number(row.getAttribute('data-ag-pd-m-idx'));
+      row.addEventListener('mouseenter', () => {
+        if (pdMentionState.activeIndex !== idx) {
+          pdMentionState.activeIndex = idx;
+          pop.querySelectorAll('[data-ag-pd-m-idx]').forEach((r2, i2) => {
+            r2.setAttribute('data-active', i2 === idx ? 'true' : 'false');
+            r2.setAttribute('aria-selected', i2 === idx ? 'true' : 'false');
+          });
+        }
+      });
+      row.addEventListener('mousedown', (e) => {
+        /* mousedown + preventDefault keeps focus inside #ag-pd-composer-input cleanly */
+        e.preventDefault();
+        e.stopPropagation();
+        applyPdMentionSelection(idx);
+      });
+    });
+
+    const activeRow = pop.querySelector('.ag-pd-mention-row[data-active="true"]');
+    if (activeRow && typeof activeRow.scrollIntoView === 'function') {
+      try {
+        activeRow.scrollIntoView({ block: 'nearest' });
+      } catch {}
+    }
+  }
+
+  function syncPdMentionPills(project, compInput) {
+    const bar = document.getElementById('ag-pd-mention-pills');
+    if (!bar || !project) return;
+    const mMap = getProjectMentionMap(project.id, false);
+    const val = String((compInput && compInput.value) || '');
+    if (!mMap || !mMap.size || !val) {
+      if (mMap && !val) mMap.clear();
+      bar.style.display = 'none';
+      bar.innerHTML = '';
+      return;
+    }
+    const activeEntries = [];
+    for (const [token, entry] of [...mMap.entries()]) {
+      if (val.includes(token)) {
+        activeEntries.push(entry);
+      } else {
+        mMap.delete(token);
+      }
+    }
+    if (!activeEntries.length) {
+      bar.style.display = 'none';
+      bar.innerHTML = '';
+      return;
+    }
+    bar.style.display = 'flex';
+    bar.innerHTML = activeEntries
+      .map(
+        (en) => `<span class="ag-pd-mention-pill" data-ag-pd-pill-tok="${escapeHtml(en.token)}">
+          <span class="ag-pd-mention-pill-icon">${iconForMentionKind(en.kind, en.logo || '')}</span>
+          <span class="ag-pd-mention-pill-lbl">${escapeHtml(en.label)}</span>
+          <button type="button" class="ag-pd-mention-pill-rm" data-ag-pd-pill-rm="${escapeHtml(en.token)}" aria-label="${escapeHtml(L('移除引用', 'Remove mention'))}">×</button>
+        </span>`
+      )
+      .join('');
+
+    bar.querySelectorAll('[data-ag-pd-pill-rm]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const tok = btn.getAttribute('data-ag-pd-pill-rm');
+        if (!tok || !compInput) return;
+        const nextVal = compInput.value
+          .split(tok)
+          .join('')
+          .replace(/  +/g, ' ');
+        compInput.value = nextVal;
+        mMap.delete(tok);
+        compInput.dispatchEvent(new Event('input', { bubbles: true }));
+        compInput.focus();
+      });
+    });
+  }
+
+  function getProjectMediaList(projectId, create = false) {
+    if (!projectId) return null;
+    let list = projectComposerMedia.get(projectId);
+    if (!list && create) {
+      list = [];
+      projectComposerMedia.set(projectId, list);
+    }
+    return list || null;
+  }
+
+  function inferComposerImageMime(file) {
+    const rawType = String((file && file.type) || '').trim().toLowerCase();
+    if (rawType.startsWith('image/')) return rawType;
+    const name = String((file && file.name) || '').trim().toLowerCase();
+    if (/\.(jpe?g)$/.test(name)) return 'image/jpeg';
+    if (/\.gif$/.test(name)) return 'image/gif';
+    if (/\.webp$/.test(name)) return 'image/webp';
+    if (/\.svg$/.test(name)) return 'image/svg+xml';
+    if (/\.bmp$/.test(name)) return 'image/bmp';
+    if (/\.avif$/.test(name)) return 'image/avif';
+    if (/\.heic$/.test(name)) return 'image/heic';
+    if (/\.tiff?$/.test(name)) return 'image/tiff';
+    if (/\.png$/.test(name)) return 'image/png';
+    return '';
+  }
+
+  function extractComposerImageFiles(dt) {
+    if (!dt) return [];
+    const out = [];
+    if (dt.items && typeof dt.items.length === 'number') {
+      for (let i = 0; i < dt.items.length; i++) {
+        const it = dt.items[i];
+        if (!it || it.kind !== 'file' || typeof it.getAsFile !== 'function') continue;
+        const f = it.getAsFile();
+        if (f && inferComposerImageMime(f)) out.push(f);
+      }
+    }
+    if (!out.length && dt.files && typeof dt.files.length === 'number') {
+      for (let i = 0; i < dt.files.length; i++) {
+        const f = dt.files[i];
+        if (f && inferComposerImageMime(f)) out.push(f);
+      }
+    }
+    return out;
+  }
+
+  function uint8ToBase64(bytes) {
+    if (!bytes || !bytes.length) return '';
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) {
+      bin += String.fromCharCode(bytes[i]);
+    }
+    return typeof btoa === 'function' ? btoa(bin) : '';
+  }
+
+  async function readBlobBytes(file) {
+    if (!file) return new Uint8Array(0);
+    if (typeof file.arrayBuffer === 'function') {
+      const ab = await file.arrayBuffer();
+      return new Uint8Array(ab);
+    }
+    if (typeof FileReader !== 'undefined') {
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result ? new Uint8Array(reader.result) : new Uint8Array(0));
+        reader.onerror = () => resolve(new Uint8Array(0));
+        reader.readAsArrayBuffer(file);
+      });
+    }
+    return new Uint8Array(0);
+  }
+
+  async function stagePdComposerImageFiles(project, rawFiles, onUpdated) {
+    if (!project || !project.id || !rawFiles || !rawFiles.length) return 0;
+    const list = getProjectMediaList(project.id, true);
+    const maxTotal = 10;
+    const maxBytes = 20 * 1024 * 1024;
+    let added = 0;
+    for (const f of Array.from(rawFiles)) {
+      if (list.length >= maxTotal) break;
+      const mimeType = inferComposerImageMime(f);
+      if (!mimeType) continue;
+      if (typeof f.size === 'number' && f.size > maxBytes) continue;
+      const bytes = await readBlobBytes(f);
+      if (!bytes.length || bytes.length > maxBytes) continue;
+      const id = `pdm-${++pdMediaSeq}`;
+      const ext = (mimeType.split('/')[1] || 'png').replace(/\+.*$/, '').replace('jpeg', 'jpg');
+      const rawName = String(f.name || '').trim();
+      const name = !rawName || /^image\.[a-z0-9]+$/i.test(rawName) ? `pasted-image-${pdMediaSeq}.${ext}` : rawName;
+      const normalizedFile =
+        typeof File === 'function' ? new File([bytes], name, { type: mimeType }) : f;
+      const dataUrl = `data:${mimeType};base64,${uint8ToBase64(bytes)}`;
+      list.push({ id, file: normalizedFile, name, mimeType, dataUrl, bytes });
+      added += 1;
+    }
+    if (added > 0 && typeof onUpdated === 'function') {
+      onUpdated();
+    }
+    return added;
+  }
+
+  function syncPdMediaStrip(project, onMutated) {
+    const strip = document.getElementById('ag-pd-media-strip');
+    if (!strip || !project) return;
+    const list = getProjectMediaList(project.id, false);
+    if (!list || !list.length) {
+      strip.style.display = 'none';
+      strip.innerHTML = '';
+      return;
+    }
+    strip.style.display = 'flex';
+    strip.innerHTML = list
+      .map(
+        (m) => `<div class="ag-pd-media-card" data-ag-pd-media-id="${escapeHtml(m.id)}" title="${escapeHtml(m.name)}">
+          <img class="ag-pd-media-img" src="${escapeHtml(m.dataUrl)}" alt="${escapeHtml(m.name)}" />
+          <button type="button" class="ag-pd-media-rm" data-ag-pd-media-rm="${escapeHtml(m.id)}" aria-label="${escapeHtml(L('移除图片', 'Remove image'))}">×</button>
+        </div>`
+      )
+      .join('');
+    strip.querySelectorAll('[data-ag-pd-media-rm]').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const mid = btn.getAttribute('data-ag-pd-media-rm');
+        const cur = getProjectMediaList(project.id, false);
+        if (!cur || !mid) return;
+        const idx = cur.findIndex((x) => x.id === mid);
+        if (idx >= 0) cur.splice(idx, 1);
+        if (!cur.length) projectComposerMedia.delete(project.id);
+        syncPdMediaStrip(project, onMutated);
+        if (typeof onMutated === 'function') onMutated();
+      });
+    });
+  }
+
+  function resetPdMentionToRoot() {
+    const compInput = document.getElementById('ag-pd-composer-input');
+    if (!compInput || !pdMentionState.open) return;
+    const val = compInput.value || '';
+    const start = pdMentionState.startIdx;
+    const end = pdMentionState.endIdx;
+    if (start < 0 || end < start) return;
+    const nextVal = `${val.slice(0, start)}@${val.slice(end)}`;
+    compInput.value = nextVal;
+    const nextCaret = start + 1;
+    compInput.focus();
+    try {
+      compInput.setSelectionRange(nextCaret, nextCaret);
+    } catch {}
+    compInput.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  function movePdMentionSelection(delta) {
+    if (!pdMentionState.open || !pdMentionState.items.length) return;
+    const len = pdMentionState.items.length;
+    pdMentionState.activeIndex = (pdMentionState.activeIndex + delta + len) % len;
+    renderPdMentionPopover();
+  }
+
+  function applyPdMentionSelection(index) {
+    if (!pdMentionState.open) return;
+    const item = pdMentionState.items[index];
+    const compInput = document.getElementById('ag-pd-composer-input');
+    const allProjects = collectNativeProjects();
+    const project = allProjects.find((p) => p.id === pdMentionState.projectId);
+    if (!item || !compInput || !project) return;
+
+    const val = compInput.value || '';
+    const start = pdMentionState.startIdx;
+    const end = pdMentionState.endIdx;
+    if (start < 0 || end < start) return;
+
+    if (item.isCategory && item.categoryTrigger) {
+      const replacement = `@${item.categoryTrigger}:`;
+      compInput.value = `${val.slice(0, start)}${replacement}${val.slice(end)}`;
+      const nextCaret = start + replacement.length;
+      compInput.focus();
+      try {
+        compInput.setSelectionRange(nextCaret, nextCaret);
+      } catch {}
+      compInput.dispatchEvent(new Event('input', { bubbles: true }));
+      return;
+    }
+
+    const cleanLabel = String(item.label || '').replace(/[\[\]\r\n]+/g, ' ').trim() || 'item';
+    const token = `@[${cleanLabel}]`;
+    const mMap = getProjectMentionMap(project.id, true);
+    mMap.set(token, {
+      token,
+      label: cleanLabel,
+      kind: item.kind || 'plugin',
+      logo: item.logo || '',
+      scopeItem: item.scopeItem
+    });
+    const afterChar = val.slice(end, end + 1);
+    const trailingSpace = afterChar && /\s/.test(afterChar) ? '' : ' ';
+    const inserted = `${token}${trailingSpace}`;
+    compInput.value = `${val.slice(0, start)}${inserted}${val.slice(end)}`;
+    const nextCaret = start + inserted.length;
+    closePdMentionMenu();
+    compInput.focus();
+    try {
+      compInput.setSelectionRange(nextCaret, nextCaret);
+    } catch {}
+    compInput.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  async function updatePdMentionMenuForInput(project, compInput) {
+    if (!project || !compInput) {
+      closePdMentionMenu();
+      return;
+    }
+    const parsed = parsePdMentionTrigger(compInput.value || '', compInput.selectionStart);
+    if (!parsed) {
+      if (pdMentionState.open) closePdMentionMenu();
+      return;
+    }
+
+    const seq = ++pdMentionState.reqSeq;
+    const sameCategory = pdMentionState.open && pdMentionState.category === parsed.category && pdMentionState.rawQuery === parsed.rawQuery;
+    pdMentionState.open = true;
+    pdMentionState.projectId = project.id;
+    pdMentionState.startIdx = parsed.startIdx;
+    pdMentionState.endIdx = parsed.endIdx;
+    pdMentionState.rawQuery = parsed.rawQuery;
+    pdMentionState.category = parsed.category;
+    pdMentionState.subQuery = parsed.subQuery;
+    if (!sameCategory) pdMentionState.activeIndex = 0;
+
+    const wsUris = getProjectWorkspaceUris(project);
+    const hasLocalFolder = wsUris.length > 0;
+    const browseSecTitle = L('分类浏览', 'Browse');
+    const pluginSecTitle = L('扩展插件', 'Plugins');
+
+    const baseCategories = [
+      ...(hasLocalFolder
+        ? [
+            {
+              isCategory: true,
+              categoryTrigger: 'files',
+              kind: 'file',
+              section: browseSecTitle,
+              label: L('项目文件', 'Project files'),
+              desc: L('浏览本项目文件夹中的文件与目录', 'Browse files & folders in project')
+            }
+          ]
+        : []),
+      {
+        isCategory: true,
+        categoryTrigger: 'rules',
+        kind: 'rule',
+        section: browseSecTitle,
+        label: L('项目规则', 'Rules'),
+        desc: L('浏览规则', 'Browse rules')
+      },
+      {
+        isCategory: true,
+        categoryTrigger: 'conversation',
+        kind: 'conversation',
+        section: browseSecTitle,
+        label: L('历史对话', 'Conversations'),
+        desc: L('搜索并引用任意对话（含项目外对话）', 'Search conversations')
+      },
+      {
+        isCategory: true,
+        categoryTrigger: 'drive',
+        kind: 'drive',
+        section: browseSecTitle,
+        label: 'Google Drive',
+        desc: L('搜索云端硬盘文档', 'Search Google Drive')
+      }
+    ];
+
+    /* 1. Drilled into a specific category (`@files:`, `@rules:`, `@conversation:`, `@drive:`) */
+    if (parsed.category === 'conversation') {
+      pdMentionState.loading = false;
+      pdMentionState.items = collectMentionConversationOptions(project, parsed.subQuery);
+      renderPdMentionPopover();
+      return;
+    }
+
+    if (parsed.category === 'rules') {
+      pdMentionState.loading = true;
+      renderPdMentionPopover();
+      const rules = await fetchPdMentionRules(wsUris);
+      if (disposed || pdMentionState.reqSeq !== seq) return;
+      const q = parsed.subQuery.trim().toLowerCase();
+      pdMentionState.loading = false;
+      pdMentionState.items = q
+        ? rules.filter((r) => r.label.toLowerCase().includes(q) || String(r.desc || '').toLowerCase().includes(q))
+        : rules;
+      renderPdMentionPopover();
+      return;
+    }
+
+    if (parsed.category === 'files') {
+      pdMentionState.loading = true;
+      renderPdMentionPopover();
+      const files = await fetchPdMentionProjectFiles(project, parsed.subQuery, seq);
+      if (disposed || pdMentionState.reqSeq !== seq) return;
+      pdMentionState.loading = false;
+      pdMentionState.items = files;
+      renderPdMentionPopover();
+      return;
+    }
+
+    if (parsed.category === 'drive') {
+      pdMentionState.loading = true;
+      renderPdMentionPopover();
+      const driveItems = await fetchPdMentionDriveItems(parsed.subQuery);
+      if (disposed || pdMentionState.reqSeq !== seq) return;
+      pdMentionState.loading = false;
+      pdMentionState.items = driveItems;
+      renderPdMentionPopover();
+      return;
+    }
+
+    /* 2. Root `@` (`rawQuery === ""`) -> instant Browse categories + Plugins (matching native @ menu) */
+    const q = parsed.subQuery.trim().toLowerCase();
+    if (!q) {
+      const cachedPlugins = pdMentionCache.pluginsByKey.get(wsUris.join('|') || '__global__');
+      pdMentionState.loading = !cachedPlugins;
+      pdMentionState.items = [
+        ...baseCategories,
+        ...((cachedPlugins ? cachedPlugins.items : []).map((p) => Object.assign({}, p, { section: pluginSecTitle })))
+      ];
+      renderPdMentionPopover();
+      const plugins = await fetchPdMentionPlugins(wsUris);
+      if (disposed || pdMentionState.reqSeq !== seq) return;
+      pdMentionState.loading = false;
+      pdMentionState.items = [
+        ...baseCategories,
+        ...plugins.map((p) => Object.assign({}, p, { section: pluginSecTitle }))
+      ];
+      renderPdMentionPopover();
+      return;
+    }
+
+    /* 3. Direct filter `@<q>` -> search Categories + Conversations + Project Files + Rules + Plugins in parallel! */
+    const catHits = baseCategories.filter(
+      (c) =>
+        c.categoryTrigger.startsWith(q) ||
+        c.label.toLowerCase().includes(q) ||
+        String(c.desc || '').toLowerCase().includes(q)
+    );
+    const convHits = collectMentionConversationOptions(project, q)
+      .slice(0, 6)
+      .map((c) => Object.assign({}, c, { section: L('历史对话', 'Conversations') }));
+
+    pdMentionState.loading = true;
+    pdMentionState.items = [...catHits, ...convHits];
+    renderPdMentionPopover();
+
+    const [fileHits, ruleAll, pluginAll] = await Promise.all([
+      hasLocalFolder ? fetchPdMentionProjectFiles(project, q, seq) : Promise.resolve([]),
+      fetchPdMentionRules(wsUris),
+      fetchPdMentionPlugins(wsUris)
+    ]);
+    if (disposed || pdMentionState.reqSeq !== seq) return;
+
+    const ruleHits = ruleAll
+      .filter((r) => r.label.toLowerCase().includes(q) || String(r.desc || '').toLowerCase().includes(q))
+      .slice(0, 6)
+      .map((r) => Object.assign({}, r, { section: L('项目规则', 'Rules') }));
+    const pluginHits = pluginAll
+      .filter((p) => p.label.toLowerCase().includes(q) || String(p.desc || '').toLowerCase().includes(q))
+      .slice(0, 6)
+      .map((p) => Object.assign({}, p, { section: pluginSecTitle }));
+    const taggedFiles = fileHits.slice(0, 8).map((f) => Object.assign({}, f, { section: L('项目文件', 'Project files') }));
+
+    pdMentionState.loading = false;
+    pdMentionState.items = [...catHits, ...taggedFiles, ...convHits, ...ruleHits, ...pluginHits];
+    renderPdMentionPopover();
+  }
+
+  function buildComposerSubmitChunks(rawPrompt, mentionEntries = []) {
+    const prompt = String(rawPrompt || '');
+    if (!prompt.trim()) return [];
+    const valid = (Array.isArray(mentionEntries) ? mentionEntries : []).filter(
+      (e) => e && e.token && e.scopeItem && prompt.includes(e.token)
+    );
+    if (!valid.length) {
+      return [{ $typeName: 'exa.codeium_common_pb.TextOrScopeItem', chunk: { case: 'text', value: prompt } }];
+    }
+    /* Sort longest token first to prevent prefix collisions */
+    const sorted = valid.slice().sort((a, b) => b.token.length - a.token.length);
+    const chunks = [];
+    let cursor = 0;
+    while (cursor < prompt.length) {
+      let bestIdx = -1;
+      let bestEntry = null;
+      for (const en of sorted) {
+        const idx = prompt.indexOf(en.token, cursor);
+        if (idx !== -1 && (bestIdx === -1 || idx < bestIdx)) {
+          bestIdx = idx;
+          bestEntry = en;
+        }
+      }
+      if (bestIdx === -1 || !bestEntry) {
+        const tail = prompt.slice(cursor);
+        if (tail) {
+          chunks.push({ $typeName: 'exa.codeium_common_pb.TextOrScopeItem', chunk: { case: 'text', value: tail } });
+        }
+        break;
+      }
+      if (bestIdx > cursor) {
+        chunks.push({
+          $typeName: 'exa.codeium_common_pb.TextOrScopeItem',
+          chunk: { case: 'text', value: prompt.slice(cursor, bestIdx) }
+        });
+      }
+      chunks.push({
+        $typeName: 'exa.codeium_common_pb.TextOrScopeItem',
+        chunk: { case: 'item', value: bestEntry.scopeItem }
+      });
+      cursor = bestIdx + bestEntry.token.length;
+    }
+    return chunks;
+  }
 
   function clearNewProjectWatcher() {
     if (typeof newProjectWatchCleanup === 'function') {
@@ -6061,12 +7095,18 @@
     if (!s) return '';
     const diff = Math.max(0, Math.floor(Date.now() / 1000) - s);
     if (diff < 60) return L('刚刚', 'now');
-    if (diff < 3600) return `${Math.floor(diff / 60)}m`;
-    if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+    if (diff < 3600) {
+      const mins = Math.floor(diff / 60);
+      return FEAT.i18n ? `${mins} 分钟前` : `${mins}m`;
+    }
+    if (diff < 86400) {
+      const hrs = Math.floor(diff / 3600);
+      return FEAT.i18n ? `${hrs} 小时前` : `${hrs}h`;
+    }
     const days = Math.floor(diff / 86400);
     if (days < 30) return FEAT.i18n ? `${days} 天前` : `${days}d ago`;
     const dt = new Date(s * 1000);
-    return `${dt.getMonth() + 1}/${dt.getDate()}`;
+    return FEAT.i18n ? `${dt.getMonth() + 1}月${dt.getDate()}日` : `${dt.getMonth() + 1}/${dt.getDate()}`;
   }
 
   function resolveProjectsStoreAndBindings() {
@@ -6167,12 +7207,12 @@
         id: cid,
         title,
         lastSec,
-        pinned: Boolean(sum.annotations && sum.annotations.pinned),
+        pinned: isSummaryPinned(cid, sum, state),
         waiting,
         running
       });
     }
-    items.sort((a, b) => b.lastSec - a.lastSec);
+    items.sort((a, b) => (a.pinned !== b.pinned ? (a.pinned ? -1 : 1) : b.lastSec - a.lastSec));
     return items;
   }
 
@@ -6669,6 +7709,7 @@
   function closeProjectsView() {
     clearNewProjectWatcher();
     closeProjectActionMenu();
+    closePdMentionMenu();
     if (!projectsViewOpen && !projectsModalEl) return;
     closeProjectsModal();
     projectFolderDropdownOpen = false;
@@ -6713,6 +7754,9 @@
       }, 320);
       return;
     }
+    if (pdMentionState.open && !t.closest('.ag-pd-composer-anchor, #ag-pd-mention-popover')) {
+      closePdMentionMenu();
+    }
     if (projectFolderDropdownOpen && !t.closest('[data-ag-pd-folder-menu], [data-ag-pd-folder-toggle]')) {
       projectFolderDropdownOpen = false;
       projectFolderSearch = '';
@@ -6743,7 +7787,11 @@
 
   function onProjectsGlobalKeyDown(e) {
     if (e.key !== 'Escape') return;
-    if (projectMenuState) {
+    if (pdMentionState.open) {
+      e.preventDefault();
+      e.stopPropagation();
+      closePdMentionMenu();
+    } else if (projectMenuState) {
       e.preventDefault();
       e.stopPropagation();
       closeProjectActionMenu();
@@ -6928,9 +7976,34 @@
     if (cid) navigateSidebarConversation(cid, bindings);
   }
 
-  function startNewChatInProject(project, initialPrompt = '') {
+  function buildFallbackMediaObjects(mediaList) {
+    const zeroTs = typeof BigInt === 'function' ? BigInt(0) : 0;
+    return mediaList.map((m) => ({
+      $typeName: 'exa.codeium_common_pb.Media',
+      mimeType: m.mimeType || 'image/png',
+      description: m.name || 'pasted-image.png',
+      payload: { case: 'inlineData', value: m.bytes || new Uint8Array(0) },
+      uri: '',
+      thumbnail: m.bytes || new Uint8Array(0),
+      durationSeconds: 0,
+      mediaId: '',
+      displayName: '',
+      startTimeMs: zeroTs,
+      endTimeMs: zeroTs,
+      fps: 0,
+      mediaResolution: 0,
+      contentLayers: [],
+      documentContentLayers: [],
+      visibleCells: '',
+      spreadsheetContentLayers: []
+    }));
+  }
+
+  function startNewChatInProject(project, initialPrompt = '', mentionEntries = [], mediaEntries = []) {
     const { store, bindings } = resolveProjectsStoreAndBindings();
     const prompt = String(initialPrompt || '').trim();
+    const submitChunks = buildComposerSubmitChunks(prompt, mentionEntries);
+    const mediaList = Array.isArray(mediaEntries) ? mediaEntries.filter(Boolean) : [];
     const prevInputBox = document.getElementById('antigravity.agentSidePanelInputBox');
     const prevPath =
       bindings && bindings.router && bindings.router.state && bindings.router.state.location
@@ -6959,11 +8032,12 @@
       if (newBtn) newBtn.click();
     }
 
-    if (!prompt) return;
+    if (!submitChunks.length && !mediaList.length) return;
     let tries = 0;
     let landedAtTry = -1;
+    let submitting = false;
     const trySubmit = () => {
-      if (disposed) return;
+      if (disposed || submitting) return;
       const loc = bindings && bindings.router && bindings.router.state && bindings.router.state.location;
       const atHome = !loc || loc.pathname === '/';
       const projectMatched = !loc || !project || !project.id || (loc.search && loc.search.project === project.id);
@@ -6980,16 +8054,70 @@
         return;
       }
       let handleSubmit = null;
+      let inputBoxRef = null;
       let f = activeReactFiber(box);
-      for (let d = 0; f && d < 36 && !handleSubmit; d++, f = f.return) {
-        if (f.memoizedProps && typeof f.memoizedProps.handleSubmit === 'function') {
-          handleSubmit = f.memoizedProps.handleSubmit;
+      for (let d = 0; f && d < 36 && (!handleSubmit || !inputBoxRef); d++, f = f.return) {
+        const mp = f.memoizedProps;
+        if (!handleSubmit && mp && typeof mp.handleSubmit === 'function') {
+          handleSubmit = mp.handleSubmit;
+        }
+        if (!inputBoxRef && mp && mp.inputBoxRef && mp.inputBoxRef.current) {
+          inputBoxRef = mp.inputBoxRef.current;
         }
       }
       if (handleSubmit) {
-        try {
-          handleSubmit([{ chunk: { case: 'text', value: prompt } }], [], true);
-        } catch {}
+        submitting = true;
+        (async () => {
+          let resolvedMedia = [];
+          if (mediaList.length) {
+            if (
+              inputBoxRef &&
+              typeof inputBoxRef.attachFiles === 'function' &&
+              typeof inputBoxRef.getMediaAttachments === 'function'
+            ) {
+              try {
+                if (typeof inputBoxRef.setMediaAttachments === 'function') {
+                  inputBoxRef.setMediaAttachments([]);
+                }
+                const filesToAttach = mediaList.map((m) =>
+                  typeof File === 'function' && !(m.file instanceof File)
+                    ? new File([m.bytes || new Uint8Array(0)], m.name || 'pasted-image.png', {
+                        type: m.mimeType || 'image/png'
+                      })
+                    : m.file
+                );
+                await inputBoxRef.attachFiles(filesToAttach);
+                const deadline = Date.now() + 1500;
+                while (Date.now() < deadline) {
+                  const curAtt = inputBoxRef.getMediaAttachments() || [];
+                  if (curAtt.length >= filesToAttach.length && curAtt.every((a) => Boolean(a && a.uri))) {
+                    break;
+                  }
+                  await new Promise((r) => setTimeout(r, 40));
+                }
+                resolvedMedia = (inputBoxRef.getMediaAttachments() || []).slice();
+              } catch {}
+            }
+            if (!resolvedMedia.length) {
+              resolvedMedia = buildFallbackMediaObjects(mediaList);
+            }
+          }
+          const clearEditor = () => {
+            if (inputBoxRef && typeof inputBoxRef.setMediaAttachments === 'function') {
+              try {
+                inputBoxRef.setMediaAttachments([]);
+                if (typeof inputBoxRef.forgetTrackedUploads === 'function') {
+                  inputBoxRef.forgetTrackedUploads();
+                }
+              } catch {}
+            }
+          };
+          try {
+            await handleSubmit(submitChunks, resolvedMedia, clearEditor);
+          } catch {} finally {
+            if (mediaList.length) clearEditor();
+          }
+        })();
         return;
       }
       if (++tries < 35) later(trySubmit, 70);
@@ -7150,10 +8278,12 @@
   async function refreshProjectsContexts(projects) {
     if (typeof window.__agProjectCall !== 'function') return;
     const paths = projects.map((p) => p.dirPath).filter(Boolean);
-    if (!paths.length) return;
-    const res = await window.__agProjectCall('listContexts', { paths }, 8000);
-    if (disposed || !res || !res.ok || !res.contexts) return;
-    projectsContextMap = Object.assign({}, projectsContextMap, res.contexts);
+    const projectIds = projects.map((p) => p.id).filter(Boolean);
+    if (!paths.length && !projectIds.length) return;
+    const res = await window.__agProjectCall('listContexts', { paths, projectIds }, 8000);
+    if (disposed || !res || !res.ok) return;
+    if (res.contexts) projectsContextMap = Object.assign({}, projectsContextMap, res.contexts);
+    if (res.projectMtimes) projectsNativeMtimeMap = Object.assign({}, projectsNativeMtimeMap, res.projectMtimes);
     if (projectsViewOpen) renderProjectsView();
   }
 
@@ -7201,10 +8331,13 @@
               : c.running
                 ? `<span class="ag-pd-dot ag-pd-dot-run" title="${escapeHtml(L('运行中', 'Running'))}"></span>`
                 : '';
+            const pinBadge = c.pinned
+              ? `<span class="ag-pd-chat-pin" title="${escapeHtml(L('已置顶', 'Pinned'))}">${RECENT_PIN_SVG}</span>`
+              : '';
             const timeTxt = c.lastSec ? formatProjectTimeAgo(c.lastSec) : '';
             return `<button type="button" class="ag-pd-chat-row" data-ag-pd-chat="${escapeHtml(c.id)}">
               <div class="ag-pd-chat-main">
-                <span class="ag-pd-chat-title">${statusDot}${escapeHtml(c.title)}</span>
+                <span class="ag-pd-chat-title">${statusDot}${pinBadge}${escapeHtml(c.title)}</span>
               </div>
               <span class="ag-pd-chat-time">${escapeHtml(timeTxt)}</span>
             </button>`;
@@ -7357,9 +8490,11 @@
           <div class="ag-pd-left">
             <div class="ag-pd-composer-anchor">
               <div class="ag-pd-composer-wrap">
-                <div class="ag-pd-composer-box">
+                <div class="ag-pd-composer-box" data-ag-pd-composer-box="true">
+                  <div id="ag-pd-media-strip" class="ag-pd-media-strip" style="display:none"></div>
+                  <div id="ag-pd-mention-pills" class="ag-pd-mention-pills" style="display:none"></div>
                   <textarea id="ag-pd-composer-input" class="ag-pd-composer-input" rows="2" placeholder="${escapeHtml(
-                    L('想在这个项目里处理什么？', 'What would you like to work on in this project?')
+                    L('想在这个项目里处理什么？（输入 @ 引用，支持直接粘贴图片）', 'What would you like to work on? (Type @ to mention, paste images directly)')
                   )}">${escapeHtml(savedDraft)}</textarea>
                   <div class="ag-pd-composer-foot">
                     ${
@@ -7396,6 +8531,7 @@
                 }
               </div>
               ${hasLocalDir ? folderMenuHtml : ''}
+              <div id="ag-pd-mention-popover" class="ag-pd-mention-popover" role="listbox" data-open="false"></div>
             </div>
 
             <div class="ag-pd-recents">
@@ -7467,6 +8603,7 @@
         e.preventDefault();
         e.stopPropagation();
         closeProjectActionMenu();
+        closePdMentionMenu();
         activeProjectId = null;
         projectFolderDropdownOpen = false;
         projectFolderSearch = '';
@@ -7552,24 +8689,39 @@
       });
     }
 
+    const compBox = el.querySelector('[data-ag-pd-composer-box]');
     const compInput = el.querySelector('#ag-pd-composer-input');
     const sendBtn = el.querySelector('[data-ag-pd-send]');
     const dispatchPrompt = () => {
       const raw = ((compInput && compInput.value) || '').trim();
-      if (!raw) return;
+      const mediaArr = (getProjectMediaList(project.id, false) || []).slice();
+      if (!raw && !mediaArr.length) return;
+      const mMap = getProjectMentionMap(project.id, false);
+      const mentionEntries = mMap ? [...mMap.values()] : [];
       projectComposerDrafts.delete(project.id);
+      projectComposerMedia.delete(project.id);
+      if (mMap) mMap.clear();
+      closePdMentionMenu();
       const finalPrompt =
         activeFolder && !activeFolder.primary && activeFolder.absPath
-          ? `[${L('关联文件夹', 'Linked folder')}: ${activeFolder.absPath}]\n${raw}`
+          ? raw
+            ? `[${L('关联文件夹', 'Linked folder')}: ${activeFolder.absPath}]\n${raw}`
+            : `[${L('关联文件夹', 'Linked folder')}: ${activeFolder.absPath}]`
           : raw;
-      startNewChatInProject(project, finalPrompt);
+      startNewChatInProject(project, finalPrompt, mentionEntries, mediaArr);
     };
     if (compInput && sendBtn) {
       if (compInput.value !== savedDraft) compInput.value = savedDraft;
       const syncSend = () => {
         if (compInput.value) projectComposerDrafts.set(project.id, compInput.value);
         else projectComposerDrafts.delete(project.id);
-        sendBtn.disabled = !compInput.value.trim();
+        const hasMedia = Boolean((getProjectMediaList(project.id, false) || []).length);
+        sendBtn.disabled = !compInput.value.trim() && !hasMedia;
+        syncPdMediaStrip(project, () => {
+          const stillHasMedia = Boolean((getProjectMediaList(project.id, false) || []).length);
+          sendBtn.disabled = !compInput.value.trim() && !stillHasMedia;
+        });
+        syncPdMentionPills(project, compInput);
         compInput.style.height = 'auto';
         compInput.style.height = `${Math.min(180, Math.max(48, compInput.scrollHeight))}px`;
       };
@@ -7582,9 +8734,73 @@
           } catch {}
         }
       }
-      compInput.addEventListener('input', syncSend);
+      if (pdMentionState.open && pdMentionState.projectId === project.id) {
+        renderPdMentionPopover();
+      }
+      compInput.addEventListener('input', () => {
+        syncSend();
+        updatePdMentionMenuForInput(project, compInput);
+      });
+      compInput.addEventListener('click', () => {
+        updatePdMentionMenuForInput(project, compInput);
+      });
+      compInput.addEventListener('paste', (e) => {
+        const imgs = extractComposerImageFiles(e.clipboardData);
+        if (!imgs.length) return;
+        e.preventDefault();
+        e.stopPropagation();
+        stagePdComposerImageFiles(project, imgs, syncSend);
+      });
+      if (compBox) {
+        compBox.addEventListener('dragover', (e) => {
+          if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) {
+            e.preventDefault();
+            compBox.setAttribute('data-drag', 'true');
+          }
+        });
+        compBox.addEventListener('dragleave', (e) => {
+          if (!compBox.contains(e.relatedTarget)) {
+            compBox.removeAttribute('data-drag');
+          }
+        });
+        compBox.addEventListener('drop', (e) => {
+          compBox.removeAttribute('data-drag');
+          const imgs = extractComposerImageFiles(e.dataTransfer);
+          if (!imgs.length) return;
+          e.preventDefault();
+          e.stopPropagation();
+          stagePdComposerImageFiles(project, imgs, syncSend);
+        });
+      }
       compInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && compInput.value.trim()) {
+        if (pdMentionState.open && !e.isComposing) {
+          if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            movePdMentionSelection(1);
+            return;
+          }
+          if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            movePdMentionSelection(-1);
+            return;
+          }
+          if ((e.key === 'Enter' && !e.shiftKey) || e.key === 'Tab') {
+            if (pdMentionState.items.length > 0) {
+              e.preventDefault();
+              e.stopPropagation();
+              applyPdMentionSelection(pdMentionState.activeIndex);
+              return;
+            }
+          }
+          if (e.key === 'Escape') {
+            e.preventDefault();
+            e.stopPropagation();
+            closePdMentionMenu();
+            return;
+          }
+        }
+        const hasMedia = Boolean((getProjectMediaList(project.id, false) || []).length);
+        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && (compInput.value.trim() || hasMedia)) {
           e.preventDefault();
           dispatchPrompt();
         }
@@ -7716,8 +8932,16 @@
         if (projectsSortMode === 'name') return a.name.localeCompare(b.name, 'zh-Hans-CN');
         const ctxA = a.dirPath ? projectsContextMap[a.dirPath] : null;
         const ctxB = b.dirPath ? projectsContextMap[b.dirPath] : null;
-        const tA = Math.max(a.lastSec * 1000, ctxA ? ctxA.lastModifiedMs || 0 : 0);
-        const tB = Math.max(b.lastSec * 1000, ctxB ? ctxB.lastModifiedMs || 0 : 0);
+        const tA = Math.max(
+          a.lastSec * 1000,
+          Number(projectsNativeMtimeMap[a.id] || 0),
+          ctxA ? Number(ctxA.lastModifiedMs || 0) : 0
+        );
+        const tB = Math.max(
+          b.lastSec * 1000,
+          Number(projectsNativeMtimeMap[b.id] || 0),
+          ctxB ? Number(ctxB.lastModifiedMs || 0) : 0
+        );
         return tB - tA || a.name.localeCompare(b.name, 'zh-Hans-CN');
       });
 
@@ -7727,11 +8951,14 @@
             const ctx = p.dirPath ? projectsContextMap[p.dirPath] : null;
             const hasInst = Boolean(ctx && ctx.instructions && ctx.instructions.trim());
             const fileCount = ctx && Array.isArray(ctx.files) ? ctx.files.length : 0;
-            const metaParts = [];
-            if (p.lastSec) metaParts.push(formatProjectTimeAgo(p.lastSec));
-            if (p.chatCount > 0) {
-              metaParts.push(FEAT.i18n ? `${p.chatCount} 个对话` : `${p.chatCount} ${p.chatCount === 1 ? 'chat' : 'chats'}`);
-            }
+            const nativeProjMs = Number(projectsNativeMtimeMap[p.id] || 0);
+            const ctxActivityMs = ctx ? Math.max(Number(ctx.lastModifiedMs || 0), Number(ctx.dirMtimeMs || 0)) : 0;
+            const effectiveSec = p.lastSec || Math.floor(Math.max(nativeProjMs, ctxActivityMs) / 1000);
+            const timeLabel = effectiveSec ? formatProjectTimeAgo(effectiveSec) : L('刚刚', 'now');
+            const chatLabel = FEAT.i18n
+              ? `${p.chatCount} 个对话`
+              : `${p.chatCount} ${p.chatCount === 1 ? 'chat' : 'chats'}`;
+            const metaText = `${timeLabel} · ${chatLabel}`;
             const badges = [];
             if (hasInst) badges.push(`<span class="ag-proj-badge ag-proj-badge-accent">${L('已设指令', 'Instructions')}</span>`);
             if (fileCount > 0) {
@@ -7742,14 +8969,14 @@
             const moreBtnHtml = !p.isBuiltin
               ? `<button type="button" class="ag-proj-card-more" data-ag-proj-menu="${escapeHtml(p.id)}" aria-label="${escapeHtml(L('项目操作', 'Project options'))}" title="${escapeHtml(L('更多操作', 'More options'))}">${RECENT_MORE_SVG}</button>`
               : '';
-            const fallbackMeta = p.shortPath || (!p.isCliProject && p.isVirtual ? L('未绑定文件夹', 'No folder') : '');
+            const metaTitleAttr = p.shortPath ? ` title="${escapeHtml(p.shortPath)}"` : '';
             return `<article class="ag-proj-card" data-ag-proj-id="${escapeHtml(p.id)}" tabindex="0">
               <div class="ag-proj-card-head">
                 <div class="ag-proj-card-title">${escapeHtml(p.name)}</div>
                 ${moreBtnHtml}
               </div>
               <div class="ag-proj-card-foot">
-                <span class="ag-proj-card-meta">${escapeHtml(metaParts.join(' · ') || fallbackMeta)}</span>
+                <span class="ag-proj-card-meta"${metaTitleAttr}>${escapeHtml(metaText)}</span>
                 ${badges.length ? `<div class="ag-proj-card-badges">${badges.join('')}</div>` : ''}
               </div>
             </article>`;
@@ -7817,10 +9044,13 @@
       activeProjectId = proj.id;
       renderProjectsView();
       if (proj.dirPath && typeof window.__agProjectCall === 'function') {
+        const prevSig = JSON.stringify(projectsContextMap[proj.dirPath] || null);
         window.__agProjectCall('readContext', { dirPath: proj.dirPath }, 8000).then((fresh) => {
           if (!disposed && fresh && fresh.ok) {
             projectsContextMap[proj.dirPath] = fresh;
-            if (projectsViewOpen && activeProjectId === proj.id) renderProjectsView();
+            if (projectsViewOpen && activeProjectId === proj.id && JSON.stringify(fresh) !== prevSig) {
+              renderProjectsView();
+            }
           }
         });
       }
@@ -8575,6 +9805,11 @@
   function teardownProjectsWorkspace() {
     closeProjectsView();
     projectMgmtSvcRef = null;
+    cascadeRpcSvcRef = null;
+    projectComposerMentions.clear();
+    projectComposerMedia.clear();
+    pdMentionCache.rulesByKey.clear();
+    pdMentionCache.pluginsByKey.clear();
     optimisticallyDeletedProjectIds.clear();
     optimisticProjectNames.clear();
     const btn = document.getElementById('ag-claude-projects-nav-btn');

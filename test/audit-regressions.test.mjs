@@ -1222,3 +1222,413 @@ test('[Projects Context Menu & Topbar] right-click / more menu renames & deletes
     window.close();
   }
 });
+
+test('[Project @ Mentions] typing @ in Project Detail opens Browse & Plugins menu, drills into Conversations/Files, renders removable pills, and submits structured TextOrScopeItem chunks', { skip: skipDom }, async () => {
+  const customJsSrc = fs.readFileSync(path.join(REPO, 'user', 'custom.js'), 'utf8');
+  const dom = new JSDOM(
+    `<!doctype html><body>
+      <div id="root">
+        <div class="app-shell">
+          <aside class="bg-sidebar">
+            <div data-testid="project-header"></div>
+            <button data-testid="automations-button">Automations</button>
+          </aside>
+          <main><div id="antigravity.agentSidePanelInputBox"></div></main>
+        </div>
+      </div>
+    </body>`,
+    { runScripts: 'outside-only', url: 'http://127.0.0.1/', pretendToBeVisual: true }
+  );
+  const { window } = dom;
+  const doc = window.document;
+
+  const state = {
+    sidebarProjects: {
+      projects: [{ id: 'proj-agy', name: '技术（Antigravity）', folderUris: ['file:///tmp/agy-tech'] }]
+    },
+    trajectorySummaries: {
+      summaries: {
+        'conv-outside-1': {
+          projectId: 'outside-of-project',
+          summary: '讨论反重力 UI 改造方案',
+          lastModifiedTime: { seconds: 1795152000 },
+          annotations: { title: '反重力界面改造' }
+        }
+      },
+      indexes: { byProject: {} }
+    }
+  };
+
+  const mockRpcSvc = {
+    getAllPlugins: async () => ({
+      plugins: [
+        {
+          name: 'bm-bridge',
+          displayName: 'Basic Memory（反重力版）',
+          description: '共享记忆桥接插件',
+          path: 'file:///Users/demo/.gemini/config/plugins/bm-bridge',
+          logo: '',
+          skills: ['bm-orient']
+        }
+      ]
+    }),
+    getAllRules: async () => [
+      {
+        memoryId: 'user_global',
+        memory: { case: 'textMemory', value: { content: 'Always sync progress.' } }
+      }
+    ],
+    searchFiles: async ({ query, workspaceUri }) => ({
+      results: [
+        {
+          $typeName: 'exa.codeium_common_pb.PathScopeItem',
+          absoluteUri: `${workspaceUri}/notes.md`,
+          workspaceUrisToRelativePaths: { [workspaceUri]: 'notes.md' },
+          numFiles: 0
+        }
+      ].filter((r) => !query || r.absoluteUri.includes(query))
+    })
+  };
+
+  const mockRouter = {
+    state: { location: { pathname: '/', search: { project: 'proj-agy' } } },
+    navigate: (opts) => {
+      if (opts && opts.to) {
+        mockRouter.state.location = { pathname: opts.to, search: opts.search || {} };
+      }
+    }
+  };
+  const fakeStore = { getState: () => state, subscribe: () => () => {}, dispatch: () => {} };
+
+  const sidebarEl = doc.querySelector('.bg-sidebar');
+  sidebarEl.__reactFiber$test = {
+    memoizedProps: { sidebarStore: fakeStore, sidebarRouter: mockRouter },
+    dependencies: {
+      firstContext: {
+        memoizedValue: { store: fakeStore },
+        next: { memoizedValue: mockRpcSvc, next: null }
+      }
+    },
+    return: null
+  };
+  doc.querySelector('[data-testid="project-header"]').__reactFiber$test = sidebarEl.__reactFiber$test;
+
+  const submittedCalls = [];
+  const inputBoxEl = doc.getElementById('antigravity.agentSidePanelInputBox');
+  inputBoxEl.__reactFiber$test = {
+    memoizedProps: {
+      handleSubmit: (chunks, media, flag) => {
+        submittedCalls.push({ chunks, media, flag });
+      }
+    },
+    return: null
+  };
+
+  window.__agProjectCall = async () => ({
+    ok: true,
+    contexts: {},
+    instructions: '',
+    files: [],
+    extraFolders: [],
+    scheduledTasks: []
+  });
+  window.ctx = { modules: { i18n: true }, onCleanup: () => {} };
+  window.eval(customJsSrc);
+
+  try {
+    doc.getElementById('ag-claude-projects-nav-btn').click();
+    const view = doc.getElementById('ag-claude-projects-view');
+    view.querySelector('[data-ag-proj-id="proj-agy"]').click();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const comp = doc.getElementById('ag-pd-composer-input');
+    const pop = doc.getElementById('ag-pd-mention-popover');
+
+    /* 1. Typing `@` opens root menu with Browse categories + Plugins */
+    comp.value = '@';
+    comp.setSelectionRange(1, 1);
+    comp.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.equal(pop.getAttribute('data-open'), 'true', 'typing @ opens mention popover');
+    assert.match(pop.textContent, /项目文件/, 'shows Project files browse category');
+    assert.match(pop.textContent, /项目规则/, 'shows Rules browse category');
+    assert.match(pop.textContent, /历史对话/, 'shows Conversations browse category');
+    assert.match(pop.textContent, /Basic Memory（反重力版）/, 'shows installed plugins inline');
+
+    /* 2. Select Conversations category -> drills into @conversation: -> pick Outside of Project chat "反重力界面改造" */
+    const convCatIdx = [...pop.querySelectorAll('.ag-pd-mention-row')].findIndex((r) => /历史对话/.test(r.textContent));
+    assert.ok(convCatIdx >= 0);
+    pop.querySelector(`[data-ag-pd-m-idx="${convCatIdx}"]`).dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true }));
+    assert.equal(comp.value, '@conversation:', 'selecting category inserts @conversation: prefix');
+    assert.match(pop.textContent, /反重力界面改造/, 'lists Outside of Project conversation');
+
+    /* Press Enter to select highlighted conversation */
+    comp.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    assert.equal(comp.value, '@[反重力界面改造] ', 'inserts bracketed mention token');
+    assert.equal(pop.getAttribute('data-open'), 'false', 'popover closes after leaf selection');
+    assert.equal(doc.querySelectorAll('.ag-pd-mention-pill').length, 1, 'renders removable mention pill above input');
+
+    /* 3. Add text + a project file mention `@files:notes` */
+    comp.value = '结合 @[反重力界面改造] 更新 @files:notes';
+    comp.setSelectionRange(comp.value.length, comp.value.length);
+    comp.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(pop.getAttribute('data-open'), 'true');
+    assert.match(pop.textContent, /notes\.md/, 'searches project files via searchFiles');
+    comp.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }));
+
+    assert.equal(comp.value, '结合 @[反重力界面改造] 更新 @[notes.md] ');
+    assert.equal(doc.querySelectorAll('.ag-pd-mention-pill').length, 2, 'renders 2 mention pills');
+
+    /* 4. Submit -> verifies structured TextOrScopeItem[] chunks passed to native handleSubmit */
+    doc.querySelector('[data-ag-pd-send]').click();
+    await new Promise((r) => setTimeout(r, 320));
+
+    assert.equal(submittedCalls.length, 1, 'native handleSubmit invoked');
+    const chunks = submittedCalls[0].chunks;
+    assert.deepEqual(
+      Array.from(chunks, (c) => c.chunk.case),
+      ['text', 'item', 'text', 'item'],
+      'interleaves text chunks and ContextScopeItem chunks accurately'
+    );
+    assert.equal(chunks[1].chunk.value.scopeItem.case, 'conversation');
+    assert.equal(chunks[1].chunk.value.scopeItem.value.id, 'conv-outside-1');
+    assert.equal(chunks[3].chunk.value.scopeItem.case, 'file');
+    assert.equal(chunks[3].chunk.value.scopeItem.value.absoluteUri, 'file:///tmp/agy-tech/notes.md');
+  } finally {
+    window.close();
+  }
+});
+
+test('[Pinned History & Image Paste] Pinned conversations (excluded from indexes.sidebar) appear in @ Conversations & Project chats, and Project composer supports pasting images', { skip: skipDom }, async () => {
+  const customJsSrc = fs.readFileSync(path.join(REPO, 'user', 'custom.js'), 'utf8');
+  const dom = new JSDOM(
+    `<!doctype html><html><body>
+      <div id="root">
+        <div class="bg-sidebar">
+          <button data-testid="automations-button">Automations</button>
+          <div data-sidebar-section-drop-id="proj-agy">
+            <button data-testid="project-header" data-project-label="技术（Antigravity）">技术（Antigravity）</button>
+          </div>
+        </div>
+        <div id="antigravity.agentSidePanelInputBox"></div>
+      </div>
+    </body></html>`,
+    { url: 'http://localhost:3310/', pretendToBeVisual: true, runScripts: 'outside-only' }
+  );
+  const { window } = dom;
+  const doc = window.document;
+
+  /* Mirror real Antigravity Redux: `indexes.sidebar` ONLY contains unpinned conversations,
+   * while pinned conversations live in `indexes.pinned` (`inSidebarIdx === false`). */
+  const state = {
+    sidebarProjects: {
+      projects: [
+        {
+          id: 'proj-agy',
+          name: '技术（Antigravity）',
+          folderUris: ['file:///tmp/agy-tech']
+        },
+        {
+          id: 'proj-empty',
+          name: '李小丽法务',
+          folderUris: ['file:///Users/demo/Desktop/李小丽法务']
+        },
+        {
+          id: 'default-cli-project',
+          name: 'CLI Project',
+          folderUris: []
+        }
+      ]
+    },
+    trajectorySummaries: {
+      summaries: {
+        'conv-unpinned-outside': {
+          projectId: 'outside-of-project',
+          summary: '普通未置顶会话',
+          lastModifiedTime: { seconds: 1795152000 },
+          annotations: { title: '反重力界面改造' }
+        },
+        'conv-pinned-outside': {
+          projectId: 'outside-of-project',
+          summary: 'LLM 读书笔记',
+          lastModifiedTime: { seconds: 1790000000 },
+          annotations: { title: '大模型学习', pinned: true }
+        },
+        'conv-pinned-proj': {
+          projectId: 'proj-agy',
+          summary: '项目内置顶记录',
+          lastModifiedTime: { seconds: 1791000000 },
+          annotations: { title: '置顶架构纪要' }
+        }
+      },
+      indexes: {
+        byProject: { 'proj-agy': ['conv-pinned-proj'] },
+        sidebar: { 'conv-unpinned-outside': true },
+        pinned: { 'conv-pinned-outside': true, 'conv-pinned-proj': true }
+      }
+    }
+  };
+
+  const mockRouter = {
+    state: { location: { pathname: '/', search: { project: 'proj-agy' } } },
+    navigate: (opts) => {
+      if (opts && opts.to) {
+        mockRouter.state.location = { pathname: opts.to, search: opts.search || {} };
+      }
+    }
+  };
+  const fakeStore = { getState: () => state, subscribe: () => () => {}, dispatch: () => {} };
+
+  const sidebarEl = doc.querySelector('.bg-sidebar');
+  sidebarEl.__reactFiber$test = {
+    memoizedProps: { sidebarStore: fakeStore, sidebarRouter: mockRouter },
+    dependencies: { firstContext: { memoizedValue: { store: fakeStore }, next: null } },
+    return: null
+  };
+  doc.querySelector('[data-testid="project-header"]').__reactFiber$test = sidebarEl.__reactFiber$test;
+
+  let currentAttachments = [];
+  const attachedFileCalls = [];
+  const submittedCalls = [];
+  const mockInputBoxRef = {
+    current: {
+      attachFiles: async (files) => {
+        attachedFileCalls.push(files);
+        currentAttachments = Array.from(files).map((f, idx) => ({
+          $typeName: 'exa.codeium_common_pb.Media',
+          mimeType: f.type || 'image/png',
+          description: f.name || `img-${idx}.png`,
+          uri: `file:///tmp/tempmediaStorage/pasted_${idx}.png`
+        }));
+      },
+      getMediaAttachments: () => currentAttachments,
+      setMediaAttachments: (next) => {
+        currentAttachments = typeof next === 'function' ? next(currentAttachments) : next;
+      },
+      forgetTrackedUploads: () => {}
+    }
+  };
+
+  /* Mirror real Antigravity fiber hierarchy: handleSubmit on inner fiber, inputBoxRef higher up */
+  const inputBoxEl = doc.getElementById('antigravity.agentSidePanelInputBox');
+  inputBoxEl.__reactFiber$test = {
+    memoizedProps: {
+      handleSubmit: async (chunks, media, clearEditor) => {
+        submittedCalls.push({ chunks, media });
+        if (typeof clearEditor === 'function') clearEditor();
+      }
+    },
+    return: {
+      memoizedProps: { inputBoxRef: mockInputBoxRef },
+      return: null
+    }
+  };
+
+  window.__agProjectCall = async (action) => ({
+    ok: true,
+    contexts: {},
+    projectMtimes:
+      action === 'listContexts'
+        ? {
+            'proj-empty': Date.now() - 2 * 3600 * 1000,
+            'default-cli-project': Date.now() - 5 * 86400 * 1000
+          }
+        : {},
+    instructions: '',
+    files: [],
+    extraFolders: [],
+    scheduledTasks: []
+  });
+  window.ctx = { modules: { i18n: true }, onCleanup: () => {} };
+  window.eval(customJsSrc);
+
+  try {
+    doc.getElementById('ag-claude-projects-nav-btn').click();
+    await new Promise((r) => setTimeout(r, 20));
+    const view = doc.getElementById('ag-claude-projects-view');
+
+    /* Verify ALL project cards uniformly show `<时间> · <N 个对话>` (even 0-chat local & CLI projects, never raw folder path) */
+    const emptyCardMeta = view.querySelector('[data-ag-proj-id="proj-empty"] .ag-proj-card-meta').textContent.trim();
+    const cliCardMeta = view.querySelector('[data-ag-proj-id="default-cli-project"] .ag-proj-card-meta').textContent.trim();
+    assert.equal(emptyCardMeta, '2 小时前 · 0 个对话', '0-chat folder project shows unified time + 0 chats instead of path');
+    assert.equal(cliCardMeta, '5 天前 · 0 个对话', 'CLI project shows unified time + 0 chats instead of blank');
+
+    view.querySelector('[data-ag-proj-id="proj-agy"]').click();
+    await new Promise((r) => setTimeout(r, 15));
+
+    /* 1. Project Detail conversation list includes pinned project conversation despite not being in indexes.sidebar */
+    const projChatListText = view.querySelector('.ag-pd-chat-list').textContent;
+    assert.match(projChatListText, /置顶架构纪要/, 'pinned project conversation appears in project chat list');
+
+    /* 2. `@conversation:` includes pinned outside-of-project conversation "大模型学习" AND pinned project chat */
+    const comp = doc.getElementById('ag-pd-composer-input');
+    const pop = doc.getElementById('ag-pd-mention-popover');
+    const sendBtn = doc.querySelector('[data-ag-pd-send]');
+    comp.value = '@conversation:';
+    comp.setSelectionRange(comp.value.length, comp.value.length);
+    comp.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 15));
+
+    assert.equal(pop.getAttribute('data-open'), 'true');
+    assert.match(pop.textContent, /大模型学习/, 'pinned outside-of-project chat is listed in Conversations');
+    assert.match(pop.textContent, /置顶/, 'pinned conversation displays Pinned badge in subtitle');
+
+    /* Clear input so text is empty -> verify image-only paste enables Send and renders thumbnail */
+    comp.value = '';
+    comp.dispatchEvent(new window.Event('input', { bubbles: true }));
+    assert.equal(sendBtn.disabled, true, 'send disabled when both text and media are empty');
+
+    const pngBytes = Uint8Array.from(
+      Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        'base64'
+      )
+    );
+    const imgFile = new window.File([pngBytes], 'image.png', { type: 'image/png' });
+    const pasteEv = new window.Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEv, 'clipboardData', {
+      value: {
+        items: [{ kind: 'file', type: 'image/png', getAsFile: () => imgFile }],
+        files: [imgFile]
+      }
+    });
+    comp.dispatchEvent(pasteEv);
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.equal(pasteEv.defaultPrevented, true, 'paste event default prevented for image');
+    const strip = doc.getElementById('ag-pd-media-strip');
+    assert.equal(strip.querySelectorAll('.ag-pd-media-card').length, 1, 'renders pasted image thumbnail card');
+    assert.equal(sendBtn.disabled, false, 'pasting image enables send button even with empty text');
+
+    /* Test removing image via × button disables send again, then paste + text and submit */
+    strip.querySelector('[data-ag-pd-media-rm]').click();
+    assert.equal(strip.querySelectorAll('.ag-pd-media-card').length, 0, 'clicking remove deletes thumbnail');
+    assert.equal(sendBtn.disabled, true, 'removing last image with empty text disables send button');
+
+    const pasteEv2 = new window.Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(pasteEv2, 'clipboardData', {
+      value: {
+        items: [{ kind: 'file', type: 'image/png', getAsFile: () => imgFile }],
+        files: [imgFile]
+      }
+    });
+    comp.dispatchEvent(pasteEv2);
+    await new Promise((r) => setTimeout(r, 30));
+    comp.value = '看看这张报错截图';
+    comp.dispatchEvent(new window.Event('input', { bubbles: true }));
+
+    sendBtn.click();
+    await new Promise((r) => setTimeout(r, 360));
+
+    assert.equal(attachedFileCalls.length, 1, 'delegates pasted File to native inputBoxRef.attachFiles');
+    assert.equal(submittedCalls.length, 1, 'invokes native handleSubmit');
+    assert.equal(submittedCalls[0].chunks[0].chunk.value, '看看这张报错截图');
+    assert.equal(submittedCalls[0].media.length, 1, 'passes resolved Media attachment to handleSubmit');
+    assert.equal(submittedCalls[0].media[0].uri, 'file:///tmp/tempmediaStorage/pasted_0.png');
+    assert.equal(currentAttachments.length, 0, 'cleans up composer media state after submit');
+  } finally {
+    window.close();
+  }
+});

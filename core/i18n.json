@@ -1744,5 +1744,8 @@
   "Skip": "跳过",
   "Creating...": "创建中…",
   "Open SSH Host": "打开 SSH 主机",
-  "SSH Host…": "SSH 主机…"
+  "SSH Host…": "SSH 主机…",
+  "Browse": "分类浏览",
+  "Browse rules": "浏览规则",
+  "Search conversations": "搜索对话"
 }
