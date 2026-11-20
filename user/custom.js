@@ -5036,9 +5036,9 @@
    *       text nodes & title/placeholder/aria-label attributes with zero page reload.
    * ========================================================================== */
   const UX_I18N_BASE_EXCLUDE =
-    'code, pre, kbd, samp, textarea, input, style, script, noscript, [contenteditable="true"], [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .monaco-editor, .monaco-diff-editor, .xterm, [class*="onyx-key"], .prose, .markdown, [class*="chat-message"], [class*="group/file-title"], [data-testid="conversation-row-sidebar"] a[href^="/c/"], [data-testid="conversation-row-sidebar"] span.truncate, [data-testid="conversation-navigator-turn"], .msg-body, #raw, [data-testid="swarm-raw"], #swarm-title, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, [data-testid="model-selector-trigger"], [data-testid="model-selector-menu"], [data-testid="permissions-selector-trigger"]';
+    'code, pre, kbd, samp, textarea, input, style, script, noscript, [contenteditable="true"], [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .monaco-editor, .monaco-diff-editor, .xterm, [class*="onyx-key"], .prose, .markdown, [class*="chat-message"], [class*="group/file-title"], [data-testid="conversation-row-sidebar"] a[href^="/c/"], [data-testid="conversation-row-sidebar"] span.truncate, [data-testid="conversation-navigator-turn"], .msg-body, #raw, [data-testid="swarm-raw"], #swarm-title, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, #ag-project-action-menu, [data-testid="model-selector-trigger"], [data-testid="model-selector-menu"], [data-testid="permissions-selector-trigger"]';
   const UX_I18N_ATTR_EXCLUDE =
-    'code, pre, kbd, samp, style, script, noscript, [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .monaco-editor, .monaco-diff-editor, .xterm, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]';
+    'code, pre, kbd, samp, style, script, noscript, [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .monaco-editor, .monaco-diff-editor, .xterm, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, #ag-project-action-menu, [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]';
   let uxI18nObserver = null;
   let uxI18nFlushTimer = 0;
   let uxI18nDirtyRoots = new Set();
@@ -5999,6 +5999,25 @@
   let projectFolderDropdownOpen = false;
   let projectFolderSearch = '';
   let projectSelectedFolderPath = '';
+  let newProjectWatchCleanup = null;
+  let projectMgmtSvcRef = null;
+  let projectMenuState = null; // { project, x, y, confirmDelete }
+  let projectMenuDocBound = false;
+  const optimisticallyDeletedProjectIds = new Set();
+  const optimisticProjectNames = new Map();
+
+  const SVG_PROJ_SETTINGS =
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.9v1.5M8 12.6v1.5M1.9 8h1.5M12.6 8h1.5M3.7 3.7l1.1 1.1M11.2 11.2l1.1 1.1M12.3 3.7l-1.1 1.1M4.8 11.2l-1.1 1.1"/></svg>';
+
+  function clearNewProjectWatcher() {
+    if (typeof newProjectWatchCleanup === 'function') {
+      const fn = newProjectWatchCleanup;
+      newProjectWatchCleanup = null;
+      try {
+        fn();
+      } catch {}
+    }
+  }
 
   const SVG_PROJ_CHEVRON =
     '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 6.2L8 9.8l3.5-3.6"/></svg>';
@@ -6051,27 +6070,47 @@
   }
 
   function resolveProjectsStoreAndBindings() {
-    const bindings = findSidebarBindings();
+    let bindings = findSidebarBindings();
     let store = (bindings && bindings.store) || sidebarStoreRef || null;
-    if (!store) {
+    let router = (bindings && bindings.router) || null;
+    if (!store || !router) {
+      const rootEl = document.getElementById('root');
       const anchors = [
         document.querySelector('[data-testid="project-header"]'),
         document.querySelector('[data-testid="automations-button"]'),
-        document.querySelector('.bg-sidebar')
+        document.querySelector('.bg-sidebar'),
+        rootEl && rootEl.firstElementChild
       ];
       for (const anchor of anchors) {
         let f = anchor ? activeReactFiber(anchor) : null;
-        for (let d = 0; f && d < 36 && !store; d++, f = f.return) {
+        for (let d = 0; f && d < 42 && (!store || !router); d++, f = f.return) {
+          const mp = f.memoizedProps;
+          if (!store && mp && mp.sidebarStore && typeof mp.sidebarStore.getState === 'function') {
+            store = mp.sidebarStore;
+          }
+          if (!router && mp && mp.sidebarRouter && typeof mp.sidebarRouter.navigate === 'function') {
+            router = mp.sidebarRouter;
+          }
+          if (!router && mp && mp.value && typeof mp.value.navigate === 'function' && mp.value.state && mp.value.state.location) {
+            router = mp.value;
+          }
           for (let dep = f.dependencies && f.dependencies.firstContext; dep; dep = dep.next) {
             const mv = dep.memoizedValue;
-            if (mv && mv.store && typeof mv.store.getState === 'function') {
+            if (!store && mv && mv.store && typeof mv.store.getState === 'function') {
               store = mv.store;
-              break;
+            }
+            if (!router && mv && typeof mv.navigate === 'function' && mv.state && mv.state.location) {
+              router = mv;
             }
           }
         }
-        if (store) break;
+        if (store && router) break;
       }
+    }
+    if (!bindings && (store || router)) {
+      bindings = { store, router, stepHandler: null, actionsCtx: null, groupsById: new Map(), projectLabels: new Map() };
+    } else if (bindings && router && !bindings.router) {
+      bindings = Object.assign({}, bindings, { router });
     }
     return { store, bindings };
   }
@@ -6137,21 +6176,432 @@
     return items;
   }
 
+  function resolveProjectManagementService() {
+    if (projectMgmtSvcRef && typeof projectMgmtSvcRef.deleteProject === 'function') {
+      return projectMgmtSvcRef;
+    }
+    const rootEl = document.getElementById('root');
+    const anchors = [
+      document.querySelector('.bg-sidebar'),
+      document.querySelector('[data-testid="automations-button"]'),
+      document.querySelector('[data-testid="project-header"]'),
+      rootEl && rootEl.firstElementChild
+    ];
+    const pickSvc = (val) => {
+      if (!val || typeof val !== 'object') return null;
+      if (val.core && val.core.projectManagementService && typeof val.core.projectManagementService.deleteProject === 'function') {
+        return val.core.projectManagementService;
+      }
+      if (typeof val.deleteProject === 'function') return val;
+      return null;
+    };
+    for (const anchor of anchors) {
+      let cur = anchor ? activeReactFiber(anchor) : null;
+      for (let d = 0; cur && d < 42; d++, cur = cur.return) {
+        const fromProps = pickSvc(cur.memoizedProps && cur.memoizedProps.value);
+        if (fromProps) {
+          projectMgmtSvcRef = fromProps;
+          return fromProps;
+        }
+        for (let dep = cur.dependencies && cur.dependencies.firstContext; dep; dep = dep.next) {
+          const fromDep = pickSvc(dep.memoizedValue);
+          if (fromDep) {
+            projectMgmtSvcRef = fromDep;
+            return fromDep;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  function getRawNativeProjectRecord(projectId, svc) {
+    const pm = svc || resolveProjectManagementService();
+    if (pm && typeof pm.getProjectStateProvider === 'function') {
+      try {
+        const prov = pm.getProjectStateProvider(projectId);
+        const st = prov && typeof prov.getState === 'function' ? prov.getState() : null;
+        if (st && st.project && typeof st.project === 'object') return st.project;
+      } catch {}
+    }
+    if (pm && pm.projectsStateProvider && typeof pm.projectsStateProvider.getState === 'function') {
+      try {
+        const list = pm.projectsStateProvider.getState() || [];
+        const hit = list.find((item) => item && item.project && item.project.id === projectId);
+        if (hit && hit.project) return hit.project;
+      } catch {}
+    }
+    return null;
+  }
+
+  async function renameNativeProject(project, nextName) {
+    const trimmed = String(nextName || '').trim();
+    if (!project || !project.id || project.isBuiltin || !trimmed) return { ok: false, error: 'invalid_name' };
+    const pm = resolveProjectManagementService();
+    if (!pm || typeof pm.updateProject !== 'function') return { ok: false, error: 'service_unavailable' };
+    const raw = getRawNativeProjectRecord(project.id, pm) || {
+      $typeName: 'exa.project_pb.Project',
+      id: project.id,
+      name: project.name
+    };
+    optimisticProjectNames.set(project.id, trimmed);
+    if (projectsViewOpen) renderProjectsView();
+    try {
+      await pm.updateProject(Object.assign({}, raw, { name: trimmed }));
+      if (!disposed) {
+        if (projectsViewOpen) renderProjectsView();
+        scheduleSidebarSync();
+      }
+      return { ok: true };
+    } catch (err) {
+      optimisticProjectNames.delete(project.id);
+      if (!disposed && projectsViewOpen) renderProjectsView();
+      return { ok: false, error: String((err && err.message) || err || 'rename_failed') };
+    }
+  }
+
+  async function archiveNativeProject(project) {
+    if (!project || !project.id || project.isBuiltin) return false;
+    const pm = resolveProjectManagementService();
+    if (!pm || typeof pm.updateProject !== 'function') return false;
+    const raw = getRawNativeProjectRecord(project.id, pm);
+    if (!raw) return false;
+    optimisticallyDeletedProjectIds.add(project.id);
+    if (activeProjectId === project.id) {
+      activeProjectId = null;
+      projectSelectedFolderPath = '';
+    }
+    if (projectsViewOpen) renderProjectsView();
+    try {
+      await pm.updateProject(Object.assign({}, raw, { archived: true }));
+      if (!disposed) {
+        if (projectsViewOpen) renderProjectsView();
+        scheduleSidebarSync();
+      }
+      return true;
+    } catch {
+      optimisticallyDeletedProjectIds.delete(project.id);
+      if (!disposed && projectsViewOpen) renderProjectsView();
+      return false;
+    }
+  }
+
+  async function deleteNativeProject(project) {
+    if (!project || !project.id || project.isBuiltin) return false;
+    const pm = resolveProjectManagementService();
+    if (!pm || typeof pm.deleteProject !== 'function') return false;
+    const { bindings } = resolveProjectsStoreAndBindings();
+    optimisticallyDeletedProjectIds.add(project.id);
+    optimisticProjectNames.delete(project.id);
+    projectComposerDrafts.delete(project.id);
+    if (activeProjectId === project.id) {
+      activeProjectId = null;
+      projectFolderDropdownOpen = false;
+      projectFolderSearch = '';
+      projectSelectedFolderPath = '';
+    }
+    if (projectsViewOpen) renderProjectsView();
+    try {
+      await pm.deleteProject(project.id);
+      const router = bindings && bindings.router;
+      const loc = router && router.state && router.state.location;
+      if (router && typeof router.navigate === 'function' && loc && loc.search && loc.search.project === project.id) {
+        try {
+          router.navigate({
+            to: loc.pathname || '/',
+            search: (prev) => {
+              const next = Object.assign({}, prev || {});
+              delete next.project;
+              return next;
+            },
+            replace: true
+          });
+        } catch {}
+      }
+      if (!disposed) {
+        if (projectsViewOpen) renderProjectsView();
+        scheduleSidebarSync();
+      }
+      return true;
+    } catch {
+      optimisticallyDeletedProjectIds.delete(project.id);
+      if (!disposed && projectsViewOpen) renderProjectsView();
+      return false;
+    }
+  }
+
+  function openNativeProjectSettings(project) {
+    if (!project || !project.id || project.isBuiltin) return;
+    const { bindings } = resolveProjectsStoreAndBindings();
+    const router = bindings && bindings.router;
+    if (router && typeof router.navigate === 'function') {
+      try {
+        router.navigate({
+          search: (prev) =>
+            Object.assign({}, prev || {}, {
+              settingsOpen: 'true',
+              settingsProjectId: project.id
+            })
+        });
+        return;
+      } catch {}
+    }
+    const settingsBtn = document.querySelector('[data-testid="settings-button"]');
+    if (settingsBtn) settingsBtn.click();
+  }
+
+  function closeProjectActionMenu() {
+    projectMenuState = null;
+    const menu = document.getElementById('ag-project-action-menu');
+    if (menu) menu.remove();
+    document.querySelectorAll('[data-ag-proj-menu][data-menu-open], [data-ag-pd-proj-menu][data-menu-open]').forEach((b) => {
+      b.removeAttribute('data-menu-open');
+    });
+    if (projectMenuDocBound) {
+      document.removeEventListener('mousedown', onProjectMenuDocDown, true);
+      window.removeEventListener('resize', closeProjectActionMenu);
+      projectMenuDocBound = false;
+    }
+  }
+
+  function onProjectMenuDocDown(ev) {
+    const t = ev && ev.target;
+    if (t && t.closest && t.closest('#ag-project-action-menu, [data-ag-proj-menu], [data-ag-pd-proj-menu]')) return;
+    closeProjectActionMenu();
+  }
+
+  function renderProjectActionMenu() {
+    const st = projectMenuState;
+    if (!st || !st.project) {
+      closeProjectActionMenu();
+      return;
+    }
+    let menu = document.getElementById('ag-project-action-menu');
+    if (!menu) {
+      menu = document.createElement('div');
+      menu.id = 'ag-project-action-menu';
+      menu.setAttribute('role', 'menu');
+      menu.setAttribute('data-ag-i18n-ignore', '1');
+      menu.addEventListener('click', (ev) => {
+        const btn = ev.target && ev.target.closest && ev.target.closest('[data-ag-pm-act]');
+        if (!btn || !projectMenuState) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        const act = btn.getAttribute('data-ag-pm-act');
+        const cur = projectMenuState;
+        const proj = cur.project;
+        if (act === 'rename') {
+          closeProjectActionMenu();
+          openRenameProjectModal(proj);
+          return;
+        }
+        if (act === 'reveal') {
+          closeProjectActionMenu();
+          if (proj.dirPath && typeof window.__agProjectCall === 'function') {
+            window.__agProjectCall('revealFile', { dirPath: proj.dirPath, targetPath: proj.dirPath }, 8000);
+          }
+          return;
+        }
+        if (act === 'settings') {
+          closeProjectActionMenu();
+          openNativeProjectSettings(proj);
+          return;
+        }
+        if (act === 'archive') {
+          closeProjectActionMenu();
+          archiveNativeProject(proj);
+          return;
+        }
+        if (act === 'delete') {
+          if (!cur.confirmDelete) {
+            cur.confirmDelete = true;
+            renderProjectActionMenu();
+            return;
+          }
+          closeProjectActionMenu();
+          deleteNativeProject(proj);
+        }
+      });
+      document.body.appendChild(menu);
+    }
+
+    const proj = st.project;
+    const pm = resolveProjectManagementService();
+    const canUpdate = Boolean(!proj.isBuiltin && pm && typeof pm.updateProject === 'function');
+    const canDelete = Boolean(!proj.isBuiltin && pm && typeof pm.deleteProject === 'function');
+    const canReveal = Boolean(proj.dirPath && typeof window.__agProjectCall === 'function');
+    const revealLabel = /Win/i.test((navigator && navigator.platform) || '')
+      ? L('在资源管理器中显示', 'Show in Explorer')
+      : L('在访达中显示', 'Reveal in Finder');
+    const delLabel = st.confirmDelete
+      ? L('确认删除？（保留本地文件）', 'Confirm delete? (keeps files)')
+      : L('删除项目', 'Delete project');
+
+    let itemsHtml = '';
+    itemsHtml += `<button type="button" class="ag-rm-item" data-ag-pm-act="rename"${canUpdate ? '' : ' disabled'}>${RECENT_RENAME_SVG}<span class="ag-rm-label">${escapeHtml(L('重命名项目', 'Rename project'))}</span></button>`;
+    if (proj.dirPath) {
+      itemsHtml += `<button type="button" class="ag-rm-item" data-ag-pm-act="reveal"${canReveal ? '' : ' disabled'}>${RECENT_FOLDER_SVG}<span class="ag-rm-label">${escapeHtml(revealLabel)}</span></button>`;
+    }
+    itemsHtml += `<button type="button" class="ag-rm-item" data-ag-pm-act="settings"${!proj.isBuiltin ? '' : ' disabled'}>${SVG_PROJ_SETTINGS}<span class="ag-rm-label">${escapeHtml(L('项目权限设置', 'Project settings'))}</span></button>`;
+    if (canUpdate && getRawNativeProjectRecord(proj.id, pm)) {
+      itemsHtml += `<button type="button" class="ag-rm-item" data-ag-pm-act="archive">${RECENT_ARCHIVE_SVG}<span class="ag-rm-label">${escapeHtml(L('归档项目', 'Archive project'))}</span></button>`;
+    }
+    itemsHtml += `<div class="ag-rm-sep"></div>`;
+    itemsHtml += `<button type="button" class="ag-rm-item ag-rm-danger" data-ag-pm-act="delete" data-confirm="${st.confirmDelete ? '1' : '0'}"${canDelete ? '' : ' disabled'}>${RECENT_TRASH_SVG}<span class="ag-rm-label">${escapeHtml(delLabel)}</span></button>`;
+
+    menu.innerHTML = itemsHtml;
+
+    const menuW = 216;
+    const menuH = Math.max(140, menu.offsetHeight || 168);
+    const vw = window.innerWidth || 1200;
+    const vh = window.innerHeight || 800;
+    const left = Math.min(Math.max(8, st.x), Math.max(8, vw - menuW - 8));
+    const top = st.y + menuH > vh - 8 ? Math.max(8, st.y - menuH) : Math.max(8, st.y);
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+
+    if (!projectMenuDocBound) {
+      document.addEventListener('mousedown', onProjectMenuDocDown, true);
+      window.addEventListener('resize', closeProjectActionMenu);
+      projectMenuDocBound = true;
+    }
+  }
+
+  function openProjectActionMenu(project, x, y, triggerBtn = null) {
+    if (!project || !project.id || project.isBuiltin) return;
+    closeRecentRowMenu();
+    if (projectMenuState && projectMenuState.project && projectMenuState.project.id === project.id && triggerBtn) {
+      closeProjectActionMenu();
+      return;
+    }
+    closeProjectActionMenu();
+    if (triggerBtn) triggerBtn.setAttribute('data-menu-open', 'true');
+    projectMenuState = { project, x, y, confirmDelete: false };
+    renderProjectActionMenu();
+  }
+
+  function openRenameProjectModal(project) {
+    if (!project || !project.id || project.isBuiltin) return;
+    closeProjectsModal();
+    projectsModalState = {
+      kind: 'renameProject',
+      project,
+      name: project.name || '',
+      saving: false,
+      error: ''
+    };
+    renderRenameProjectModal();
+  }
+
+  function renderRenameProjectModal() {
+    if (!projectsModalState || projectsModalState.kind !== 'renameProject') return;
+    if (!projectsModalEl || !projectsModalEl.isConnected) {
+      projectsModalEl = document.createElement('div');
+      projectsModalEl.id = 'ag-claude-project-modal';
+      projectsModalEl.setAttribute('data-ag-i18n-ignore', '1');
+      projectsModalEl.addEventListener('click', (e) => {
+        if (e.target === projectsModalEl) closeProjectsModal();
+      });
+      document.body.appendChild(projectsModalEl);
+    }
+    const st = projectsModalState;
+    const errHtml = st.error ? `<div class="ag-pm-error">${escapeHtml(st.error)}</div>` : '';
+    projectsModalEl.innerHTML = `
+      <div class="ag-pm-dialog" role="dialog" aria-modal="true" aria-label="${escapeHtml(L('重命名项目', 'Rename project'))}">
+        <div class="ag-pm-hdr">
+          <div class="ag-pm-title-wrap">
+            <span class="ag-pm-icon">${SVG_CLAUDE_PROJECTS_ICON}</span>
+            <h2 class="ag-pm-title">${escapeHtml(L('重命名项目', 'Rename project'))}</h2>
+          </div>
+          <button type="button" class="ag-pm-close" data-ag-pm-close="true" aria-label="${escapeHtml(L('关闭', 'Close'))}">×</button>
+        </div>
+        <div class="ag-pm-field">
+          <input id="ag-pm-rename-input" class="ag-pm-input" type="text" value="${escapeHtml(st.name)}" placeholder="${escapeHtml(L('输入项目名称…', 'Enter project name…'))}" />
+        </div>
+        ${errHtml}
+        <div class="ag-pm-footer">
+          <button type="button" class="ag-pm-secondary-btn" data-ag-pm-close="true">${L('取消', 'Cancel')}</button>
+          <button type="button" class="ag-pm-primary-btn" data-ag-pm-rename-save="true" ${st.saving || !String(st.name || '').trim() ? 'disabled' : ''}>${
+            st.saving ? L('保存中…', 'Saving…') : L('保存', 'Save')
+          }</button>
+        </div>
+      </div>
+    `;
+    const input = projectsModalEl.querySelector('#ag-pm-rename-input');
+    const saveBtn = projectsModalEl.querySelector('[data-ag-pm-rename-save]');
+    const doSubmit = async () => {
+      if (!projectsModalState || projectsModalState.kind !== 'renameProject' || projectsModalState.saving) return;
+      const nextName = String(projectsModalState.name || '').trim();
+      if (!nextName) return;
+      if (nextName === st.project.name) {
+        closeProjectsModal();
+        return;
+      }
+      projectsModalState.saving = true;
+      projectsModalState.error = '';
+      renderRenameProjectModal();
+      const res = await renameNativeProject(st.project, nextName);
+      if (disposed || !projectsModalState || projectsModalState.kind !== 'renameProject') return;
+      if (res && res.ok) {
+        closeProjectsModal();
+      } else {
+        projectsModalState.saving = false;
+        projectsModalState.error = L('重命名失败：', 'Rename failed: ') + String((res && res.error) || 'unknown');
+        renderRenameProjectModal();
+      }
+    };
+    if (input) {
+      input.focus();
+      try {
+        input.select();
+      } catch {}
+      input.addEventListener('input', () => {
+        if (!projectsModalState || projectsModalState.kind !== 'renameProject') return;
+        projectsModalState.name = input.value;
+        if (saveBtn) saveBtn.disabled = !input.value.trim();
+      });
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          doSubmit();
+        }
+      });
+    }
+    projectsModalEl.querySelectorAll('[data-ag-pm-close]').forEach((b) => {
+      b.addEventListener('click', () => closeProjectsModal());
+    });
+    if (saveBtn) {
+      saveBtn.addEventListener('click', () => doSubmit());
+    }
+  }
+
   function collectNativeProjects() {
     const { store } = resolveProjectsStoreAndBindings();
     const state = store ? store.getState() : null;
     const rawProjects = (state && state.sidebarProjects && state.sidebarProjects.projects) || [];
+    const presentRawIds = new Set();
     const out = [];
     for (const p of rawProjects) {
       if (!p || !p.id) continue;
+      presentRawIds.add(p.id);
+      if (optimisticallyDeletedProjectIds.has(p.id) || p.archived) continue;
       const rawName = String(p.name || '').trim();
       if (!rawName || rawName === 'swarm/swarm_board' || p.id === 'outside-of-project') continue;
       const isCliProject = p.id === 'default-cli-project';
       const uris = Array.isArray(p.folderUris) ? p.folderUris : [];
-      if (!uris.length && !isCliProject) continue;
       const dirPath = uris.length ? decodeFileUriToPath(uris[0]) : '';
-      const name = isCliProject ? L('CLI 项目', 'CLI Project') : rawName;
-      const base = { id: p.id, name, dirPath, shortPath: formatShortHomePath(dirPath), isVirtual: !dirPath };
+      const optName = optimisticProjectNames.get(p.id);
+      if (optName && optName === rawName) optimisticProjectNames.delete(p.id);
+      const name = isCliProject ? L('CLI 项目', 'CLI Project') : optName || rawName;
+      const base = {
+        id: p.id,
+        name,
+        dirPath,
+        shortPath: formatShortHomePath(dirPath),
+        isVirtual: !dirPath,
+        isCliProject,
+        isBuiltin: isCliProject
+      };
       const chats = collectProjectConversations(base, state);
       out.push({
         ...base,
@@ -6159,6 +6609,9 @@
         chatCount: chats.length,
         lastSec: chats.length ? chats[0].lastSec : 0
       });
+    }
+    for (const delId of [...optimisticallyDeletedProjectIds]) {
+      if (!presentRawIds.has(delId)) optimisticallyDeletedProjectIds.delete(delId);
     }
     return out;
   }
@@ -6173,7 +6626,11 @@
         leftPx = Math.round(r.right);
       }
     }
+    const collapsed = leftPx < 220;
+    const safeLeftPad = collapsed ? Math.max(24, 224 - leftPx) : 24;
     projectsViewEl.style.left = `${leftPx}px`;
+    projectsViewEl.setAttribute('data-sidebar-collapsed', collapsed ? 'true' : 'false');
+    projectsViewEl.style.setProperty('--ag-proj-topbar-pl', `${safeLeftPad}px`);
   }
 
   function ensureProjectsSidebarObserver() {
@@ -6210,6 +6667,8 @@
   }
 
   function closeProjectsView() {
+    clearNewProjectWatcher();
+    closeProjectActionMenu();
     if (!projectsViewOpen && !projectsModalEl) return;
     closeProjectsModal();
     projectFolderDropdownOpen = false;
@@ -6221,10 +6680,39 @@
     updateProjectsNavActiveVisual();
   }
 
+  function isNativeModalDialogOpen() {
+    const dialogs = document.querySelectorAll('[role="dialog"], .agy-dialog');
+    for (const el of dialogs) {
+      if (!el || !el.isConnected || el.closest('#ag-claude-project-modal, #ag-claude-projects-view')) continue;
+      if (el.getAttribute('aria-hidden') === 'true') continue;
+      try {
+        const cs = window.getComputedStyle(el);
+        if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) continue;
+      } catch {}
+      return true;
+    }
+    return false;
+  }
+
   function onProjectsGlobalClick(e) {
     if (!projectsViewOpen) return;
     const t = e.target;
     if (!t || !t.closest) return;
+    if (t.closest('[data-testid="sidebar-toggle"]')) {
+      frame(() => {
+        ensureProjectsSidebarObserver();
+        positionProjectsOverlay();
+      });
+      later(() => {
+        ensureProjectsSidebarObserver();
+        positionProjectsOverlay();
+      }, 160);
+      later(() => {
+        ensureProjectsSidebarObserver();
+        positionProjectsOverlay();
+      }, 320);
+      return;
+    }
     if (projectFolderDropdownOpen && !t.closest('[data-ag-pd-folder-menu], [data-ag-pd-folder-toggle]')) {
       projectFolderDropdownOpen = false;
       projectFolderSearch = '';
@@ -6235,7 +6723,13 @@
         if (toggleBtn) toggleBtn.setAttribute('data-open', 'false');
       }
     }
-    if (t.closest('#ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-recent-row-menu')) return;
+    if (
+      t.closest(
+        '#ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-recent-row-menu, #ag-project-action-menu, .agy-dialog, [role="dialog"]'
+      )
+    ) {
+      return;
+    }
     if (
       t.closest(
         'a[href="/"], [data-testid="new-conversation-button"], [data-testid="automations-button"], a[href="/customizations"], [data-testid="settings-button"], [data-testid="conversation-row-sidebar"], #ag-claude-recent-section [data-ag-recent-new]'
@@ -6249,10 +6743,16 @@
 
   function onProjectsGlobalKeyDown(e) {
     if (e.key !== 'Escape') return;
-    if (projectsModalEl) {
+    if (projectMenuState) {
+      e.preventDefault();
+      e.stopPropagation();
+      closeProjectActionMenu();
+    } else if (projectsModalEl) {
       e.preventDefault();
       e.stopPropagation();
       closeProjectsModal();
+    } else if (isNativeModalDialogOpen()) {
+      return;
     } else if (projectFolderDropdownOpen) {
       e.preventDefault();
       e.stopPropagation();
@@ -6272,12 +6772,154 @@
     }
   }
 
+  function findNativeNewProjectEntryAction(addBtn) {
+    if (!addBtn) return null;
+    let f = activeReactFiber(addBtn);
+    for (let d = 0; f && d < 24; d++, f = f.return) {
+      for (let h = f.memoizedState; h; h = h.next) {
+        const ms = h.memoizedState;
+        const list = Array.isArray(ms) && Array.isArray(ms[0]) ? ms[0] : Array.isArray(ms) ? ms : null;
+        if (!list || !list.length) continue;
+        for (const it of list) {
+          if (!it || typeof it !== 'object' || it.disabled || typeof it.onClick !== 'function') continue;
+          const lbl = String(it.label || it.title || '').trim();
+          if (
+            it.type === 'NEW_PROJECT' ||
+            /^(new project|create(?: new)? project|新建项目)$/i.test(lbl)
+          ) {
+            return () => it.onClick();
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  function armNewProjectCompletionWatcher(store, bindings) {
+    clearNewProjectWatcher();
+    if (!projectsViewOpen || !store || typeof store.subscribe !== 'function' || typeof store.getState !== 'function') {
+      return;
+    }
+    const beforeIds = new Set(collectNativeProjects().map((p) => p.id));
+    const readSearchProj = () => {
+      const loc = bindings && bindings.router && bindings.router.state && bindings.router.state.location;
+      return (loc && loc.search && loc.search.project) || '';
+    };
+    const beforeSearchProj = readSearchProj();
+    let sawDialogOpen = false;
+    let closeGraceTimer = 0;
+
+    const focusProjectInOverlay = (proj) => {
+      clearNewProjectWatcher();
+      if (disposed || !projectsViewOpen || !proj) return;
+      activeProjectId = proj.id;
+      projectSelectedFolderPath = proj.dirPath || '';
+      renderProjectsView();
+      refreshProjectsContexts([proj]);
+    };
+
+    const unsub = store.subscribe(() => {
+      if (disposed || !projectsViewOpen) {
+        clearNewProjectWatcher();
+        return;
+      }
+      const st = store.getState();
+      const isOpen = Boolean(st && st.newProject && st.newProject.isOpen);
+      if (isOpen) {
+        sawDialogOpen = true;
+        if (closeGraceTimer) {
+          clearTimeout(closeGraceTimer);
+          closeGraceTimer = 0;
+        }
+      }
+      const curProjects = collectNativeProjects();
+      const created = curProjects.find((p) => p.id && !beforeIds.has(p.id));
+      if (created) {
+        focusProjectInOverlay(created);
+        return;
+      }
+      const nextSearchProj = readSearchProj();
+      if (sawDialogOpen && !isOpen && nextSearchProj && nextSearchProj !== beforeSearchProj) {
+        const selectedExisting = curProjects.find((p) => p.id === nextSearchProj);
+        if (selectedExisting) {
+          focusProjectInOverlay(selectedExisting);
+          return;
+        }
+      }
+      if (sawDialogOpen && !isOpen && !closeGraceTimer) {
+        closeGraceTimer = later(() => {
+          clearNewProjectWatcher();
+        }, 2500);
+      }
+    });
+
+    const maxTimer = later(() => {
+      clearNewProjectWatcher();
+    }, 300000);
+
+    newProjectWatchCleanup = () => {
+      if (closeGraceTimer) {
+        clearTimeout(closeGraceTimer);
+        closeGraceTimer = 0;
+      }
+      if (maxTimer) clearTimeout(maxTimer);
+      if (typeof unsub === 'function') unsub();
+    };
+  }
+
   function triggerNativeNewProject() {
     const addBtn = document.querySelector('[data-testid="sidebar-add-project-button"]');
-    if (addBtn) {
-      closeProjectsView();
-      addBtn.click();
+    const { store, bindings } = resolveProjectsStoreAndBindings();
+    const directEntryAction = findNativeNewProjectEntryAction(addBtn);
+    const st = store && typeof store.getState === 'function' ? store.getState() : null;
+    const hasNewProjectSlice = Boolean(
+      st && st.newProject && typeof st.newProject === 'object' && store && typeof store.dispatch === 'function'
+    );
+
+    if (directEntryAction) {
+      armNewProjectCompletionWatcher(store, bindings);
+      directEntryAction();
+      return;
     }
+
+    if (hasNewProjectSlice) {
+      armNewProjectCompletionWatcher(store, bindings);
+      store.dispatch({ type: 'newProject/reset' });
+      store.dispatch({ type: 'newProject/setCurrentStep', payload: 'folderSelection' });
+      store.dispatch({ type: 'newProject/setIsOpen', payload: true });
+      return;
+    }
+
+    if (!addBtn) return;
+
+    const isMultiMenuTrigger =
+      addBtn.hasAttribute('data-base-ui-click-trigger') ||
+      addBtn.getAttribute('aria-haspopup') === 'dialog' ||
+      addBtn.getAttribute('aria-haspopup') === 'menu';
+
+    if (isMultiMenuTrigger) {
+      armNewProjectCompletionWatcher(store, bindings);
+      addBtn.click();
+      later(() => {
+        if (disposed) return;
+        const popups = document.querySelectorAll('[data-popover-popup], [role="menu"], [role="dialog"]');
+        for (const pop of popups) {
+          if (!pop || pop.closest('#ag-claude-project-modal, #ag-claude-projects-view, .agy-dialog')) continue;
+          const items = pop.querySelectorAll('button, [role="menuitem"], [role="option"], .main-row-trigger');
+          for (const item of items) {
+            const txt = String(item.textContent || '').trim();
+            if (/^(new project|create(?: new)? project|新建项目)$/i.test(txt)) {
+              item.click();
+              return;
+            }
+          }
+        }
+      }, 24);
+      return;
+    }
+
+    closeProjectsView();
+    addBtn.click();
   }
 
   function openConversationFromProject(cid) {
@@ -6705,6 +7347,11 @@
       <div class="ag-pd-shell">
         <div class="ag-pd-title-row">
           <h1 class="ag-pd-title">${escapeHtml(project.name)}</h1>
+          ${
+            !project.isBuiltin
+              ? `<button type="button" class="ag-pd-more-btn" data-ag-pd-proj-menu="true" aria-label="${escapeHtml(L('项目操作', 'Project options'))}" title="${escapeHtml(L('更多操作', 'More options'))}">${RECENT_MORE_SVG}</button>`
+              : ''
+          }
         </div>
         <div class="ag-pd-columns">
           <div class="ag-pd-left">
@@ -6740,7 +7387,11 @@
                         </button>
                       </div>`
                     : `<div class="ag-pd-folder-bar">
-                        <span class="ag-pd-virtual-note">${SVG_CLAUDE_PROJECTS_ICON}<span>${L('终端 CLI 会话分组（未绑定本地文件夹）', 'CLI session container (no local folder)')}</span></span>
+                        <span class="ag-pd-virtual-note">${SVG_CLAUDE_PROJECTS_ICON}<span>${
+                          project.isCliProject
+                            ? L('终端 CLI 会话分组（未绑定本地文件夹）', 'CLI session container (no local folder)')
+                            : L('未绑定本地文件夹', 'No local folder linked')
+                        }</span></span>
                       </div>`
                 }
               </div>
@@ -6812,12 +7463,34 @@
 
     const backBtn = el.querySelector('[data-ag-pd-back]');
     if (backBtn) {
-      backBtn.addEventListener('click', () => {
+      backBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        closeProjectActionMenu();
         activeProjectId = null;
         projectFolderDropdownOpen = false;
         projectFolderSearch = '';
         projectSelectedFolderPath = '';
         renderProjectsView();
+      });
+    }
+
+    const pdTitleRow = el.querySelector('.ag-pd-title-row');
+    if (pdTitleRow && !project.isBuiltin) {
+      pdTitleRow.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        openProjectActionMenu(project, e.clientX, e.clientY);
+      });
+    }
+
+    const pdMoreBtn = el.querySelector('[data-ag-pd-proj-menu]');
+    if (pdMoreBtn && !project.isBuiltin) {
+      pdMoreBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const r = pdMoreBtn.getBoundingClientRect();
+        openProjectActionMenu(project, Math.max(8, Math.round(r.right - 216)), Math.round(r.bottom + 6), pdMoreBtn);
       });
     }
 
@@ -7066,10 +7739,17 @@
                 `<span class="ag-proj-badge">${FEAT.i18n ? `${fileCount} 个文件` : `${fileCount} ${fileCount === 1 ? 'file' : 'files'}`}</span>`
               );
             }
+            const moreBtnHtml = !p.isBuiltin
+              ? `<button type="button" class="ag-proj-card-more" data-ag-proj-menu="${escapeHtml(p.id)}" aria-label="${escapeHtml(L('项目操作', 'Project options'))}" title="${escapeHtml(L('更多操作', 'More options'))}">${RECENT_MORE_SVG}</button>`
+              : '';
+            const fallbackMeta = p.shortPath || (!p.isCliProject && p.isVirtual ? L('未绑定文件夹', 'No folder') : '');
             return `<article class="ag-proj-card" data-ag-proj-id="${escapeHtml(p.id)}" tabindex="0">
-              <div class="ag-proj-card-title">${escapeHtml(p.name)}</div>
+              <div class="ag-proj-card-head">
+                <div class="ag-proj-card-title">${escapeHtml(p.name)}</div>
+                ${moreBtnHtml}
+              </div>
               <div class="ag-proj-card-foot">
-                <span class="ag-proj-card-meta">${escapeHtml(metaParts.join(' · ') || p.shortPath)}</span>
+                <span class="ag-proj-card-meta">${escapeHtml(metaParts.join(' · ') || fallbackMeta)}</span>
                 ${badges.length ? `<div class="ag-proj-card-badges">${badges.join('')}</div>` : ''}
               </div>
             </article>`;
@@ -7149,10 +7829,31 @@
     el.querySelectorAll('.ag-proj-card').forEach((card) => {
       const proj = byId.get(card.getAttribute('data-ag-proj-id'));
       if (!proj) return;
-      card.addEventListener('click', () => enterProject(proj));
-      card.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') {
+      card.addEventListener('click', (e) => {
+        if (e.target && e.target.closest && e.target.closest('[data-ag-proj-menu]')) return;
+        closeProjectActionMenu();
+        enterProject(proj);
+      });
+      if (!proj.isBuiltin) {
+        card.addEventListener('contextmenu', (e) => {
           e.preventDefault();
+          e.stopPropagation();
+          openProjectActionMenu(proj, e.clientX, e.clientY);
+        });
+        const moreBtn = card.querySelector('[data-ag-proj-menu]');
+        if (moreBtn) {
+          moreBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const r = moreBtn.getBoundingClientRect();
+            openProjectActionMenu(proj, Math.max(8, Math.round(r.right - 216)), Math.round(r.bottom + 6), moreBtn);
+          });
+        }
+      }
+      card.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !(e.target && e.target.closest && e.target.closest('[data-ag-proj-menu]'))) {
+          e.preventDefault();
+          closeProjectActionMenu();
           enterProject(proj);
         }
       });
@@ -7740,8 +8441,10 @@
   function refreshProjectsLanguageUi() {
     updateProjectsNavActiveVisual();
     if (projectsViewOpen) renderProjectsView();
+    if (projectMenuState) renderProjectActionMenu();
     if (projectsModalState) {
       if (projectsModalState.kind === 'scheduled') renderProjectScheduledModal();
+      else if (projectsModalState.kind === 'renameProject') renderRenameProjectModal();
       else renderProjectContextModal();
     }
   }
@@ -7871,6 +8574,9 @@
 
   function teardownProjectsWorkspace() {
     closeProjectsView();
+    projectMgmtSvcRef = null;
+    optimisticallyDeletedProjectIds.clear();
+    optimisticProjectNames.clear();
     const btn = document.getElementById('ag-claude-projects-nav-btn');
     if (btn) btn.remove();
     if (projectsViewEl) {
@@ -8778,7 +9484,7 @@
   }
 
   const OWN_SEL =
-    '.ag-claude-todo-card, .ag-claude-todo-live-dock, .ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, .ag-claude-inline-editor, .ag-claude-folder-badges, #ag-claude-recent-section, #ag-recent-row-menu, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-settings-stats-wrap, .ag-settings-subhdr-chev, #ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal';
+    '.ag-claude-todo-card, .ag-claude-todo-live-dock, .ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, .ag-claude-inline-editor, .ag-claude-folder-badges, #ag-claude-recent-section, #ag-recent-row-menu, #ag-project-action-menu, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-settings-stats-wrap, .ag-settings-subhdr-chev, #ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal';
   const CLASS_WATCH_SEL =
     'ul.contains-task-list, [id="antigravity.agentSidePanelInputBox"], [data-testid="tool-group-collapsible"], [data-testid="worked-for-collapsible"], [data-testid="progress-updates-collapsible"], [data-testid="ephemeral-tool-status"]';
 
