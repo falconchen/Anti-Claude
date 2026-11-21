@@ -712,7 +712,7 @@ test('sidebar folder badges & shortcut Recents: aggregates status, sorts by upda
   );
   assert.equal(h.doc.documentElement.getAttribute('lang'), 'zh-CN', 'sets zh-CN root locale for CJK shaping & line-break rules');
   assert.equal(
-    h.doc.querySelector('#ag-claude-recent-section .ag-recent-row:nth-child(2) .ag-recent-title').textContent,
+    h.doc.querySelector('#ag-claude-recent-section .ag-recent-entry:nth-child(2) .ag-recent-title').textContent,
     '恢复谷歌浏览器Gemini侧边栏',
     'keeps raw title untouched so native CSS text-autospace provides uniform 1/8em spacing'
   );
@@ -2197,4 +2197,85 @@ test('20 recent shortcuts use the measured spacer between Pinned and Projects an
   assert.equal(h.doc.getElementById('ag-claude-recent-section'), null);
   assert.ok(list.querySelector('[data-sidebar-section-drop-id="main-section-header"]'));
   h.close();
+});
+
+test('compact recent shortcuts expose archive, pin toggle and full conversation menu without navigating', { skip }, async () => {
+  const h = mount(`<div class="sidebar-grand"><div class="sidebar-parent"><div data-testid="conversation-list-sidebar"><div>
+    <div data-index="0" data-sidebar-section-drop-id="pinned"><div data-testid="section-header">Pinned</div></div>
+    <div data-index="1"></div><div data-index="2" data-sidebar-section-drop-id="main-section-header"><div data-testid="section-header">Projects</div></div>
+    </div></div></div></div>`, { modules: { claudeUxRecentSection: true, claudeUxHideSidebarProjects: false } });
+  const summary = { annotations: { title: 'Recent project chat', pinned: true, lastUserViewTime: { seconds: 2000 } }, lastModifiedTime: { seconds: 1000 },
+    trajectoryMetadata: { projectId: 'p1', workspaceUris: ['file:///Users/demo/Work%20Space'] }, status: 1 };
+  const state = { trajectorySummaries: { summaries: { c1: summary } },
+    sidebarProjects: { projects: [{ id: 'p1', name: 'Project A' }] },
+    multiConvoLayout: { rootNode: { type: 'pane', id: 'pane-1', cascadeId: 'other' }, focusedPaneId: 'pane-1' } };
+  const mutations = [], deleted = [], navigated = [], dispatched = [], copied = [];
+  Object.defineProperty(h.window.navigator, 'clipboard', { value: { writeText: async text => copied.push(text) } });
+  const list = h.doc.querySelector('[data-testid="conversation-list-sidebar"]').firstElementChild;
+  list.__reactFiber$sb = { memoizedProps: {
+    sidebarStore: { getState: () => state, subscribe: () => () => {}, dispatch: a => dispatched.push(a) },
+    sidebarRouter: { navigate: a => navigated.push(a) },
+    sidebarActions: { updateConversationAnnotations: async (id, patch, merge) => {
+      mutations.push({ id, patch, merge }); Object.assign(summary.annotations, patch);
+    }, deleteCascadeTrajectory: async id => deleted.push(id) }
+  } };
+  const sync = async () => { h.window.__t.scheduleSync(); await settle(h); };
+  await sync();
+  const sec = h.doc.getElementById('ag-claude-recent-section');
+  const menu = () => h.doc.getElementById('ag-recent-row-menu');
+  const open = () => sec.querySelector('[data-ag-recent-menu]').click();
+  const click = act => menu().querySelector(`[data-ag-rm-act="${act}"]`).click();
+  assert.equal(sec.querySelector('.ag-recent-actions').children.length, 3);
+  assert.equal(sec.querySelector('a button'), null, 'actions are siblings of the accessible link');
+  assert.equal(sec.querySelector('[data-ag-recent-pin]').getAttribute('aria-label'), 'Unpin');
+  sec.querySelector('[data-ag-recent-pin]').click();
+  await sync();
+  assert.equal(summary.annotations.pinned, false);
+  assert.equal(sec.querySelector('[data-ag-recent-pin]').getAttribute('aria-label'), 'Pin');
+  sec.querySelector('[data-ag-recent-pin]').click();
+  await sync();
+  assert.equal(summary.annotations.pinned, true);
+  open();
+  assert.match(menu().querySelector('[data-ag-rm-act="pin"]').textContent, /Unpin/);
+  click('mark-read'); await sync();
+  assert.equal(summary.annotations.markedAsUnread, true);
+  open(); assert.match(menu().querySelector('[data-ag-rm-act="mark-read"]').textContent, /Mark Read/);
+  click('mark-read'); await sync();
+  assert.equal(summary.annotations.markedAsUnread, false);
+  assert.ok(summary.annotations.lastUserViewTime.seconds > 0n);
+  for (const [act, expected] of [['title', 'Recent project chat'], ['id', 'c1'], ['project', 'Project A'], ['workspace', 'Work Space']]) {
+    open(); click(`copy-${act}`); await h.microtasks();
+    assert.equal(copied.at(-1), expected);
+  }
+  open();
+  const splitTrigger = menu().querySelector('[data-ag-rm-act="split-horizontal"]').closest('.ag-rm-subgroup').firstElementChild;
+  splitTrigger.click(); assert.equal(splitTrigger.getAttribute('aria-expanded'), 'true');
+  click('split-horizontal');
+  assert.deepEqual(JSON.parse(JSON.stringify(dispatched.pop())), { type: 'multiConvoLayout/splitPane',
+    payload: { targetPaneId: 'pane-1', cascadeId: 'c1', direction: 'horizontal' } });
+  state.multiConvoLayout.rootNode.cascadeId = 'c1';
+  open(); click('split-vertical');
+  assert.equal(dispatched.at(-1).payload.cascadeId, '_new', 'native split behavior for an already visible conversation');
+  open(); await settle(h);
+  assert.ok(menu().contains(h.doc.activeElement), 'keyboard activation focuses the menu');
+  h.doc.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  assert.equal(menu(), null);
+  assert.equal(h.doc.activeElement, sec.querySelector('[data-ag-recent-menu]'));
+  open(); click('rename'); await settle(h);
+  const input = sec.querySelector('[data-ag-recent-rename-input]');
+  input.value = 'Renamed recent';
+  input.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await sync(); assert.equal(summary.annotations.title, 'Renamed recent');
+  assert.equal(sec.querySelector('a').getAttribute('aria-label'), 'Renamed recent');
+  // Native context menu gesture works even when the original project is collapsed.
+  sec.querySelector('a').dispatchEvent(new h.window.MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 50, clientY: 50 }));
+  assert.ok(menu());
+  click('delete'); assert.equal(deleted.length, 0);
+  click('delete'); await h.microtasks(); assert.deepEqual(deleted, ['c1']);
+  assert.equal(navigated.length, 0, 'none of the action controls activates the row link');
+  sec.querySelector('[data-ag-recent-archive]').click(); await sync();
+  assert.equal(summary.annotations.archived, true);
+  assert.equal(h.doc.getElementById('ag-claude-recent-section'), null);
+  assert.ok(mutations.every(m => m.id === 'c1' && m.merge === true));
+  h.cleanups.forEach(fn => fn()); h.close();
 });

@@ -4088,8 +4088,12 @@
     '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>';
   const RECENT_PIN_SVG =
     '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.7 2.8l3.5 3.5-1.4 1.4-.9-.3-2.6 2.6.4 1.6-1.1 1.1-2.5-2.5-2.6 2.6-.7-.7 2.6-2.6-2.5-2.5 1.1-1.1 1.6.4 2.6-2.6-.3-.9z"/></svg>';
+  const RECENT_UNPIN_SVG = RECENT_PIN_SVG.replace('</svg>', '<path d="M2 2l12 12"/></svg>');
+  const RECENT_COPY_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="5" y="2" width="8" height="10" rx="1"/><path d="M3 5H2v9h8v-1"/></svg>';
+  const RECENT_UNREAD_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M12 3H2v11l3-3h9V6"/><circle cx="13" cy="3" r="2" fill="currentColor" stroke="none"/></svg>';
+  const RECENT_SPLIT_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="2" y="2" width="4" height="12" rx=".5"/><path d="M10 8V2h4v6M9 12h6m-3-3v6"/></svg>';
   const RECENT_MORE_SVG =
-    '<svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="12.5" cy="8" r="1.2"/></svg>';
+    '<svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><circle cx="8" cy="3.5" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="8" cy="12.5" r="1.2"/></svg>';
   const RECENT_FOLDER_SVG =
     '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.2 4.4A1.2 1.2 0 0 1 3.4 3.2h3.1l1.2 1.3h4.9a1.2 1.2 0 0 1 1.2 1.2v6.1a1.2 1.2 0 0 1-1.2 1.2H3.4a1.2 1.2 0 0 1-1.2-1.2V4.4z"/></svg>';
   const RECENT_RENAME_SVG =
@@ -4600,6 +4604,35 @@
     return (bindings && bindings.actionsCtx) || cachedSidebarActionsCtx || null;
   }
 
+  function recentSummary(id, bindings) {
+    return bindings?.store?.getState()?.trajectorySummaries?.summaries?.[id];
+  }
+
+  function toggleRecentPin(id, bindings) {
+    const summary = recentSummary(id, bindings);
+    if (!summary) return;
+    const pinned = isSummaryPinned(id, summary, bindings.store.getState());
+    const patch = { pinned: !pinned };
+    // Native Pin removes the conversation from a custom conversation group.
+    if (!pinned && summary.annotations?.conversationGroupId) patch.conversationGroupId = '';
+    return mutateRecentConversationAnnotation(id, patch, bindings);
+  }
+
+  function recentSplitOptions(id, bindings) {
+    const layout = bindings?.store?.getState()?.multiConvoLayout;
+    if (!layout?.rootNode || !layout.focusedPaneId || typeof bindings.store.dispatch !== 'function') return [];
+    const find = (node) => node.type === 'pane' ? (node.cascadeId === id ? node : null)
+      : (node.children || []).map(find).find(Boolean);
+    const pane = find(layout.rootNode);
+    return [
+      { label: L('向右分屏', 'Split Right'), direction: 'horizontal' },
+      { label: L('向下分屏', 'Split Down'), direction: 'vertical' }
+    ].map(option => ({ ...option, payload: {
+      targetPaneId: pane?.id || layout.focusedPaneId,
+      cascadeId: pane ? '_new' : id, direction: option.direction
+    } }));
+  }
+
   async function mutateRecentConversationAnnotation(id, patch, bindings) {
     const act = getSidebarActionsCtx(bindings);
     if (!id || !act || typeof act.updateConversationAnnotations !== 'function') return false;
@@ -4650,7 +4683,9 @@
     if (ev && ev.key === 'Escape') {
       ev.preventDefault();
       ev.stopPropagation();
+      const id = recentMenuState?.id;
       closeRecentRowMenu();
+      [...document.querySelectorAll('[data-ag-recent-menu]')].find(b => b.getAttribute('data-ag-recent-menu') === id)?.focus();
     }
   }
 
@@ -4696,7 +4731,34 @@
       menu.id = 'ag-recent-row-menu';
       menu.setAttribute('role', 'menu');
       menu.setAttribute('data-ag-i18n-ignore', '1');
+      menu.addEventListener('keydown', (ev) => {
+        const buttons = [...menu.querySelectorAll('button:not(:disabled)')].filter(b => !b.closest('.ag-rm-submenu') || b.closest('.ag-rm-subgroup').getAttribute('data-open') === 'true');
+        const index = buttons.indexOf(document.activeElement);
+        if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+          ev.preventDefault(); ev.stopPropagation();
+          buttons[(index + (ev.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+        }
+        if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') {
+          const group = ev.target.closest('.ag-rm-subgroup');
+          if (group) {
+            ev.preventDefault(); ev.stopPropagation();
+            group.setAttribute('data-open', String(ev.key === 'ArrowRight'));
+            group.firstElementChild.setAttribute('aria-expanded', String(ev.key === 'ArrowRight'));
+            group.querySelector(ev.key === 'ArrowRight' ? '.ag-rm-submenu button' : ':scope > button')?.focus();
+          }
+        }
+      });
       menu.addEventListener('click', (ev) => {
+        const trigger = ev.target.closest('[aria-haspopup="menu"]');
+        if (trigger) {
+          ev.preventDefault(); ev.stopPropagation();
+          const group = trigger.parentElement;
+          const open = group.getAttribute('data-open') !== 'true';
+          menu.querySelectorAll('.ag-rm-subgroup').forEach(g => g.setAttribute('data-open', 'false'));
+          group.setAttribute('data-open', String(open));
+          trigger.setAttribute('aria-expanded', String(open));
+          return;
+        }
         const btn = ev.target && ev.target.closest && ev.target.closest('[data-ag-rm-act]');
         if (!btn || !recentMenuState) return;
         ev.preventDefault();
@@ -4704,6 +4766,7 @@
         const act = btn.getAttribute('data-ag-rm-act');
         const cur = recentMenuState;
         const bindings = findSidebarBindings();
+        if (!recentSummary(cur.id, bindings)) { closeRecentRowMenu(); return; }
         if (act === 'open-project' && cur.projectId) {
           closeRecentRowMenu();
           if (FEAT.projects) openProjectsView(cur.projectId);
@@ -4711,7 +4774,41 @@
         }
         if (act === 'pin') {
           closeRecentRowMenu();
-          mutateRecentConversationAnnotation(cur.id, { pinned: true }, bindings);
+          toggleRecentPin(cur.id, bindings);
+          return;
+        }
+        if (act === 'mark-read') {
+          const summary = recentSummary(cur.id, bindings);
+          if (!summary) return;
+          const unread = summary.annotations?.markedAsUnread || recentItemsById.get(cur.id)?.status?.kind === 'unread';
+          const patch = unread ? { markedAsUnread: false, lastUserViewTime: {
+            seconds: BigInt(Math.floor(Date.now() / 1000)), nanos: (Date.now() % 1000) * 1000000
+          } } : { markedAsUnread: true };
+          closeRecentRowMenu();
+          mutateRecentConversationAnnotation(cur.id, patch, bindings);
+          return;
+        }
+        if (act.startsWith('copy-')) {
+          const summary = recentSummary(cur.id, bindings);
+          if (!summary) return;
+          const values = { 'copy-title': summary.annotations?.title || summary.summary || '',
+            'copy-id': cur.id, 'copy-project': cur.projectName,
+            'copy-workspace': decodeURIComponent(String(summary.trajectoryMetadata?.workspaceUris?.[0] || '').split('/').filter(Boolean).pop() || '') };
+          const value = values[act];
+          if (value && navigator.clipboard?.writeText) {
+            Promise.resolve(navigator.clipboard.writeText(value)).then(closeRecentRowMenu).catch(() => {
+              btn.setAttribute('title', L('复制失败，请重试', 'Copy failed; please retry'));
+            });
+          }
+          return;
+        }
+        if (act.startsWith('split-')) {
+          const option = recentSplitOptions(cur.id, bindings).find(o => `split-${o.direction}` === act);
+          if (option) {
+            closeRecentRowMenu();
+            // Same Redux action and payload used by the native conversation Split submenu.
+            bindings.store.dispatch({ type: 'multiConvoLayout/splitPane', payload: option.payload });
+          }
           return;
         }
         if (act === 'rename') {
@@ -4736,7 +4833,22 @@
       document.body.appendChild(menu);
     }
 
-    const canMutate = Boolean(getSidebarActionsCtx(findSidebarBindings()));
+    const bindings = findSidebarBindings();
+    const summary = recentSummary(st.id, bindings);
+    if (!summary) { closeRecentRowMenu(); return; }
+    const canMutate = typeof getSidebarActionsCtx(bindings)?.updateConversationAnnotations === 'function';
+    const canDelete = typeof getSidebarActionsCtx(bindings)?.deleteCascadeTrajectory === 'function';
+    const pinned = isSummaryPinned(st.id, summary, bindings.store.getState());
+    const unread = summary.annotations?.markedAsUnread || recentItemsById.get(st.id)?.status?.kind === 'unread';
+    const submenu = (label, icon, children) => `<div class="ag-rm-subgroup"><button type="button" class="ag-rm-item" role="menuitem" aria-haspopup="menu" aria-expanded="false">${icon}<span class="ag-rm-label">${escapeHtml(label)}</span><span aria-hidden="true">›</span></button><div class="ag-rm-submenu" role="menu">${children}</div></div>`;
+    const copyItem = (act, label) => `<button type="button" class="ag-rm-item" role="menuitem" data-ag-rm-act="copy-${act}"${navigator.clipboard?.writeText ? '' : ' disabled'}>${escapeHtml(label)}</button>`;
+    const copyHtml = submenu(L('复制', 'Copy'), RECENT_COPY_SVG,
+      copyItem('title', L('对话名称', 'Conversation Name')) + copyItem('id', L('对话 ID', 'Conversation ID')) +
+      (summary.trajectoryMetadata?.workspaceUris?.length ? copyItem('workspace', L('工作区名称', 'Workspace Name')) : '') +
+      (st.projectName ? copyItem('project', L('项目名称', 'Project Name')) : ''));
+    const splitOptions = recentSplitOptions(st.id, bindings);
+    const splitHtml = splitOptions.length ? submenu(L('分屏', 'Split'), RECENT_SPLIT_SVG,
+      splitOptions.map(o => `<button type="button" class="ag-rm-item" role="menuitem" data-ag-rm-act="split-${o.direction}">${escapeHtml(o.label)}</button>`).join('')) : '';
     const projPart =
       st.projectName && st.projectId && FEAT.projects
         ? `<button type="button" class="ag-rm-item ag-rm-project" data-ag-rm-act="open-project" title="${escapeHtml(L('打开所属项目', 'Open project'))}">${RECENT_FOLDER_SVG}<span class="ag-rm-label">${escapeHtml(st.projectName)}</span></button><div class="ag-rm-sep"></div>`
@@ -4746,12 +4858,15 @@
     const delLabel = st.confirmDelete ? L('确认删除？', 'Confirm delete?') : L('删除', 'Delete');
     menu.innerHTML =
       projPart +
-      `<button type="button" class="ag-rm-item" data-ag-rm-act="pin"${canMutate ? '' : ' disabled'}>${RECENT_PIN_SVG}<span class="ag-rm-label">${escapeHtml(L('置顶对话', 'Pin'))}</span></button>` +
       `<button type="button" class="ag-rm-item" data-ag-rm-act="rename"${canMutate ? '' : ' disabled'}>${RECENT_RENAME_SVG}<span class="ag-rm-label">${escapeHtml(L('重命名', 'Rename'))}</span></button>` +
+      `<button type="button" class="ag-rm-item" data-ag-rm-act="pin"${canMutate ? '' : ' disabled'}>${pinned ? RECENT_UNPIN_SVG : RECENT_PIN_SVG}<span class="ag-rm-label">${escapeHtml(pinned ? L('取消置顶', 'Unpin') : L('置顶对话', 'Pin'))}</span></button>` +
+      `<button type="button" class="ag-rm-item" data-ag-rm-act="mark-read"${canMutate ? '' : ' disabled'}>${RECENT_UNREAD_SVG}<span class="ag-rm-label">${escapeHtml(unread ? L('标为已读', 'Mark Read') : L('标为未读', 'Mark Unread'))}</span></button>` +
+      `<div class="ag-rm-sep"></div>` + copyHtml + splitHtml + `<div class="ag-rm-sep"></div>` +
       `<button type="button" class="ag-rm-item" data-ag-rm-act="archive"${canMutate ? '' : ' disabled'}>${RECENT_ARCHIVE_SVG}<span class="ag-rm-label">${escapeHtml(L('归档', 'Archive'))}</span></button>` +
       `<div class="ag-rm-sep"></div>` +
-      `<button type="button" class="ag-rm-item ag-rm-danger" data-ag-rm-act="delete" data-confirm="${st.confirmDelete ? '1' : '0'}"${canMutate ? '' : ' disabled'}>${RECENT_TRASH_SVG}<span class="ag-rm-label">${escapeHtml(delLabel)}</span></button>`;
+      `<button type="button" class="ag-rm-item ag-rm-danger" data-ag-rm-act="delete" data-confirm="${st.confirmDelete ? '1' : '0'}"${canDelete ? '' : ' disabled'}>${RECENT_TRASH_SVG}<span class="ag-rm-label">${escapeHtml(delLabel)}</span></button>`;
 
+    menu.querySelectorAll('[data-ag-rm-act]').forEach(button => button.setAttribute('role', 'menuitem'));
     const menuW = 196;
     const menuH = Math.max(152, menu.offsetHeight || 176);
     const vw = window.innerWidth || 1200;
@@ -4760,6 +4875,12 @@
     const top = st.y + menuH > vh - 8 ? Math.max(8, st.y - menuH) : Math.max(8, st.y);
     menu.style.left = `${Math.round(left)}px`;
     menu.style.top = `${Math.round(top)}px`;
+    menu.setAttribute('data-submenu-side', left + menuW * 2 > vw - 8 ? 'left' : 'right');
+    menu.querySelectorAll('.ag-rm-submenu').forEach(sub => {
+      const groupTop = sub.parentElement.getBoundingClientRect().top;
+      const height = sub.scrollHeight || sub.querySelectorAll('button').length * 32 + 8;
+      sub.style.top = `${Math.min(-4, vh - 8 - groupTop - height)}px`;
+    });
 
     if (!recentMenuDocBound) {
       document.addEventListener('mousedown', onRecentMenuDocDown, true);
@@ -4829,6 +4950,7 @@
         project: projInfo.name,
         projectId: projInfo.id,
         updatedAt,
+        pinned: isSummaryPinned(id, summary, state),
         status,
         priority
       });
@@ -4896,13 +5018,21 @@
           syncSidebarEnhancements();
           return;
         }
+        const archiveBtn = ev.target?.closest?.('[data-ag-recent-archive]');
+        if (archiveBtn) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          closeRecentRowMenu();
+          mutateRecentConversationAnnotation(archiveBtn.getAttribute('data-ag-recent-archive'), { archived: true }, findSidebarBindings() || bindings);
+          return;
+        }
         const pinBtn = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-pin]');
         if (pinBtn) {
           ev.preventDefault();
           ev.stopPropagation();
           closeRecentRowMenu();
           const cid = pinBtn.getAttribute('data-ag-recent-pin');
-          mutateRecentConversationAnnotation(cid, { pinned: true }, findSidebarBindings() || bindings);
+          toggleRecentPin(cid, findSidebarBindings() || bindings);
           return;
         }
         const menuBtn = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-menu]');
@@ -4913,6 +5043,7 @@
           const item = recentItemsById.get(cid);
           const r = menuBtn.getBoundingClientRect();
           openRecentRowMenu(item, r.right + 4, r.bottom + 4);
+          if (ev.detail === 0) frame(() => document.querySelector('#ag-recent-row-menu button:not(:disabled)')?.focus());
           return;
         }
         if (ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-rename-input]')) {
@@ -4934,7 +5065,6 @@
         }
       });
       sec.addEventListener('contextmenu', (ev) => {
-        if (sec.getAttribute('data-mode') !== 'unified') return;
         const row = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-id]');
         if (!row) return;
         const cid = row.getAttribute('data-ag-recent-id');
@@ -4959,6 +5089,7 @@
           }
           return;
         }
+        if (ev.target?.closest?.('button')) return;
         const row = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-id]');
         if (row && row.tagName !== 'A' && (ev.key === 'Enter' || ev.key === ' ')) {
           ev.preventDefault();
@@ -4993,7 +5124,7 @@
 
     const isCollapsed = isUnified ? unifiedRecentCollapsed : recentCollapsed;
     const sig = `${mode}|${FEAT.i18n ? 1 : 0}|${isCollapsed ? 1 : 0}|${isUnified ? recentPageLimit : 20}|${recentRenamingId}|${activeId}|${nowBucket}|${total}|${items
-      .map((it) => `${it.id}:${it.title}:${it.project}:${it.status ? `${it.status.kind}-${it.status.subkind}` : 'idle'}:${Math.floor(it.updatedAt / 60)}`)
+      .map((it) => `${it.id}:${it.title}:${it.project}:${it.pinned ? 1 : 0}:${it.status ? `${it.status.kind}-${it.status.subkind}` : 'idle'}:${Math.floor(it.updatedAt / 60)}`)
       .join(';')}`;
     if (sig === recentLastSig) return;
     recentLastSig = sig;
@@ -5017,7 +5148,7 @@
         ? `<div class="ag-recent-list">${items
             .map((it) => {
               const isAct = it.id === activeId;
-              const isRenaming = isUnified && recentRenamingId === it.id;
+              const isRenaming = recentRenamingId === it.id;
               const age = formatRelativeAge(it.updatedAt, nowSec);
               let sideHtml = `<span>${escapeHtml(age)}</span>`;
               if (it.status && it.status.kind === 'pending') {
@@ -5028,15 +5159,19 @@
                 sideHtml = `<span class="ag-claude-unread-dot"></span>${age ? `<span>${escapeHtml(age)}</span>` : ''}`;
               }
               const tip = it.project ? `${it.title}\n${L('所属项目：', 'Project: ')}${it.project}` : it.title;
-              const actionsHtml =
-                isUnified && !isRenaming
-                  ? `<div class="ag-recent-actions"><button type="button" class="ag-recent-act-btn" data-ag-recent-pin="${escapeHtml(it.id)}" title="${escapeHtml(L('置顶对话', 'Pin'))}" aria-label="${escapeHtml(L('置顶对话', 'Pin'))}">${RECENT_PIN_SVG}</button><button type="button" class="ag-recent-act-btn" data-ag-recent-menu="${escapeHtml(it.id)}" title="${escapeHtml(L('更多选项', 'More options'))}" aria-label="${escapeHtml(L('更多选项', 'More options'))}">${RECENT_MORE_SVG}</button></div>`
-                  : '';
+              const pinLabel = it.pinned ? L('取消置顶', 'Unpin') : L('置顶对话', 'Pin');
+              const canAct = typeof getSidebarActionsCtx(bindings)?.updateConversationAnnotations === 'function';
+              const actionButton = (action, label, icon) => `<button type="button"${action !== 'menu' && !canAct ? ' disabled' : ''} class="ag-recent-act-btn" data-ag-recent-${action}="${escapeHtml(it.id)}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">${icon}</button>`;
+              const actionsHtml = !isRenaming
+                ? `<div class="ag-recent-actions">${actionButton('archive', L('归档', 'Archive'), RECENT_ARCHIVE_SVG)}${actionButton('pin', pinLabel, it.pinned ? RECENT_UNPIN_SVG : RECENT_PIN_SVG)}${actionButton('menu', L('更多选项', 'More options'), RECENT_MORE_SVG)}</div>` : '';
               const mainInner = isRenaming
                 ? `<input type="text" class="ag-recent-rename-input" data-ag-recent-rename-input="${escapeHtml(it.id)}" data-orig-title="${escapeHtml(it.title)}" value="${escapeHtml(it.title)}" />`
                 : `<div class="ag-recent-title">${escapeHtml(it.title)}</div>`;
               if (!isUnified) {
-                return `<a class="ag-recent-row" href="/c/${encodeURIComponent(it.id)}" aria-label="${escapeHtml(it.title)}"${isAct ? ' aria-current="page"' : ''} data-ag-recent-id="${escapeHtml(it.id)}" data-updated-at="${it.updatedAt}" data-active="${isAct ? 'true' : 'false'}" title="${escapeHtml(tip)}"><div class="ag-recent-main">${mainInner}</div><div class="ag-recent-side" aria-hidden="true">${sideHtml}</div></a>`;
+                const row = isRenaming
+                  ? `<div class="ag-recent-row" data-ag-recent-id="${escapeHtml(it.id)}" data-renaming="true">${mainInner}</div>`
+                  : `<a class="ag-recent-row" href="/c/${encodeURIComponent(it.id)}" aria-label="${escapeHtml(it.title)}"${isAct ? ' aria-current="page"' : ''} data-ag-recent-id="${escapeHtml(it.id)}" data-updated-at="${it.updatedAt}" data-active="${isAct ? 'true' : 'false'}" title="${escapeHtml(tip)}"><div class="ag-recent-main">${mainInner}</div><div class="ag-recent-side" aria-hidden="true">${sideHtml}</div></a>`;
+                return `<div class="ag-recent-entry">${row}${actionsHtml}</div>`;
               }
               return `<div class="ag-recent-row" role="button" tabindex="0" data-ag-recent-id="${escapeHtml(it.id)}" data-active="${isAct ? 'true' : 'false'}"${it.project ? ` data-has-project="true"` : ''}${isRenaming ? ' data-renaming="true"' : ''} title="${escapeHtml(tip)}"><div class="ag-recent-main">${mainInner}</div>${isRenaming ? '' : `<div class="ag-recent-side">${sideHtml}</div>${actionsHtml}`}</div>`;
             })
