@@ -99,7 +99,9 @@ const ALLOWED_UI_MODULE_KEYS = new Set([
   'claudeUxProjects',
   'claudeUxHideSidebarProjects',
   'claudeUxCustomizations',
-  'autoApproval'
+  'autoApproval',
+  'claudeUxCodeFold',
+  'claudeUxOverviewPanel'
 ]);
 const VALID_CJK_SCALES = new Set(['94.5', '95', '100']);
 const INLINE_TEXT_EXTS = new Set([
@@ -154,7 +156,7 @@ function readProcessCommandLine(pid) {
     }
   }
   try {
-    return execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
+    return execFileSync('ps', ['-ww', '-p', String(pid), '-o', 'command='], {
       encoding: 'utf8',
       timeout: 1500,
       stdio: ['ignore', 'pipe', 'ignore']
@@ -189,6 +191,11 @@ function removeOwnPidFile(pidFile = PID_FILE) {
   } catch {}
 }
 
+const RELAUNCH_INTENT_FILE = path.join(STATE_DIR, 'relaunch-intent.json');
+let activeRelaunchPromise = null;
+let wakeMacBootstrap = null;
+let shuttingDown = false;
+
 export function claimPidFile({
   pidFile = PID_FILE,
   stateDir = STATE_DIR,
@@ -214,8 +221,17 @@ export function claimPidFile({
       process.on('exit', () => removeOwnPidFile(PID_FILE));
       for (const sig of ['SIGTERM', 'SIGINT']) {
         process.on(sig, () => {
-          removeOwnPidFile(PID_FILE);
-          process.exit(0);
+          if (shuttingDown) return;
+          shuttingDown = true;
+          const finish = () => {
+            removeOwnPidFile(PID_FILE);
+            process.exit(0);
+          };
+          if (activeRelaunchPromise) {
+            Promise.race([activeRelaunchPromise, new Promise((r) => setTimeout(r, 6000))]).finally(finish);
+          } else {
+            finish();
+          }
         });
       }
     }
@@ -441,6 +457,36 @@ function startMacCdpBootstrap() {
     return Infinity;
   };
 
+  const parseLaunchExtraArgs = (cmd, mainBin) => {
+    const rest = String(cmd || '').slice(mainBin.length).trim();
+    if (!rest) return { extraArgs: [], hasCustomProfile: false, hasAmbiguousArgs: false };
+    const tokens = rest.split(/\s+/).filter(Boolean);
+    const extraArgs = [];
+    let hasCustomProfile = false;
+    let hasAmbiguousArgs = false;
+    for (let i = 0; i < tokens.length; i++) {
+      const tok = tokens[i];
+      if (/^-psn_/.test(tok)) continue;
+      if (/^--remote-debugging-port(?:=|$)/.test(tok)) {
+        if (!tok.includes('=') && i + 1 < tokens.length && /^\d+$/.test(tokens[i + 1])) i += 1;
+        continue;
+      }
+      if (/^--(user-data-dir|extensions-dir|profile-directory)(?:=|$)/.test(tok)) {
+        hasCustomProfile = true;
+        continue;
+      }
+      if (tok.startsWith('-')) {
+        extraArgs.push(tok);
+      } else if (fs.existsSync(tok)) {
+        extraArgs.push(tok);
+      } else {
+        /* Space-containing path or non-flag argument that `ps` flattens without quoting */
+        hasAmbiguousArgs = true;
+      }
+    }
+    return { extraArgs, hasCustomProfile, hasAmbiguousArgs };
+  };
+
   const parseMainProcesses = (stdout) => {
     const list = [];
     for (const line of String(stdout || '').split('\n')) {
@@ -452,7 +498,14 @@ function startMacCdpBootstrap() {
       for (const appBundle of candidateApps) {
         const mainBin = path.join(appBundle, 'Contents', 'MacOS', 'Antigravity');
         if (cmd === mainBin || cmd.startsWith(mainBin + ' ')) {
-          list.push({ pid, age, appBundle, hasCdp: cmd.includes('--remote-debugging-port') });
+          const argInfo = parseLaunchExtraArgs(cmd, mainBin);
+          list.push({
+            pid,
+            age,
+            appBundle,
+            hasCdp: cmd.includes('--remote-debugging-port'),
+            ...argInfo
+          });
           break;
         }
       }
@@ -489,11 +542,19 @@ function startMacCdpBootstrap() {
     }
   };
 
+  const psEnv = Object.assign({}, process.env);
+  delete psEnv.COLUMNS;
+
   const queryMainProcs = () =>
     new Promise((resolve) => {
-      execFile('ps', ['-axo', 'pid=,etime=,command='], { timeout: 2000 }, (err, stdout) => {
-        resolve(!err && stdout ? parseMainProcesses(stdout) : []);
-      });
+      execFile(
+        'ps',
+        ['-axww', '-o', 'pid=,etime=,command='],
+        { timeout: 2500, maxBuffer: 16 * 1024 * 1024, env: psEnv },
+        (err, stdout) => {
+          resolve(!err && stdout ? parseMainProcesses(stdout) : []);
+        }
+      );
     });
 
   const waitPortAndSync = (triesLeft = 40) => {
@@ -506,19 +567,110 @@ function startMacCdpBootstrap() {
     }
   };
 
+  const openAppWithRetry = async (appBundle, extraArgs = []) => {
+    try {
+      fs.rmSync(portFile, { force: true });
+    } catch {}
+    const launchArgs = [...extraArgs, '--remote-debugging-port=0'];
+    const attempts = [
+      ['-n', '-a', appBundle, '--args', ...launchArgs],
+      ['-n', '-a', appBundle, '--args', ...launchArgs],
+      ['-a', appBundle, '--args', ...launchArgs]
+    ];
+    for (let i = 0; i < attempts.length; i++) {
+      const err = await new Promise((resolve) => {
+        execFile('/usr/bin/open', attempts[i], { timeout: 10000 }, (e) => resolve(e || null));
+      });
+      if (!err) {
+        waitPortAndSync(40);
+        return true;
+      }
+      console.warn(`[Anti-Claude Daemon] open attempt ${i + 1} failed for ${appBundle}: ${err.message || err}`);
+      if (i < attempts.length - 1) {
+        await new Promise((r) => setTimeout(r, 800));
+      }
+    }
+    return false;
+  };
+
+  const clearRelaunchIntent = () => {
+    try {
+      fs.rmSync(RELAUNCH_INTENT_FILE, { force: true });
+    } catch {}
+  };
+
+  const recoverInterruptedRelaunch = async () => {
+    const intent = readJsonOrFallback(RELAUNCH_INTENT_FILE, null);
+    if (!intent || typeof intent.startedAt !== 'number') return;
+    clearRelaunchIntent();
+    if (Date.now() - intent.startedAt > 30000) return;
+    const procs = await queryMainProcs();
+    if (procs.length > 0) return;
+    const bundle =
+      (typeof intent.appBundle === 'string' && fs.existsSync(intent.appBundle) && intent.appBundle) ||
+      candidateApps.find((p) => fs.existsSync(p)) ||
+      candidateApps[0];
+    console.log(`[Anti-Claude Daemon] Recovering interrupted relaunch for ${bundle}`);
+    await openAppWithRetry(bundle, Array.isArray(intent.extraArgs) ? intent.extraArgs : []);
+  };
+
+  let emptyStreak = 0;
+  let pollTimer = null;
+
+  const scheduleNext = (delayMs) => {
+    if (shuttingDown) return;
+    if (pollTimer) clearTimeout(pollTimer);
+    pollTimer = setTimeout(checkFreshLaunch, delayMs);
+    pollTimer.unref?.();
+  };
+
+  wakeMacBootstrap = () => {
+    emptyStreak = 0;
+    if (!busy && !shuttingDown) scheduleNext(750);
+  };
+
+  const computeNextDelay = (procs) => {
+    if (!activeConfig.enabled || attachedTargets.size > 0) return 15000;
+    if (procs.some((p) => p.hasCdp)) return 6000;
+    if (procs.length === 0) {
+      emptyStreak = Math.min(emptyStreak + 1, 6);
+      if (emptyStreak <= 2) return 1200;
+      if (emptyStreak <= 4) return 2200;
+      return 3500;
+    }
+    emptyStreak = 0;
+    return 750;
+  };
+
   const checkFreshLaunch = () => {
-    if (busy) return;
+    if (busy || shuttingDown) return;
+    rebuildBundleIfNeeded();
+    if (!activeConfig.enabled) {
+      scheduleNext(15000);
+      return;
+    }
+    if (attachedTargets.size > 0) {
+      scheduleNext(15000);
+      return;
+    }
     const now = Date.now();
-    if (now - lastAttemptAt < 2500) return;
+    if (now - lastAttemptAt < 2500) {
+      scheduleNext(1000);
+      return;
+    }
 
     for (const [pid, ts] of attemptedPids.entries()) {
       if (now - ts > 120000) attemptedPids.delete(pid);
     }
     recentAttempts = recentAttempts.filter((ts) => now - ts < 45000);
-    if (recentAttempts.length >= 3) return;
+    if (recentAttempts.length >= 3) {
+      scheduleNext(5000);
+      return;
+    }
 
     busy = true;
     queryMainProcs().then(async (procs) => {
+      let nextDelay = computeNextDelay(procs);
       try {
         if (procs.some((p) => p.hasCdp)) {
           if (readPort(portFile) > 0 && attachedTargets.size === 0) {
@@ -527,12 +679,30 @@ function startMacCdpBootstrap() {
           return;
         }
 
+        /* Do not kill newly spawned child/helper processes when an established non-CDP main instance (>35s) already exists */
+        if (procs.some((p) => !p.hasCdp && p.age > 35)) {
+          nextDelay = 10000;
+          return;
+        }
+
         const candidate = procs.find((p) => !p.hasCdp && !attemptedPids.has(p.pid) && p.age <= 35);
         if (!candidate) return;
+        /* Avoid killing a process with custom profile/user-data-dir or ambiguous unquoted CLI path args */
+        if (candidate.hasCustomProfile || candidate.hasAmbiguousArgs) {
+          attemptedPids.set(candidate.pid, Date.now());
+          console.log(`[Anti-Claude Daemon] Skipping auto-relaunch for PID ${candidate.pid} (custom launch arguments detected)`);
+          return;
+        }
+        /* Let age=0 processes finish initial startup config writes before sending SIGTERM */
+        if (candidate.age < 1) {
+          nextDelay = 900;
+          return;
+        }
         if (candidate.age > 15 && hasRecentConversationWalActivity(convDir, 8000)) return;
 
         const targetPid = candidate.pid;
         const appBundle = candidate.appBundle || candidateApps.find((p) => fs.existsSync(p)) || candidateApps[0];
+        const extraArgs = Array.isArray(candidate.extraArgs) ? candidate.extraArgs : [];
         const startTs = Date.now();
         lastAttemptAt = startTs;
         attemptedPids.set(targetPid, startTs);
@@ -541,51 +711,84 @@ function startMacCdpBootstrap() {
           `[Anti-Claude Daemon] Relaunching fresh Antigravity (PID ${targetPid}, age=${candidate.age}s) with --remote-debugging-port=0`
         );
 
-        try {
-          process.kill(targetPid, 'SIGTERM');
-        } catch {
-          return;
-        }
+        const doRelaunch = async () => {
+          try {
+            writeAtomicUtf8(
+              RELAUNCH_INTENT_FILE,
+              `${JSON.stringify({ targetPid, appBundle, extraArgs, startedAt: Date.now() })}\n`
+            );
+          } catch {}
 
-        const outcome = await waitForMacRelaunchReady({
-          targetPid,
-          isProcessAlive: (pid) => {
+          try {
+            process.kill(targetPid, 'SIGTERM');
+          } catch {
+            clearRelaunchIntent();
+            return;
+          }
+
+          const isPidAlive = (pid) => {
             try {
               process.kill(pid, 0);
               return true;
             } catch {
               return false;
             }
-          },
-          listMainProcs: queryMainProcs,
-          hasLock: hasSingletonLock,
-          tryClearStaleLock: tryClearStaleSingletonLock,
-          onReadyToOpen: () =>
-            new Promise((resolve) => {
-              try {
-                fs.rmSync(portFile, { force: true });
-              } catch {}
-              execFile(
-                '/usr/bin/open',
-                ['-n', '-a', appBundle, '--args', '--remote-debugging-port=0'],
-                () => {
-                  waitPortAndSync(40);
-                  resolve();
+          };
+
+          let outcome = await waitForMacRelaunchReady({
+            targetPid,
+            isProcessAlive: isPidAlive,
+            listMainProcs: queryMainProcs,
+            hasLock: hasSingletonLock,
+            tryClearStaleLock: tryClearStaleSingletonLock,
+            onReadyToOpen: () => openAppWithRetry(appBundle, extraArgs)
+          });
+
+          if (!outcome.relaunched && outcome.reason === 'exit_timeout') {
+            /* Grace re-check in case SIGTERM completed right after timeout */
+            await new Promise((r) => setTimeout(r, 1500));
+            if (!isPidAlive(targetPid)) {
+              const lingering = await queryMainProcs();
+              if (lingering.length === 0) {
+                if (hasSingletonLock()) tryClearStaleSingletonLock(targetPid);
+                if (!hasSingletonLock()) {
+                  await openAppWithRetry(appBundle, extraArgs);
+                  outcome = { relaunched: true, lateExitRecovered: true };
                 }
-              );
-            })
+              }
+            }
+          } else if (!outcome.relaunched && outcome.reason === 'singleton_lock_held') {
+            await new Promise((r) => setTimeout(r, 1500));
+            const lingering = await queryMainProcs();
+            if (lingering.length === 0 && tryClearStaleSingletonLock(targetPid) && !hasSingletonLock()) {
+              await openAppWithRetry(appBundle, extraArgs);
+              outcome = { relaunched: true, staleLockCleared: true };
+            }
+          }
+
+          clearRelaunchIntent();
+          if (!outcome.relaunched) {
+            console.warn(
+              `[Anti-Claude Daemon] Relaunch did not complete for PID ${targetPid} (reason=${outcome.reason || 'unknown'})`
+            );
+          }
+        };
+
+        activeRelaunchPromise = doRelaunch().finally(() => {
+          activeRelaunchPromise = null;
         });
-        if (!outcome.relaunched && outcome.reason === 'exit_timeout') {
-          console.warn(`[Anti-Claude Daemon] PID ${targetPid} did not exit within 8s; skipping relaunch`);
-        }
+        await activeRelaunchPromise;
+        nextDelay = 1200;
       } finally {
         busy = false;
+        scheduleNext(nextDelay);
       }
     });
   };
 
-  setInterval(checkFreshLaunch, 650).unref();
-  checkFreshLaunch();
+  recoverInterruptedRelaunch()
+    .catch(() => {})
+    .finally(() => checkFreshLaunch());
 }
 
 /* -------------------------------------------------------------------------- */
@@ -841,11 +1044,12 @@ function rebuildBundleIfNeeded() {
   return true;
 }
 
-function buildRuntimeScript(hostThemeMode = null, rpcToken = '') {
+function buildRuntimeScript(hostThemeMode = null, rpcToken = '', rpcSessionId = '') {
   if (!cachedRuntimeTemplate || !cachedBootPayloadBase) return '';
   const extra = {};
   if (hostThemeMode) extra.hostThemeMode = hostThemeMode;
   if (rpcToken) extra.rpcToken = rpcToken;
+  if (rpcSessionId) extra.rpcSessionId = rpcSessionId;
   const payload = Object.keys(extra).length > 0 ? Object.assign({}, cachedBootPayloadBase, extra) : cachedBootPayloadBase;
   return cachedRuntimeTemplate.replace('(__AG_BOOT_PAYLOAD__);', () => `(${JSON.stringify(payload)});`);
 }
@@ -1141,6 +1345,40 @@ function readChildMetrics(childId, conversationsDir) {
   }
 }
 
+function readSubagentSummaries(descendantIds, conversationsDir) {
+  if (!DatabaseSync || !Array.isArray(descendantIds) || !descendantIds.length || !conversationsDir) return [];
+  const sumDbPath = path.join(path.dirname(conversationsDir), 'conversation_summaries.db');
+  const info = getDbStatByPath(sumDbPath);
+  if (!info) return [];
+  const ids = descendantIds.slice(0, 40).filter((id) => UUID_RE.test(String(id || '')));
+  if (!ids.length) return [];
+  try {
+    return withReadOnlyDb(sumDbPath, 30, (db) => {
+      const placeholders = ids.map(() => '?').join(',');
+      const rows = db
+        .prepare(
+          `SELECT conversation_id, title, agent_name, status, not_fully_idle, killed, last_modified_time FROM conversation_summaries WHERE conversation_id IN (${placeholders})`
+        )
+        .all(...ids);
+      return rows.map((row) => ({
+        id: String(row.conversation_id || ''),
+        title: String(row.title || '').trim(),
+        agentName: String(row.agent_name || '').trim(),
+        status: String(row.status || '').trim(),
+        running: Boolean(
+          row &&
+            !Number(row.killed) &&
+            (Number(row.not_fully_idle) === 1 || /RUNNING|IN_PROGRESS|ACTIVE/i.test(String(row.status || '')))
+        ),
+        killed: Boolean(Number(row.killed)),
+        lastModifiedTime: String(row.last_modified_time || '')
+      }));
+    });
+  } catch {
+    return [];
+  }
+}
+
 function parseConversationMetrics(cascadeId, conversationsDir) {
   if (!DatabaseSync || !cascadeId || !UUID_RE.test(cascadeId) || !conversationsDir) return null;
   const dbPath = path.join(conversationsDir, `${cascadeId}.db`);
@@ -1153,7 +1391,11 @@ function parseConversationMetrics(cascadeId, conversationsDir) {
     const cs = getDbStatByPath(path.join(conversationsDir, `${cid}.db`));
     childSigParts.push(`${cid}=${cs ? cs.sig : '0'}`);
   }
-  const compositeSig = `${statInfo.sig}|c:${childSigParts.join(',')}|lim:${activeConfig.contextLimitOverride || activeConfig.contextLimit}`;
+  const sumDbStat =
+    descendantIds.length > 0
+      ? getDbStatByPath(path.join(path.dirname(conversationsDir), 'conversation_summaries.db'))
+      : null;
+  const compositeSig = `${statInfo.sig}|c:${childSigParts.join(',')}|s:${sumDbStat ? sumDbStat.sig : '0'}|lim:${activeConfig.contextLimitOverride || activeConfig.contextLimit}`;
 
   const cached = metricsPayloadCache.get(dbPath);
   if (cached && cached.sig === compositeSig) return cached.payload;
@@ -1292,7 +1534,42 @@ function parseConversationMetrics(cascadeId, conversationsDir) {
       outputRowHtml
     ].join('');
 
-    const payload = { cascadeId, hasData: true, sig: compositeSig, inlineHtml, tooltipHtml };
+    const subSummaryMap = new Map(readSubagentSummaries(descendantIds, conversationsDir).map((s) => [s.id, s]));
+    const children = descendantIds.slice(0, 24).map((cid) => {
+      const cm = readChildMetrics(cid, conversationsDir);
+      const sm = subSummaryMap.get(cid);
+      return {
+        id: cid,
+        title: sm?.title || '',
+        agentName: sm?.agentName || '',
+        status: sm?.status || '',
+        running: Boolean(sm?.running),
+        killed: Boolean(sm?.killed),
+        calls: cm?.calls || 0,
+        outTok: cm?.totalOut || 0
+      };
+    });
+    const stats = {
+      ctx: last.ctx,
+      cached: last.cacheRead,
+      uncached: last.inTok,
+      limit: contextLimitTokens,
+      limitStr,
+      remain: remainCtx,
+      pct: ctxPct,
+      lastCacheRate: Number(lastCacheRate),
+      sessionCacheRate: Number(sessionCacheRate),
+      turns: dbRes.userStepsCount,
+      calls: valid.length,
+      totalThink,
+      totalResp,
+      totalOut,
+      childCount,
+      childCalls,
+      children
+    };
+
+    const payload = { cascadeId, hasData: true, sig: compositeSig, inlineHtml, tooltipHtml, stats };
     setBounded(metricsPayloadCache, dbPath, { sig: compositeSig, payload }, 64);
     return payload;
   } catch {
@@ -1306,44 +1583,131 @@ function parseConversationMetrics(cascadeId, conversationsDir) {
 
 const PROJECTS_REGISTRY_FILE = path.join(STATE_DIR, 'projects-registry.json');
 
-function isSafeProjectDir(absDir) {
-  if (!absDir || !path.isAbsolute(absDir)) return false;
-  if (path.dirname(absDir) === absDir) return false; // filesystem root
+const CASE_INSENSITIVE_FS = process.platform === 'darwin' || process.platform === 'win32';
+
+function normalizePathForCompare(p) {
+  const resolved = path.resolve(String(p || ''));
+  return CASE_INSENSITIVE_FS ? resolved.toLowerCase() : resolved;
+}
+
+function resolveRealPathBestEffort(absPath) {
+  const resolved = path.resolve(String(absPath || ''));
+  try {
+    return fs.realpathSync(resolved);
+  } catch {}
+  /* Walk up until an existing ancestor is found, then join the remaining suffix */
+  const suffix = [];
+  let cur = resolved;
+  while (cur && cur !== path.dirname(cur)) {
+    try {
+      const realBase = fs.realpathSync(cur);
+      return suffix.length ? path.join(realBase, ...suffix.reverse()) : realBase;
+    } catch {}
+    suffix.push(path.basename(cur));
+    cur = path.dirname(cur);
+  }
+  return resolved;
+}
+
+function getBlockedSystemPrefixes() {
   const resolvedHome = path.resolve(HOME);
-  if (absDir === resolvedHome) return false;
-  const blockedPrefixes = [
-    path.join(resolvedHome, '.ssh'),
-    path.join(resolvedHome, '.gnupg'),
-    path.join(resolvedHome, '.aws'),
+  const realHome = resolveRealPathBestEffort(resolvedHome);
+  const homes = resolvedHome === realHome ? [resolvedHome] : [resolvedHome, realHome];
+  const prefixes = [
     STATE_DIR,
+    resolveRealPathBestEffort(STATE_DIR),
     GLOBAL_SKILLS_DIR,
+    resolveRealPathBestEffort(GLOBAL_SKILLS_DIR),
     GLOBAL_AGENTS_DIR,
+    resolveRealPathBestEffort(GLOBAL_AGENTS_DIR),
     SIDECARS_DIR,
+    resolveRealPathBestEffort(SIDECARS_DIR),
     '/System',
     '/bin',
     '/sbin',
     '/usr',
     '/etc',
     '/private/etc',
+    '/private/var/db',
     'C:\\Windows',
-    'C:\\Program Files'
+    'C:\\Program Files',
+    'C:\\Program Files (x86)'
   ];
-  for (const blocked of blockedPrefixes) {
-    if (absDir === blocked || isPathInsideDir(blocked, absDir)) return false;
+  for (const h of homes) {
+    prefixes.push(
+      path.join(h, '.ssh'),
+      path.join(h, '.gnupg'),
+      path.join(h, '.aws'),
+      path.join(h, '.kube'),
+      path.join(h, '.config', 'gcloud'),
+      path.join(h, 'Library', 'Keychains')
+    );
+  }
+  return prefixes;
+}
+
+export function isSensitiveSourcePath(absPath) {
+  if (!absPath || !path.isAbsolute(absPath)) return true;
+  const candidates = [path.resolve(absPath), resolveRealPathBestEffort(absPath)];
+  const blockedPrefixes = getBlockedSystemPrefixes();
+  for (const cand of candidates) {
+    const normCand = normalizePathForCompare(cand);
+    for (const blocked of blockedPrefixes) {
+      const normBlocked = normalizePathForCompare(blocked);
+      if (normCand === normBlocked || isPathInsideDir(normBlocked, normCand)) return true;
+    }
+    /* Block common credential/key files directly under HOME */
+    const base = path.basename(cand).toLowerCase();
+    if (
+      base === '.netrc' ||
+      base === '.npmrc' ||
+      base === '.pypirc' ||
+      base === '.git-credentials' ||
+      base === 'id_rsa' ||
+      base === 'id_ed25519' ||
+      base === 'id_ecdsa'
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function isSafeProjectDir(absDir) {
+  if (!absDir || !path.isAbsolute(absDir)) return false;
+  const resolved = path.resolve(absDir);
+  if (path.dirname(resolved) === resolved) return false; // filesystem root
+  const realResolved = resolveRealPathBestEffort(resolved);
+  if (path.dirname(realResolved) === realResolved) return false;
+
+  const normHome = normalizePathForCompare(HOME);
+  const normRealHome = normalizePathForCompare(resolveRealPathBestEffort(HOME));
+  for (const cand of [resolved, realResolved]) {
+    const normCand = normalizePathForCompare(cand);
+    if (normCand === normHome || normCand === normRealHome) return false;
+  }
+  const blockedPrefixes = getBlockedSystemPrefixes();
+  for (const cand of [resolved, realResolved]) {
+    const normCand = normalizePathForCompare(cand);
+    for (const blocked of blockedPrefixes) {
+      const normBlocked = normalizePathForCompare(blocked);
+      if (normCand === normBlocked || isPathInsideDir(normBlocked, normCand)) return false;
+    }
   }
   return true;
 }
 
-function recordManagedProjectDir(dirPath, active = true) {
+function recordManagedProjectDir(dirPath, active = true, registryFile = PROJECTS_REGISTRY_FILE) {
+  if (!registryFile) return;
   try {
-    const cur = readJsonOrFallback(PROJECTS_REGISTRY_FILE, null);
+    const cur = readJsonOrFallback(registryFile, null);
     const list = new Set(Array.isArray(cur?.dirs) ? cur.dirs : []);
     if (active) list.add(dirPath);
     else list.delete(dirPath);
     if (list.size > 0) {
-      writeAtomicUtf8(PROJECTS_REGISTRY_FILE, `${JSON.stringify({ schema: 1, dirs: [...list] }, null, 2)}\n`);
-    } else if (fs.existsSync(PROJECTS_REGISTRY_FILE)) {
-      fs.rmSync(PROJECTS_REGISTRY_FILE, { force: true });
+      writeAtomicUtf8(registryFile, `${JSON.stringify({ schema: 1, dirs: [...list] }, null, 2)}\n`);
+    } else if (fs.existsSync(registryFile)) {
+      fs.rmSync(registryFile, { force: true });
     }
   } catch {}
 }
@@ -1377,7 +1741,7 @@ function resolveLocalProjectDir(rawDir) {
 }
 
 function isPathInsideDir(parentDir, targetPath) {
-  const rel = path.relative(parentDir, targetPath);
+  const rel = path.relative(normalizePathForCompare(parentDir), normalizePathForCompare(targetPath));
   return Boolean(rel && !rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
@@ -1388,16 +1752,96 @@ function formatHumanBytes(bytes) {
   return `${n} B`;
 }
 
+function resolveAtomicWriteTarget(filePath) {
+  try {
+    const lst = fs.lstatSync(filePath);
+    if (lst.isSymbolicLink()) {
+      try {
+        return fs.realpathSync(filePath);
+      } catch {
+        return path.resolve(path.dirname(filePath), fs.readlinkSync(filePath));
+      }
+    }
+  } catch {}
+  return filePath;
+}
+
 function writeAtomicUtf8(filePath, content) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(tmp, content, 'utf8');
-  fs.renameSync(tmp, filePath);
+  const target = resolveAtomicWriteTarget(filePath);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  let prevMode = null;
+  try {
+    const st = fs.statSync(target, { throwIfNoEntry: false });
+    if (st && st.isFile()) prevMode = st.mode & 0o777;
+  } catch {}
+  const tmp = `${target}.tmp-${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  try {
+    fs.writeFileSync(tmp, content, prevMode !== null ? { encoding: 'utf8', mode: prevMode } : 'utf8');
+    if (prevMode !== null) {
+      try {
+        fs.chmodSync(tmp, prevMode);
+      } catch {}
+    }
+    fs.renameSync(tmp, target);
+  } catch (err) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {}
+    throw err;
+  }
 }
 
 function isInlineCandidate(fileName, sizeBytes) {
   const ext = path.extname(String(fileName || '')).toLowerCase();
   return INLINE_TEXT_EXTS.has(ext) && Number(sizeBytes) > 0 && Number(sizeBytes) <= MAX_INLINE_FILE_BYTES;
+}
+
+function splitAgentsMdDocument(agentsText, rawMeta) {
+  const raw = String(agentsText || '');
+  const beginIdx = raw.indexOf(PROJECT_RULE_BEGIN);
+  const endIdx = beginIdx !== -1 ? raw.indexOf(PROJECT_RULE_END, beginIdx) : -1;
+  const hasManagedBlock = beginIdx !== -1 && endIdx > beginIdx;
+
+  let outsideText = '';
+  let legacyFromBlock = '';
+  if (hasManagedBlock) {
+    const before = raw
+      .slice(0, beginIdx)
+      .replace(/\s+$/, '')
+      .replace(/(?:\r?\n)*---$/, '')
+      .trim();
+    const after = raw
+      .slice(endIdx + PROJECT_RULE_END.length)
+      .replace(/^\s+/, '')
+      .replace(/^---(?:\r?\n)*/, '')
+      .trim();
+    outsideText = [before, after].filter(Boolean).join('\n\n').trim();
+
+    const inner = raw.slice(beginIdx + PROJECT_RULE_BEGIN.length, endIdx).trim();
+    if (/^##\s+Project Context & Instructions\b/i.test(inner)) {
+      const afterHdr = inner.replace(/^##\s+Project Context & Instructions[^\n]*\n*/i, '');
+      const nextSecMatch = afterHdr.match(/\n##\s+(?:Project Reference Files|Linked Project Folders)\b/i);
+      legacyFromBlock = (nextSecMatch ? afterHdr.slice(0, nextSecMatch.index) : afterHdr).trim();
+    } else if (inner && !/^##\s+(?:Project Reference Files|Linked Project Folders)\b/i.test(inner)) {
+      legacyFromBlock = inner;
+    }
+  } else {
+    outsideText = raw.trim();
+  }
+
+  const metaSchema = Number(rawMeta?.schema) || 1;
+  const legacyFromMeta =
+    metaSchema < 2 && typeof rawMeta?.instructions === 'string' ? rawMeta.instructions.replace(/\r\n/g, '\n').trim() : '';
+  const legacyInst = legacyFromBlock || legacyFromMeta;
+
+  let bodyText = '';
+  if (outsideText && legacyInst && !outsideText.includes(legacyInst)) {
+    bodyText = `${outsideText}\n\n${legacyInst}`;
+  } else {
+    bodyText = outsideText || legacyInst || '';
+  }
+
+  return { bodyText, outsideText, hasManagedBlock };
 }
 
 function readProjectContext(rawDir) {
@@ -1409,24 +1853,8 @@ function readProjectContext(rawDir) {
   const rawMeta = readJsonOrFallback(metaPath, null);
   const agentsText = readTextOrEmpty(agentsPath);
   const hasAgentsMd = fs.existsSync(agentsPath);
-  const beginIdx = agentsText.indexOf(PROJECT_RULE_BEGIN);
-  const endIdx = beginIdx !== -1 ? agentsText.indexOf(PROJECT_RULE_END, beginIdx) : -1;
-  const hasManagedBlock = beginIdx !== -1 && endIdx > beginIdx;
-  const outsideText = hasManagedBlock
-    ? (
-        agentsText.slice(0, beginIdx).replace(/\s+$/, '').replace(/(?:\r?\n)*---$/, '') +
-        agentsText.slice(endIdx + PROJECT_RULE_END.length).replace(/^\s+/, '').replace(/^---(?:\r?\n)*/, '')
-      ).trim()
-    : agentsText.trim();
-
-  let instructions = typeof rawMeta?.instructions === 'string' ? rawMeta.instructions : '';
+  const { bodyText: instructions } = splitAgentsMdDocument(agentsText, rawMeta);
   const rawFiles = Array.isArray(rawMeta?.files) ? rawMeta.files : [];
-
-  /* Fallback: if AGENTS.md has a managed block without metadata JSON, recover instructions text */
-  if (!rawMeta && hasManagedBlock) {
-    const inner = agentsText.slice(beginIdx + PROJECT_RULE_BEGIN.length, endIdx).trim();
-    instructions = inner.replace(/^##\s+Project Context & Instructions\s*/i, '').trim();
-  }
 
   let inlineBytesUsed = 0;
   const files = [];
@@ -1485,7 +1913,7 @@ function readProjectContext(rawDir) {
     extraFolders,
     scheduledTasks,
     hasAgentsMd,
-    hasOtherAgentsMd: Boolean(outsideText),
+    hasOtherAgentsMd: false,
     lastModifiedMs,
     dirMtimeMs
   };
@@ -1506,18 +1934,13 @@ function summarizeFolderEntries(absDir) {
   }
 }
 
-function buildManagedAgentsBlock(instructions, files, extraFolders = []) {
-  const cleanInst = String(instructions || '').trim();
+function buildManagedAgentsBlock(files, extraFolders = []) {
   const hasFiles = Array.isArray(files) && files.length > 0;
   const hasFolders = Array.isArray(extraFolders) && extraFolders.length > 0;
-  if (!cleanInst && !hasFiles && !hasFolders) return '';
+  if (!hasFiles && !hasFolders) return '';
 
   const parts = [PROJECT_RULE_BEGIN];
-  if (cleanInst) {
-    parts.push('## Project Context & Instructions', '', cleanInst);
-  }
   if (hasFiles) {
-    if (parts.length > 1) parts.push('');
     parts.push('## Project Reference Files', '');
     let inlineBytesUsed = 0;
     const inlineLines = [];
@@ -1562,21 +1985,21 @@ function uniqueDestPath(destDir, rawBaseName) {
   return candidate;
 }
 
-export function saveProjectContext(payload) {
+export function saveProjectContext(payload, { registryFile = PROJECTS_REGISTRY_FILE } = {}) {
   const dirPath = resolveLocalProjectDir(payload?.dirPath);
   if (!dirPath) return { ok: false, error: 'invalid_directory' };
 
+  const agentsPath = path.join(dirPath, 'AGENTS.md');
+  const existingAgents = readTextOrEmpty(agentsPath);
   const prevMeta = readJsonOrFallback(path.join(dirPath, PROJECT_META_REL), null);
   const prevFiles = Array.isArray(prevMeta?.files) ? prevMeta.files : [];
   const filesDir = path.join(dirPath, PROJECT_FILES_REL);
 
-  let fallbackInstructions = typeof prevMeta?.instructions === 'string' ? prevMeta.instructions : '';
-  if (!prevMeta && payload?.instructions === undefined) {
-    const curCtx = readProjectContext(dirPath);
-    if (curCtx?.ok && typeof curCtx.instructions === 'string') fallbackInstructions = curCtx.instructions;
-  }
+  const curDoc = splitAgentsMdDocument(existingAgents, prevMeta);
   const instructions =
-    typeof payload?.instructions === 'string' ? payload.instructions.replace(/\r\n/g, '\n') : fallbackInstructions;
+    typeof payload?.instructions === 'string'
+      ? payload.instructions.replace(/\r\n/g, '\n').trim()
+      : curDoc.bodyText;
 
   /* Preserve existing attachments unless `payload.files` was explicitly provided */
   const hasExplicitFiles = Array.isArray(payload?.files);
@@ -1603,14 +2026,17 @@ export function saveProjectContext(payload) {
       nextFiles.push({ name: op.name || path.basename(absPath), relPath: relNorm, size: st.size, managedCopy });
     } else if (op.action === 'add' && typeof op.sourcePath === 'string') {
       const srcAbs = path.resolve(op.sourcePath.trim());
+      if (isSensitiveSourcePath(srcAbs)) continue;
       const st = fs.statSync(srcAbs, { throwIfNoEntry: false });
       if (!st || !st.isFile()) continue;
+      const realSrc = resolveRealPathBestEffort(srcAbs);
+      if (isSensitiveSourcePath(realSrc)) continue;
       let finalAbs = srcAbs;
       let managedCopy = false;
-      if (!isPathInsideDir(dirPath, srcAbs)) {
+      if (!isPathInsideDir(dirPath, realSrc)) {
         fs.mkdirSync(filesDir, { recursive: true });
         finalAbs = uniqueDestPath(filesDir, path.basename(srcAbs));
-        fs.copyFileSync(srcAbs, finalAbs);
+        fs.copyFileSync(realSrc, finalAbs);
         try {
           fs.chmodSync(finalAbs, 0o644);
         } catch {}
@@ -1671,33 +2097,19 @@ export function saveProjectContext(payload) {
     });
   }
 
-  /* Update or remove AGENTS.md managed block while preserving any user-written rules outside it */
-  const agentsPath = path.join(dirPath, 'AGENTS.md');
-  const existingAgents = readTextOrEmpty(agentsPath);
-  const managedBlock = buildManagedAgentsBlock(instructions, nextFiles, nextExtraFolders);
-  const beginIdx = existingAgents.indexOf(PROJECT_RULE_BEGIN);
-  const endIdx = beginIdx !== -1 ? existingAgents.indexOf(PROJECT_RULE_END, beginIdx) : -1;
-
-  let nextAgents = existingAgents;
-  if (beginIdx !== -1 && endIdx > beginIdx) {
-    let before = existingAgents.slice(0, beginIdx).replace(/\s+$/, '');
-    let after = existingAgents.slice(endIdx + PROJECT_RULE_END.length).replace(/^\s+/, '');
-    if (managedBlock) {
-      nextAgents = [before, managedBlock, after].filter(Boolean).join('\n\n') + '\n';
-    } else {
-      /* Strip the `---` divider inserted when prepending/appending the managed block */
-      if (!before) after = after.replace(/^---(?:\r?\n)+/, '').replace(/^---\s*$/, '').replace(/^\s+/, '');
-      else if (!after) before = before.replace(/(?:\r?\n)+---$/, '').replace(/\s+$/, '');
-      const rest = [before, after].filter(Boolean).join('\n\n').trim();
-      nextAgents = rest ? `${rest}\n` : '';
-    }
+  /* Write unified AGENTS.md: user instructions as primary body + optional managed footer for files/folders */
+  const managedBlock = buildManagedAgentsBlock(nextFiles, nextExtraFolders);
+  let nextAgents = '';
+  if (instructions && managedBlock) {
+    nextAgents = `${instructions}\n\n---\n\n${managedBlock}\n`;
+  } else if (instructions) {
+    nextAgents = `${instructions}\n`;
   } else if (managedBlock) {
-    const trimmed = existingAgents.trim();
-    nextAgents = trimmed ? `${managedBlock}\n\n---\n\n${trimmed}\n` : `${managedBlock}\n`;
+    nextAgents = `${managedBlock}\n`;
   }
 
   if (nextAgents !== existingAgents) {
-    if (nextAgents.trim()) {
+    if (nextAgents) {
       writeAtomicUtf8(agentsPath, nextAgents);
     } else if (fs.existsSync(agentsPath)) {
       fs.rmSync(agentsPath, { force: true });
@@ -1707,16 +2119,15 @@ export function saveProjectContext(payload) {
   const preservedTasks = Array.isArray(prevMeta?.scheduledTasks) ? prevMeta.scheduledTasks : [];
   const metaPath = path.join(dirPath, PROJECT_META_REL);
   const hasManagedData = Boolean(
-    instructions.trim() || nextFiles.length > 0 || nextExtraFolders.length > 0 || preservedTasks.length > 0
+    nextFiles.length > 0 || nextExtraFolders.length > 0 || preservedTasks.length > 0
   );
   if (hasManagedData) {
     writeAtomicUtf8(
       metaPath,
       `${JSON.stringify(
         {
-          schema: 1,
+          schema: 2,
           updatedAt: Date.now(),
-          instructions,
           files: nextFiles.map((f) => ({ name: f.name, relPath: f.relPath, managedCopy: f.managedCopy })),
           extraFolders: nextExtraFolders,
           scheduledTasks: preservedTasks
@@ -1725,7 +2136,7 @@ export function saveProjectContext(payload) {
         2
       )}\n`
     );
-    recordManagedProjectDir(dirPath, true);
+    recordManagedProjectDir(dirPath, true, registryFile);
   } else {
     try {
       fs.rmSync(metaPath, { force: true });
@@ -1733,7 +2144,7 @@ export function saveProjectContext(payload) {
       const acDir = path.join(dirPath, '.anti-claude');
       if (fs.existsSync(acDir) && fs.readdirSync(acDir).length === 0) fs.rmdirSync(acDir);
     } catch {}
-    recordManagedProjectDir(dirPath, false);
+    recordManagedProjectDir(dirPath, false, registryFile);
   }
 
   return readProjectContext(dirPath);
@@ -1848,10 +2259,19 @@ function readProjectScheduledTasks(dirPath, rawMeta, extraFolders = []) {
 
   for (const t of stored) {
     if (!t || typeof t !== 'object' || !t.name) continue;
-    const sidecarId = typeof t.sidecarId === 'string' ? t.sidecarId.trim() : '';
-    if (sidecarId) knownSidecarIds.add(sidecarId);
-    const sidecarPath = sidecarId ? path.join(SIDECARS_DIR, sidecarId, 'sidecar.json') : '';
-    const syncedSidecar = Boolean(sidecarId && fs.existsSync(sidecarPath));
+    const rawSidecarId = typeof t.sidecarId === 'string' ? t.sidecarId.trim() : '';
+    let sidecarId = '';
+    let syncedSidecar = false;
+    if (rawSidecarId && /^[a-z0-9._-]+$/i.test(rawSidecarId)) {
+      const sidecarPath = path.join(SIDECARS_DIR, rawSidecarId, 'sidecar.json');
+      const sc = isPathInsideDir(SIDECARS_DIR, sidecarPath) ? readJsonOrFallback(sidecarPath, null) : null;
+      /* Verify sidecar ownership against trusted local sidecar metadata — never blindly trust cloned repo JSON */
+      if (sc && sidecarBelongsToProject(sc, rawSidecarId, projectDirs, path.resolve(dirPath))) {
+        sidecarId = rawSidecarId;
+        syncedSidecar = true;
+        knownSidecarIds.add(sidecarId);
+      }
+    }
     tasks.push({
       id: String(t.id || sidecarId || `task-${tasks.length + 1}`),
       name: String(t.name),
@@ -1929,16 +2349,25 @@ function buildProjectDirSet(dirPath, prevMeta) {
   return dirs;
 }
 
-function sidecarBelongsToProject(sc, sidecarId, prevTasks, projectDirs, dirPath) {
-  if (Array.isArray(prevTasks) && prevTasks.some((t) => t && t.sidecarId === sidecarId)) return true;
+function sidecarBelongsToProject(sc, sidecarId, projectDirs, dirPath) {
   if (!sc || typeof sc !== 'object') return false;
-  if (sc.anti_claude_project_dir && path.resolve(sc.anti_claude_project_dir) === dirPath) return true;
+  const normDirs = new Set([...projectDirs].map((d) => normalizePathForCompare(resolveRealPathBestEffort(d))));
+  normDirs.add(normalizePathForCompare(resolveRealPathBestEffort(dirPath)));
+  if (sc.anti_claude_project_dir) {
+    const scDir = normalizePathForCompare(resolveRealPathBestEffort(path.resolve(sc.anti_claude_project_dir)));
+    if (normDirs.has(scDir)) return true;
+  }
   if (sc.builtin !== 'schedule') return false;
   const uris = Array.isArray(sc.agent_permissions?.workspace_uris) ? sc.agent_permissions.workspace_uris : [];
-  return uris.map(fromFileUriSafe).some((p) => p && projectDirs.has(p));
+  return uris
+    .map(fromFileUriSafe)
+    .some((p) => p && normDirs.has(normalizePathForCompare(resolveRealPathBestEffort(p))));
 }
 
-export function saveProjectScheduledTask(payload, { sidecarsDir = SIDECARS_DIR } = {}) {
+export function saveProjectScheduledTask(
+  payload,
+  { sidecarsDir = SIDECARS_DIR, registryFile = sidecarsDir === SIDECARS_DIR ? PROJECTS_REGISTRY_FILE : null } = {}
+) {
   const dirPath = resolveLocalProjectDir(payload?.dirPath);
   if (!dirPath) return { ok: false, error: 'invalid_directory' };
   const rawTask = payload?.task;
@@ -1979,7 +2408,7 @@ export function saveProjectScheduledTask(payload, { sidecarsDir = SIDECARS_DIR }
       const scDir = path.join(sidecarsDir, sidecarId);
       if (isPathInsideDir(sidecarsDir, scDir) && fs.existsSync(scDir)) {
         const existingSc = readJsonOrFallback(path.join(scDir, 'sidecar.json'), null);
-        if (!sidecarBelongsToProject(existingSc, sidecarId, prevTasks, projectDirs, dirPath)) {
+        if (!sidecarBelongsToProject(existingSc, sidecarId, projectDirs, dirPath)) {
           return { ok: false, error: 'sidecar_not_in_project' };
         }
         try {
@@ -1995,7 +2424,7 @@ export function saveProjectScheduledTask(payload, { sidecarsDir = SIDECARS_DIR }
     const scDir = path.join(sidecarsDir, sidecarId);
     if (!isPathInsideDir(sidecarsDir, scDir)) return { ok: false, error: 'invalid_sidecar_id' };
     const existingSc = readJsonOrFallback(path.join(scDir, 'sidecar.json'), null);
-    if (existingSc && !sidecarBelongsToProject(existingSc, sidecarId, prevTasks, projectDirs, dirPath)) {
+    if (existingSc && !sidecarBelongsToProject(existingSc, sidecarId, projectDirs, dirPath)) {
       return { ok: false, error: 'sidecar_not_in_project' };
     }
     const args = [cron, 'agentapi', 'new-conversation'];
@@ -2068,28 +2497,26 @@ export function saveProjectScheduledTask(payload, { sidecarsDir = SIDECARS_DIR }
   if (existingIdx !== -1) prevTasks[existingIdx] = taskRecord;
   else prevTasks.unshift(taskRecord);
 
-  writeAtomicUtf8(
-    metaPath,
-    `${JSON.stringify(
-      {
-        schema: 1,
-        updatedAt: Date.now(),
-        instructions: typeof prevMeta.instructions === 'string' ? prevMeta.instructions : '',
-        files: Array.isArray(prevMeta.files) ? prevMeta.files : [],
-        extraFolders: Array.isArray(prevMeta.extraFolders) ? prevMeta.extraFolders : [],
-        scheduledTasks: prevTasks
-      },
-      null,
-      2
-    )}\n`
-  );
-  recordManagedProjectDir(dirPath, true);
+  const nextSchema = Number(prevMeta.schema) >= 2 ? 2 : prevMeta.instructions ? 1 : 2;
+  const metaPayload = {
+    schema: nextSchema,
+    updatedAt: Date.now(),
+    ...(nextSchema < 2 && typeof prevMeta.instructions === 'string' ? { instructions: prevMeta.instructions } : {}),
+    files: Array.isArray(prevMeta.files) ? prevMeta.files : [],
+    extraFolders: Array.isArray(prevMeta.extraFolders) ? prevMeta.extraFolders : [],
+    scheduledTasks: prevTasks
+  };
+  writeAtomicUtf8(metaPath, `${JSON.stringify(metaPayload, null, 2)}\n`);
+  recordManagedProjectDir(dirPath, true, registryFile);
 
   const ctx = readProjectContext(dirPath);
   return { ...ctx, savedTaskId: savedId, sidecarId };
 }
 
-export function deleteProjectScheduledTask(payload, { sidecarsDir = SIDECARS_DIR } = {}) {
+export function deleteProjectScheduledTask(
+  payload,
+  { sidecarsDir = SIDECARS_DIR, registryFile = sidecarsDir === SIDECARS_DIR ? PROJECTS_REGISTRY_FILE : null } = {}
+) {
   const dirPath = resolveLocalProjectDir(payload?.dirPath);
   if (!dirPath) return { ok: false, error: 'invalid_directory' };
   const taskId = String(payload?.taskId || '').trim();
@@ -2110,7 +2537,7 @@ export function deleteProjectScheduledTask(payload, { sidecarsDir = SIDECARS_DIR
     if (!isPathInsideDir(sidecarsDir, scDir)) return { ok: false, error: 'invalid_sidecar_id' };
     if (fs.existsSync(scDir)) {
       const existingSc = readJsonOrFallback(path.join(scDir, 'sidecar.json'), null);
-      if (!sidecarBelongsToProject(existingSc, sidecarId, prevTasks, projectDirs, dirPath)) {
+      if (!sidecarBelongsToProject(existingSc, sidecarId, projectDirs, dirPath)) {
         return { ok: false, error: 'sidecar_not_in_project' };
       }
       try {
@@ -2123,8 +2550,10 @@ export function deleteProjectScheduledTask(payload, { sidecarsDir = SIDECARS_DIR
 
   if (prevMeta) {
     const nextTasks = prevTasks.filter((t) => t && t.id !== taskId && (!sidecarId || t.sidecarId !== sidecarId));
+    const prevSchema = Number(prevMeta.schema) >= 2 ? 2 : 1;
+    const hasLegacyInst = prevSchema < 2 && typeof prevMeta.instructions === 'string' && prevMeta.instructions.trim();
     const hasAnything =
-      (typeof prevMeta.instructions === 'string' && prevMeta.instructions.trim()) ||
+      hasLegacyInst ||
       (Array.isArray(prevMeta.files) && prevMeta.files.length > 0) ||
       (Array.isArray(prevMeta.extraFolders) && prevMeta.extraFolders.length > 0) ||
       nextTasks.length > 0;
@@ -2134,7 +2563,7 @@ export function deleteProjectScheduledTask(payload, { sidecarsDir = SIDECARS_DIR
         `${JSON.stringify(
           {
             ...prevMeta,
-            schema: 1,
+            schema: prevSchema,
             updatedAt: Date.now(),
             scheduledTasks: nextTasks
           },
@@ -2160,6 +2589,7 @@ function pickLocalFilesNative() {
   return new Promise((resolve) => {
     if (process.platform === 'darwin') {
       const script = [
+        'activate',
         'set fs to choose file with prompt "选择要添加到项目上下文的参考文件" with multiple selections allowed',
         'set out to ""',
         'repeat with f in fs',
@@ -2169,8 +2599,16 @@ function pickLocalFilesNative() {
       ];
       const args = [];
       for (const line of script) args.push('-e', line);
-      execFile('osascript', args, { timeout: 120000 }, (err, stdout) => {
-        if (err || !stdout) return resolve({ ok: true, canceled: true, paths: [] });
+      execFile('osascript', args, { timeout: 120000 }, (err, stdout, stderr) => {
+        if (err) {
+          const msg = `${err.message || ''}\n${stderr || ''}`;
+          if (/User canceled|-128/i.test(msg)) {
+            return resolve({ ok: true, canceled: true, paths: [] });
+          }
+          console.error('[Anti-Claude Daemon] pickLocalFilesNative failed:', msg.trim());
+          return resolve({ ok: false, error: msg.trim() || 'pick_files_failed', paths: [] });
+        }
+        if (!stdout) return resolve({ ok: true, canceled: true, paths: [] });
         const paths = String(stdout)
           .split(/\r?\n/)
           .map((s) => s.trim())
@@ -2205,10 +2643,18 @@ function pickLocalFolderNative() {
     if (process.platform === 'darwin') {
       execFile(
         'osascript',
-        ['-e', 'POSIX path of (choose folder with prompt "选择要加入本项目的本地文件夹")'],
+        ['-e', 'activate', '-e', 'POSIX path of (choose folder with prompt "选择要加入本项目的本地文件夹")'],
         { timeout: 120000 },
-        (err, stdout) => {
-          if (err || !stdout) return resolve({ ok: true, canceled: true, folderPath: '' });
+        (err, stdout, stderr) => {
+          if (err) {
+            const msg = `${err.message || ''}\n${stderr || ''}`;
+            if (/User canceled|-128/i.test(msg)) {
+              return resolve({ ok: true, canceled: true, folderPath: '' });
+            }
+            console.error('[Anti-Claude Daemon] pickLocalFolderNative failed:', msg.trim());
+            return resolve({ ok: false, error: msg.trim() || 'pick_folder_failed', folderPath: '' });
+          }
+          if (!stdout) return resolve({ ok: true, canceled: true, folderPath: '' });
           const folderPath = String(stdout).trim().replace(/\/+$/, '');
           if (!folderPath || !fs.existsSync(folderPath)) return resolve({ ok: true, canceled: true, folderPath: '' });
           resolve({ ok: true, canceled: false, folderPath, name: path.basename(folderPath) || folderPath });
@@ -2450,6 +2896,330 @@ function currentApprovalPolicy() {
   return { enabled, settings: activeConfig.autoApproval, conflict: enabled && externalApprovalIsActive() };
 }
 
+const CONNECTOR_DISPLAY_OVERRIDES = {
+  'chrome-devtools': 'Chrome devtools',
+  'chrome-devtools_chrome-devtools': 'Chrome devtools',
+  github: 'GitHub',
+  gitlab: 'GitLab',
+  playwright: 'Playwright',
+  perplexity: 'Perplexity',
+  gdrive: 'Google Drive',
+  gcalendar: 'Google Calendar'
+};
+
+function prettifyConnectorName(rawId) {
+  const s = String(rawId || '').trim();
+  if (!s) return '';
+  const lower = s.toLowerCase();
+  if (CONNECTOR_DISPLAY_OVERRIDES[lower]) return CONNECTOR_DISPLAY_OVERRIDES[lower];
+  const spaced = s.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return spaced ? spaced.charAt(0).toUpperCase() + spaced.slice(1) : s;
+}
+
+const overviewGitCache = new Map();
+const overviewGitInFlight = new Map();
+
+function execGitAsync(absDir, args, timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    execFile(
+      'git',
+      ['-C', absDir, ...args],
+      { timeout: timeoutMs, maxBuffer: 256 * 1024, encoding: 'utf8' },
+      (err, stdout) => {
+        if (err) resolve(null);
+        else resolve(String(stdout || ''));
+      }
+    );
+  });
+}
+
+function parseNumstatOutput(numstat) {
+  let added = 0;
+  let deleted = 0;
+  if (!numstat) return { added, deleted };
+  for (const line of numstat.split(/\r?\n/)) {
+    if (!line) continue;
+    const parts = line.split('\t');
+    if (parts.length >= 2) {
+      const a = parseInt(parts[0], 10);
+      const d = parseInt(parts[1], 10);
+      if (Number.isFinite(a)) added += a;
+      if (Number.isFinite(d)) deleted += d;
+    }
+  }
+  return { added, deleted };
+}
+
+export async function readOverviewGitStatusAsync(absDir) {
+  const now = Date.now();
+  const cached = overviewGitCache.get(absDir);
+  if (cached && now - cached.ts < 5000) return cached.git;
+  if (overviewGitInFlight.has(absDir)) return overviewGitInFlight.get(absDir);
+
+  const task = (async () => {
+    let git = null;
+    try {
+      const [statusOut, headNumstat] = await Promise.all([
+        execGitAsync(absDir, ['status', '--porcelain=v2', '--branch'], 1200),
+        execGitAsync(absDir, ['diff', 'HEAD', '--numstat'], 1200)
+      ]);
+      if (statusOut !== null) {
+        let branch = '';
+        let changedFiles = 0;
+        for (const line of statusOut.split(/\r?\n/)) {
+          if (!line) continue;
+          if (line.startsWith('# branch.head ')) {
+            const rawHead = line.slice('# branch.head '.length).trim();
+            branch = rawHead === '(detached)' ? 'HEAD' : rawHead;
+          } else if (!line.startsWith('#')) {
+            changedFiles += 1;
+          }
+        }
+        if (branch) {
+          let numstatText = headNumstat;
+          if (numstatText === null && changedFiles > 0) {
+            /* Unborn branch without HEAD commit: fall back to unstaged + cached numstat */
+            const [unstaged, staged] = await Promise.all([
+              execGitAsync(absDir, ['diff', '--numstat'], 1000),
+              execGitAsync(absDir, ['diff', '--cached', '--numstat'], 1000)
+            ]);
+            numstatText = `${unstaged || ''}\n${staged || ''}`;
+          }
+          const { added, deleted } = parseNumstatOutput(numstatText);
+          git = { branch, added, deleted, changedFiles };
+        }
+      }
+    } catch {
+      git = null;
+    }
+    setBounded(overviewGitCache, absDir, { ts: Date.now(), git }, 32);
+    return git;
+  })().finally(() => {
+    overviewGitInFlight.delete(absDir);
+  });
+
+  overviewGitInFlight.set(absDir, task);
+  return task;
+}
+
+function scanSkillsDirectory(dirPath, source, skillMap) {
+  if (!dirPath) return;
+  let entries;
+  try {
+    entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const ent of entries) {
+    if (!ent.isDirectory() && !ent.isSymbolicLink()) continue;
+    if (ent.name.startsWith('.')) continue;
+    const skillDir = path.join(dirPath, ent.name);
+    const skillMd = path.join(skillDir, 'SKILL.md');
+    const st = fs.statSync(skillMd, { throwIfNoEntry: false });
+    if (!st || !st.isFile()) continue;
+    if (!skillMap.has(ent.name)) {
+      skillMap.set(ent.name, { name: ent.name, path: skillMd, source });
+    }
+  }
+}
+
+export function collectOverviewSnapshot(payload = {}, opts = {}) {
+  const homeDir = opts.homeDir ? path.resolve(opts.homeDir) : HOME;
+  const geminiDir = opts.geminiDir ? path.resolve(opts.geminiDir) : path.join(homeDir, '.gemini');
+  const configDir = opts.configDir ? path.resolve(opts.configDir) : path.join(geminiDir, 'config');
+  const skillsDir = opts.skillsDir ? path.resolve(opts.skillsDir) : GLOBAL_SKILLS_DIR;
+  const agentsDir = opts.agentsDir ? path.resolve(opts.agentsDir) : GLOBAL_AGENTS_DIR;
+  const builtinSkillsDir = opts.builtinSkillsDir
+    ? path.resolve(opts.builtinSkillsDir)
+    : path.join(geminiDir, 'antigravity', 'builtin', 'skills');
+  const skipGit = Boolean(opts.skipGit);
+
+  let absDir = '';
+  const rawDir = typeof payload?.dirPath === 'string' ? payload.dirPath.trim() : '';
+  if (rawDir) {
+    const resolved = resolveLocalProjectDir(rawDir);
+    if (resolved) absDir = resolved;
+  }
+
+  const workspace = {
+    dirPath: absDir,
+    name: absDir ? path.basename(absDir) || absDir : '',
+    git: opts.gitResolved !== undefined ? opts.gitResolved : null
+  };
+
+  const rootCfg = readJsonOrFallback(path.join(configDir, 'config.json'), {});
+  const pluginsCfg = rootCfg && typeof rootCfg.plugins === 'object' && rootCfg.plugins ? rootCfg.plugins : {};
+  const enabledPlugins = Object.entries(pluginsCfg)
+    .filter(([, cfg]) => !cfg || cfg.enabled !== false)
+    .map(([name, cfg]) => ({
+      name,
+      cfg: cfg && typeof cfg === 'object' ? cfg : {},
+      dir: path.join(configDir, 'plugins', name)
+    }))
+    .filter((p) => {
+      const st = fs.statSync(p.dir, { throwIfNoEntry: false });
+      return Boolean(st && st.isDirectory());
+    });
+
+  /* 1. Rules / Memory files */
+  const rules = [];
+  const globalAgentsPath = path.join(geminiDir, 'AGENTS.md');
+  const globalAst = fs.statSync(globalAgentsPath, { throwIfNoEntry: false });
+  if (globalAst && globalAst.isFile()) {
+    rules.push({
+      label: '~/.gemini/AGENTS.md',
+      path: globalAgentsPath,
+      scope: 'global',
+      bytes: globalAst.size
+    });
+  }
+  if (absDir) {
+    const projAgentsPath = path.join(absDir, 'AGENTS.md');
+    const projAst = fs.statSync(projAgentsPath, { throwIfNoEntry: false });
+    if (projAst && projAst.isFile()) {
+      rules.push({
+        label: 'AGENTS.md',
+        path: projAgentsPath,
+        scope: 'project',
+        bytes: projAst.size
+      });
+    }
+  }
+  for (const pl of enabledPlugins) {
+    const rulesDir = path.join(pl.dir, 'rules');
+    let ruleFiles = [];
+    try {
+      ruleFiles = fs.readdirSync(rulesDir).filter((f) => /\.md$/i.test(f));
+    } catch {}
+    for (const file of ruleFiles) {
+      const fp = path.join(rulesDir, file);
+      const st = fs.statSync(fp, { throwIfNoEntry: false });
+      if (st && st.isFile()) {
+        rules.push({
+          label: `${pl.name}/${file}`,
+          path: fp,
+          scope: 'plugin',
+          bytes: st.size
+        });
+      }
+    }
+  }
+
+  /* 2. Skills (priority: user > plugin > builtin) */
+  const skillMap = new Map();
+  scanSkillsDirectory(skillsDir, 'user', skillMap);
+  for (const pl of enabledPlugins) {
+    scanSkillsDirectory(path.join(pl.dir, 'skills'), 'plugin', skillMap);
+  }
+  scanSkillsDirectory(builtinSkillsDir, 'builtin', skillMap);
+  const rankSource = { user: 0, plugin: 1, builtin: 2 };
+  const allSkills = Array.from(skillMap.values()).sort((a, b) => {
+    const r = (rankSource[a.source] ?? 9) - (rankSource[b.source] ?? 9);
+    return r !== 0 ? r : a.name.localeCompare(b.name);
+  });
+  const userCount = allSkills.filter((s) => s.source === 'user').length;
+  const skills = {
+    total: allSkills.length,
+    userCount,
+    items: allSkills.slice(0, 80)
+  };
+
+  /* 3. Custom Agents */
+  const agentItems = [];
+  const seenAgentNames = new Set();
+  const collectAgentMd = (dirPath, source) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of entries) {
+      if ((!ent.isFile() && !ent.isSymbolicLink()) || !/\.md$/i.test(ent.name)) continue;
+      const name = ent.name.replace(/\.md$/i, '');
+      if (seenAgentNames.has(name)) continue;
+      seenAgentNames.add(name);
+      agentItems.push({ name, path: path.join(dirPath, ent.name), source });
+    }
+  };
+  collectAgentMd(agentsDir, 'user');
+  for (const pl of enabledPlugins) {
+    collectAgentMd(path.join(pl.dir, 'agents'), 'plugin');
+  }
+  const agents = { total: agentItems.length, items: agentItems };
+
+  /* 4. Connectors (never expose env/args/headers/command/tokens) */
+  const connectors = [];
+  const seenConnIds = new Set();
+  const rootMcpPath = path.join(configDir, 'mcp_config.json');
+  const rootMcp = readJsonOrFallback(rootMcpPath, null);
+  if (rootMcp && typeof rootMcp.mcpServers === 'object' && rootMcp.mcpServers) {
+    for (const [id, def] of Object.entries(rootMcp.mcpServers)) {
+      if (!def || def.disabled === true || seenConnIds.has(id)) continue;
+      seenConnIds.add(id);
+      connectors.push({ id, name: prettifyConnectorName(id), kind: 'mcp', configPath: rootMcpPath });
+    }
+  }
+  for (const pl of enabledPlugins) {
+    const plMcpPath = path.join(pl.dir, 'mcp_config.json');
+    const plMcp = readJsonOrFallback(plMcpPath, null);
+    if (plMcp && typeof plMcp.mcpServers === 'object' && plMcp.mcpServers) {
+      for (const [id, def] of Object.entries(plMcp.mcpServers)) {
+        if (!def || def.disabled === true || seenConnIds.has(id)) continue;
+        seenConnIds.add(id);
+        connectors.push({ id, name: prettifyConnectorName(id), kind: 'mcp', configPath: plMcpPath });
+      }
+    }
+    const plJsonPath = path.join(pl.dir, 'plugin.json');
+    const plJson = readJsonOrFallback(plJsonPath, null);
+    const hasAuth = fs.existsSync(path.join(pl.dir, 'auth.json'));
+    const isExternalConnector = Boolean(
+      plJson && (pl.cfg.installedFrom || plJson.auth || plJson.cli || plJson.mcp || hasAuth)
+    );
+    if (isExternalConnector && !seenConnIds.has(pl.name)) {
+      seenConnIds.add(pl.name);
+      connectors.push({
+        id: pl.name,
+        name: String(plJson.displayName || plJson.name || prettifyConnectorName(pl.name)),
+        kind: 'plugin',
+        configPath: plJsonPath
+      });
+    }
+  }
+
+  return { ok: true, workspace, rules, skills, agents, connectors };
+}
+
+export async function collectOverviewSnapshotAsync(payload = {}, opts = {}) {
+  const skipGit = Boolean(opts.skipGit);
+  let absDir = '';
+  const rawDir = typeof payload?.dirPath === 'string' ? payload.dirPath.trim() : '';
+  if (rawDir) {
+    const resolved = resolveLocalProjectDir(rawDir);
+    if (resolved) absDir = resolved;
+  }
+  const gitResolved = absDir && !skipGit ? await readOverviewGitStatusAsync(absDir) : null;
+  return collectOverviewSnapshot(payload, Object.assign({}, opts, { gitResolved }));
+}
+
+function getSafePluginDocRoots(configDir = path.join(HOME, '.gemini', 'config')) {
+  const pluginsRoot = path.join(configDir, 'plugins');
+  const roots = [];
+  let entries = [];
+  try {
+    entries = fs.readdirSync(pluginsRoot, { withFileTypes: true });
+  } catch {
+    return roots;
+  }
+  for (const ent of entries) {
+    if ((!ent.isDirectory() && !ent.isSymbolicLink()) || ent.name.startsWith('.')) continue;
+    for (const sub of ['skills', 'rules', 'agents']) {
+      roots.push(path.join(pluginsRoot, ent.name, sub));
+    }
+  }
+  return roots;
+}
+
 async function handleProjectRpcRequest(rawPayload, callerEntry = null) {
   let req;
   try {
@@ -2552,22 +3322,32 @@ async function handleProjectRpcRequest(rawPayload, callerEntry = null) {
       const res = await importLocalAgentNative();
       return { reqId, result: res };
     }
+    if (action === 'getOverviewSnapshot') {
+      const result = await collectOverviewSnapshotAsync(payload);
+      return { reqId, result };
+    }
     if (action === 'revealFile') {
       const rawTarget = typeof payload?.targetPath === 'string' ? payload.targetPath.trim() : '';
       if (!rawTarget) return { reqId, result: { ok: false, error: 'missing_path' } };
       const absTarget = path.resolve(rawTarget);
       const explicitProj = resolveLocalProjectDir(payload?.dirPath);
+      const globalAgentsMd = path.join(HOME, '.gemini', 'AGENTS.md');
+      const builtinRootDir = path.join(HOME, '.gemini', 'antigravity', 'builtin');
       const allowedRoots = [
         ...(explicitProj ? [explicitProj] : []),
         ...getRegisteredProjectDirs(),
         GLOBAL_SKILLS_DIR,
-        GLOBAL_AGENTS_DIR
+        GLOBAL_AGENTS_DIR,
+        builtinRootDir,
+        ...getSafePluginDocRoots()
       ];
-      const authorized = allowedRoots.some((root) => absTarget === root || isPathInsideDir(root, absTarget));
+      const authorized =
+        absTarget === globalAgentsMd ||
+        allowedRoots.some((root) => absTarget === root || isPathInsideDir(root, absTarget));
       if (!authorized) {
         return { reqId, result: { ok: false, error: 'path_outside_project' } };
       }
-      return { reqId, result: revealLocalPath(absTarget, { openFolderContents: false }) };
+      return { reqId, result: revealLocalPath(absTarget, { openFolderContents: Boolean(payload?.openFolder) }) };
     }
     return { reqId, result: { ok: false, error: `unknown_action:${action}` } };
   } catch (err) {
@@ -2610,12 +3390,25 @@ function getOriginKey(rawUrl) {
 
 async function fetchTargets(port) {
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(1500) });
-    if (!res.ok) return [];
+    const res = await fetch(`http://127.0.0.1:${port}/json/list`, { signal: AbortSignal.timeout(2500) });
+    if (!res.ok) return { ok: false, targets: [] };
     const list = await res.json();
-    return Array.isArray(list) ? list : [];
+    return { ok: true, targets: Array.isArray(list) ? list : [] };
   } catch {
-    return [];
+    return { ok: false, targets: [] };
+  }
+}
+
+async function isAntigravityFallbackPort(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: AbortSignal.timeout(1200) });
+    if (!res.ok) return false;
+    const info = await res.json();
+    const ua = String(info?.['User-Agent'] || '');
+    const browser = String(info?.Browser || '');
+    return /\bAntigravity\b|\bElectron\//i.test(`${ua} ${browser}`);
+  } catch {
+    return false;
   }
 }
 
@@ -2624,12 +3417,25 @@ export const HOST_IDENTITY_PROBE_EXPR = `(function () {
   if (loc.protocol === 'plugin:' && /^swarm--/i.test(loc.hostname || '')) return 'swarm';
   if (/^plugin:\\/\\/swarm--/i.test(loc.href || '')) return 'swarm';
   if (loc.protocol === 'vscode-file:') return 'host';
-  var isElectronHost = /\\bElectron\\//i.test((typeof navigator !== 'undefined' && navigator.userAgent) || '') ||
-    Boolean(typeof window !== 'undefined' && window.electronNative && typeof window.electronNative.getZoomLevel === 'function');
+  if (loc.protocol === 'file:' && /\\/Antigravity\\.app\\/|\\/antigravity\\/resources\\//i.test(loc.href || '')) return 'host';
+  var ua = (typeof navigator !== 'undefined' && navigator.userAgent) || '';
+  var isElectronHost = /\\bElectron\\//i.test(ua);
   if (!isElectronHost) return 'non_host';
-  if (window.electronNative && (typeof window.electronNative.getZoomLevel === 'function' || typeof window.electronNative.setTitleBarOverlay === 'function')) return 'host';
-  if (window.__APP_CONFIG__ && window.__APP_CONFIG__.productName === 'antigravity') return 'host';
-  if (document.querySelector && document.querySelector('link[href*="/jetbox.css"], body[data-agy-theme], body[data-newux-theme], [id="antigravity.agentSidePanelInputBox"]')) return 'host';
+  /* Require the genuine non-configurable, frozen contextBridge preload object rather than page-forgeable DOM or globals */
+  var en = typeof window !== 'undefined' ? window.electronNative : null;
+  if (en && typeof en === 'object' && Object.isFrozen(en)) {
+    var desc = Object.getOwnPropertyDescriptor(window, 'electronNative');
+    var lockedOnWindow = Boolean(desc && desc.configurable === false && desc.writable === false);
+    var isNativeFn = function (fn) {
+      if (typeof fn !== 'function') return false;
+      var name = String(fn.name || '');
+      if (name.indexOf('bound ') === 0) return false;
+      try { return Function.prototype.toString.call(fn).indexOf('[native code]') !== -1; } catch (_) { return false; }
+    };
+    if (lockedOnWindow && isNativeFn(en.getZoomLevel) && isNativeFn(en.setTitleBarOverlay) && isNativeFn(en.openExternal)) {
+      return 'host';
+    }
+  }
   if (document.readyState === 'loading') return 'loading';
   return 'non_host';
 })()`;
@@ -2646,7 +3452,8 @@ function resolveParentHostTheme(page) {
   return null;
 }
 
-export async function attachTarget(page, endpoint) {
+export async function attachTarget(page, endpoint, opts = {}) {
+  const readOnly = Boolean(opts && opts.readOnly);
   const wsUrl = String(page.webSocketDebuggerUrl || '').replace(/^ws:\/\/localhost:/i, 'ws://127.0.0.1:');
   if (!wsUrl) return;
 
@@ -2700,6 +3507,7 @@ export async function attachTarget(page, endpoint) {
     mainFrameId: null,
     trustedContextId: null,
     rpcToken: '',
+    rpcSessionId: '',
     navGen: 0,
     contextMeta: new Map(),
     defaultContextByFrame: new Map(),
@@ -2711,6 +3519,7 @@ export async function attachTarget(page, endpoint) {
       entry.hostConfirmed = false;
       entry.trustedContextId = null;
       entry.rpcToken = '';
+      entry.rpcSessionId = '';
       entry.injectedBundleHash = '';
     },
     isAuthorizedBindingCaller(executionContextId) {
@@ -2809,13 +3618,18 @@ export async function attachTarget(page, endpoint) {
     entry.newDocScriptId = res?.result?.identifier || null;
   };
 
-  entry.injectNow = async () => {
+  entry.injectNow = async (issueRpcAuth = true) => {
     if (!entry.hostConfirmed) return;
     const hostMode = page.type === 'iframe' ? resolveParentHostTheme(page) : null;
-    if (page.type === 'page' && !entry.rpcToken) {
-      entry.rpcToken = crypto.randomBytes(24).toString('hex');
+    if (issueRpcAuth && page.type === 'page') {
+      if (!entry.rpcToken) entry.rpcToken = crypto.randomBytes(24).toString('hex');
+      if (!entry.rpcSessionId) entry.rpcSessionId = crypto.randomBytes(12).toString('hex');
     }
-    const scriptSource = buildRuntimeScript(hostMode, page.type === 'page' ? entry.rpcToken : '');
+    const scriptSource = buildRuntimeScript(
+      hostMode,
+      issueRpcAuth && page.type === 'page' ? entry.rpcToken : '',
+      issueRpcAuth && page.type === 'page' ? entry.rpcSessionId : ''
+    );
     if (!scriptSource) return;
     const evalRes = await evalInHostContext(scriptSource, true).catch(() => null);
     entry.injectedBundleHash = cachedBundleHash;
@@ -2833,12 +3647,27 @@ export async function attachTarget(page, endpoint) {
     }
     if (!activeConfig.enabled) return;
     const needCustomJs = page.type === 'page' && activeConfig.modules.customJs !== false;
+    const sessionCheck =
+      page.type === 'page' && entry.rpcSessionId
+        ? ` && window.__ag_rpc_session_id === ${JSON.stringify(entry.rpcSessionId)}`
+        : '';
     const probe = await evalInHostContext(
-      `Boolean(document.getElementById("ag-custom-fonts")) && (!document.body || !${needCustomJs} || Boolean(window.__ag_custom_js_mounted))`,
+      `Boolean(document.getElementById("ag-custom-fonts"))${sessionCheck} && (!document.body || !${needCustomJs} || Boolean(window.__ag_custom_js_mounted))`,
       true
     ).catch(() => null);
     if (probe?.result?.result?.value === false) {
       await entry.injectNow();
+    }
+  };
+
+  const bindHostBindings = async () => {
+    if (page.type !== 'page') return;
+    const bindParams = (name) =>
+      entry.trustedContextId !== null ? { name, executionContextId: entry.trustedContextId } : { name };
+    for (const name of ['__agRequestMetrics', '__agSyncHostThemeMode', '__agProjectRpc']) {
+      await send('Runtime.addBinding', bindParams(name)).catch(() =>
+        send('Runtime.addBinding', { name }).catch(() => {})
+      );
     }
   };
 
@@ -2867,11 +3696,11 @@ export async function attachTarget(page, endpoint) {
     }
     entry.trustedContextId =
       (entry.mainFrameId && entry.defaultContextByFrame.get(entry.mainFrameId)) ?? candidateCtxId ?? null;
-    entry.rpcToken = page.type === 'page' ? crypto.randomBytes(24).toString('hex') : '';
     entry.hostConfirmed = true;
-    if (page.type === 'page' && entry.trustedContextId !== null) {
-      await send('Runtime.addBinding', { name: '__agProjectRpc', executionContextId: entry.trustedContextId }).catch(() => {});
-    }
+    if (readOnly) return;
+    entry.rpcToken = page.type === 'page' ? crypto.randomBytes(24).toString('hex') : '';
+    entry.rpcSessionId = page.type === 'page' ? crypto.randomBytes(12).toString('hex') : '';
+    await bindHostBindings();
     await entry.injectNow();
     await entry.syncMetricsForSession(true);
   };
@@ -2991,8 +3820,13 @@ export async function attachTarget(page, endpoint) {
 
   ws.addEventListener('close', () => {
     failAll('ws_closed');
-    attachedTargets.delete(page.id);
-    targetThemeModes.delete(page.id);
+    if (attachedTargets.get(page.id) === entry) {
+      attachedTargets.delete(page.id);
+      targetThemeModes.delete(page.id);
+      if (attachedTargets.size === 0 && typeof wakeMacBootstrap === 'function') {
+        wakeMacBootstrap();
+      }
+    }
   });
   ws.addEventListener('error', () => failAll('ws_error'));
 
@@ -3033,29 +3867,24 @@ export async function attachTarget(page, endpoint) {
 
     entry.trustedContextId =
       (entry.mainFrameId && entry.defaultContextByFrame.get(entry.mainFrameId)) ?? candidateCtxId ?? null;
-    entry.rpcToken = page.type === 'page' ? crypto.randomBytes(24).toString('hex') : '';
     entry.hostConfirmed = true;
     attachedTargets.set(page.id, entry);
 
-    if (page.type === 'page') {
-      const bindParams = (name) =>
-        entry.trustedContextId !== null ? { name, executionContextId: entry.trustedContextId } : { name };
-      await send('Runtime.addBinding', bindParams('__agRequestMetrics')).catch(() =>
-        send('Runtime.addBinding', { name: '__agRequestMetrics' }).catch(() => {})
-      );
-      await send('Runtime.addBinding', bindParams('__agSyncHostThemeMode')).catch(() =>
-        send('Runtime.addBinding', { name: '__agSyncHostThemeMode' }).catch(() => {})
-      );
-      await send('Runtime.addBinding', bindParams('__agProjectRpc')).catch(() =>
-        send('Runtime.addBinding', { name: '__agProjectRpc' }).catch(() => {})
-      );
-    }
+    if (readOnly) return;
+
+    entry.rpcToken = page.type === 'page' ? crypto.randomBytes(24).toString('hex') : '';
+    entry.rpcSessionId = page.type === 'page' ? crypto.randomBytes(12).toString('hex') : '';
+
+    await bindHostBindings();
 
     await entry.updateNewDocScript();
     await entry.injectNow();
     await entry.syncMetricsForSession(true);
   } catch {
-    attachedTargets.delete(page.id);
+    if (attachedTargets.get(page.id) === entry) {
+      attachedTargets.delete(page.id);
+      targetThemeModes.delete(page.id);
+    }
     try {
       ws.close();
     } catch {}
@@ -3069,19 +3898,22 @@ export async function attachTarget(page, endpoint) {
 let isSyncing = false;
 let syncTickCount = 0;
 let lastReachablePort = 0;
+const endpointConsecutiveFailures = new Map();
 
-async function sync() {
+async function sync(opts = {}) {
+  const readOnly = Boolean(opts && opts.readOnly);
   checkPidOwnership();
   if (isSyncing) return;
   isSyncing = true;
   syncTickCount = (syncTickCount + 1) % 6000;
   try {
     const bundleChanged = rebuildBundleIfNeeded();
-    if (!activeConfig.enabled) targetThemeModes.clear();
-    const shouldHeartbeatCheck = bundleChanged || syncTickCount % 6 === 1;
+    if (!readOnly && !activeConfig.enabled) targetThemeModes.clear();
+    const shouldHeartbeatCheck = !readOnly && (bundleChanged || syncTickCount % 6 === 1);
 
     const activeTargetIds = new Set();
     const seenRawTargetIds = new Set();
+    const authoritativeChannels = new Set();
     const pendingPages = [];
     const pendingIframes = [];
     const probedPorts = new Set();
@@ -3090,11 +3922,16 @@ async function sync() {
     for (const endpoint of activeConfig.endpoints) {
       const port = readPort(endpoint.portFile);
       let targets = [];
+      let querySucceeded = false;
       let usedPort = 0;
       if (port && !probedPorts.has(port)) {
         probedPorts.add(port);
-        targets = await fetchTargets(port);
-        if (targets.length > 0) usedPort = port;
+        const res = await fetchTargets(port);
+        if (res.ok) {
+          querySucceeded = true;
+          targets = res.targets;
+          if (targets.length > 0) usedPort = port;
+        }
       }
       if (
         targets.length === 0 &&
@@ -3103,13 +3940,26 @@ async function sync() {
         (RUN_ONCE || nowMs >= (fallbackBackoffUntil.get(endpoint.fallbackPort) || 0))
       ) {
         probedPorts.add(endpoint.fallbackPort);
-        targets = await fetchTargets(endpoint.fallbackPort);
+        const isAgPort = await isAntigravityFallbackPort(endpoint.fallbackPort);
+        if (isAgPort) {
+          const res = await fetchTargets(endpoint.fallbackPort);
+          if (res.ok) {
+            querySucceeded = true;
+            targets = res.targets;
+          }
+        }
         if (targets.length === 0) {
           fallbackBackoffUntil.set(endpoint.fallbackPort, nowMs + 10000);
         } else {
           fallbackBackoffUntil.delete(endpoint.fallbackPort);
           usedPort = endpoint.fallbackPort;
         }
+      }
+      if (querySucceeded) {
+        endpointConsecutiveFailures.delete(endpoint.channel);
+        authoritativeChannels.add(endpoint.channel);
+      } else {
+        endpointConsecutiveFailures.set(endpoint.channel, (endpointConsecutiveFailures.get(endpoint.channel) || 0) + 1);
       }
       if (targets.length === 0) continue;
       lastReachablePort = usedPort;
@@ -3149,8 +3999,8 @@ async function sync() {
       const attaches = [];
       for (const { page, endpoint } of items) {
         if (!attachedTargets.has(page.id)) {
-          attaches.push(attachTarget(page, endpoint));
-        } else {
+          attaches.push(attachTarget(page, endpoint, { readOnly }));
+        } else if (!readOnly) {
           const entry = attachedTargets.get(page.id);
           entry.endpoint = endpoint;
           entry.parentId = page.parentId || entry.parentId || null;
@@ -3169,10 +4019,18 @@ async function sync() {
     await syncBatch(pendingIframes);
 
     for (const [id, entry] of attachedTargets.entries()) {
-      if (!activeTargetIds.has(id)) {
-        try {
-          entry.ws.close();
-        } catch {}
+      if (activeTargetIds.has(id)) continue;
+      const ch = entry.endpoint?.channel;
+      const wsDead = entry.ws?.readyState !== WebSocket.OPEN;
+      const fails = ch ? endpointConsecutiveFailures.get(ch) || 0 : 0;
+      /* Do not drop live WebSocket targets on a single transient /json/list timeout */
+      if (!wsDead && ch && !authoritativeChannels.has(ch) && fails < 3) {
+        continue;
+      }
+      try {
+        entry.ws.close();
+      } catch {}
+      if (attachedTargets.get(id) === entry) {
         attachedTargets.delete(id);
         targetThemeModes.delete(id);
       }
@@ -3188,30 +4046,50 @@ async function sync() {
 }
 
 async function runVerifyOnce() {
-  await sync();
-  let themeStyle = { present: false, length: 0 };
-  let customStyle = { present: false, length: 0 };
-  let hostPages = 0;
+  await sync({ readOnly: true });
+  const inspectLiveStyles = async () => {
+    let themeStyle = { present: false, length: 0 };
+    let customStyle = { present: false, length: 0 };
+    let hostPages = 0;
 
-  for (const [, entry] of attachedTargets.entries()) {
-    if (!entry.hostConfirmed || entry.type !== 'page') continue;
-    hostPages += 1;
-    const r = await entry
-      .send('Runtime.evaluate', {
-        expression: `(function () {
-          const s1 = document.getElementById('ag-custom-fonts');
-          const s2 = document.getElementById('antigravity-user-custom-style');
-          return {
-            themeStyle: { present: Boolean(s1), length: s1 ? (s1.textContent || '').length : 0 },
-            customStyle: { present: Boolean(s2), length: s2 ? (s2.textContent || '').length : 0 }
-          };
-        })()`,
-        returnByValue: true
-      })
-      .catch(() => null);
-    const val = r?.result?.result?.value;
-    if (val?.themeStyle?.present) themeStyle = val.themeStyle;
-    if (val?.customStyle?.present) customStyle = val.customStyle;
+    for (const [, entry] of attachedTargets.entries()) {
+      if (!entry.hostConfirmed || entry.type !== 'page') continue;
+      hostPages += 1;
+      const r = await entry
+        .send('Runtime.evaluate', {
+          expression: `(function () {
+            const s1 = document.getElementById('ag-custom-fonts');
+            const s2 = document.getElementById('antigravity-user-custom-style');
+            return {
+              themeStyle: { present: Boolean(s1), length: s1 ? (s1.textContent || '').length : 0 },
+              customStyle: { present: Boolean(s2), length: s2 ? (s2.textContent || '').length : 0 }
+            };
+          })()`,
+          returnByValue: true
+        })
+        .catch(() => null);
+      const val = r?.result?.result?.value;
+      if (val?.themeStyle?.present) themeStyle = val.themeStyle;
+      if (val?.customStyle?.present) customStyle = val.customStyle;
+    }
+    return { themeStyle, customStyle, hostPages };
+  };
+
+  let { themeStyle, customStyle, hostPages } = await inspectLiveStyles();
+  const stylesReady = () => themeStyle.present && (!activeConfig.modules.customCss || customStyle.present);
+  if (hostPages > 0 && activeConfig.enabled && !stylesReady()) {
+    for (let i = 0; i < 4 && !stylesReady(); i++) {
+      await new Promise((r) => setTimeout(r, 350));
+      ({ themeStyle, customStyle, hostPages } = await inspectLiveStyles());
+    }
+    if (!stylesReady()) {
+      for (const [, entry] of attachedTargets.entries()) {
+        if (entry.hostConfirmed && entry.type === 'page') {
+          await entry.injectNow(false);
+        }
+      }
+      ({ themeStyle, customStyle, hostPages } = await inspectLiveStyles());
+    }
   }
 
   for (const [, entry] of attachedTargets.entries()) {

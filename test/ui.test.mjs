@@ -619,7 +619,7 @@ test('sidebar folder badges & shortcut Recents: aggregates status, sorts by upda
           <div>
             <div data-sidebar-section-drop-id="proj-a">
               <div class="group/header"><button type="button" data-testid="project-header" data-project-label="项目A" aria-expanded="false">项目A</button></div>
-              <div data-testid="conversation-row-sidebar" class="agy-sidebar-row"><span class="truncate">恢复谷歌浏览器Gemini侧边栏</span></div>
+              <div data-testid="conversation-row-sidebar" class="agy-sidebar-row"><span class="truncate">排查终端状态栏渲染异常</span></div>
             </div>
             <div data-sidebar-section-drop-id="proj-b">
               <div class="group/header"><button type="button" data-testid="project-header" data-project-label="项目B" aria-expanded="true">项目B</button></div>
@@ -637,7 +637,7 @@ test('sidebar folder badges & shortcut Recents: aggregates status, sorts by upda
     trajectorySummaries: {
       summaries: {
         'conv-idle-unread': {
-          annotations: { title: '恢复谷歌浏览器Gemini侧边栏', lastUserViewTime: { seconds: nowSec - 600 } },
+          annotations: { title: '排查终端状态栏渲染异常', lastUserViewTime: { seconds: nowSec - 600 } },
           lastModifiedTime: { seconds: nowSec - 60 },
           trajectoryMetadata: { projectId: 'proj-a' },
           status: 1
@@ -714,10 +714,10 @@ test('sidebar folder badges & shortcut Recents: aggregates status, sorts by upda
   assert.equal(h.doc.documentElement.getAttribute('lang'), 'zh-CN', 'sets zh-CN root locale for CJK shaping & line-break rules');
   assert.equal(
     h.doc.querySelector('#ag-claude-recent-section .ag-recent-entry:nth-child(2) .ag-recent-title').textContent,
-    '恢复谷歌浏览器Gemini侧边栏',
+    '排查终端状态栏渲染异常',
     'keeps raw title untouched so native CSS text-autospace provides uniform 1/8em spacing'
   );
-  assert.equal(h.doc.querySelector('[data-testid="conversation-row-sidebar"] span.truncate').textContent, '恢复谷歌浏览器Gemini侧边栏');
+  assert.equal(h.doc.querySelector('[data-testid="conversation-row-sidebar"] span.truncate').textContent, '排查终端状态栏渲染异常');
   assert.equal(h.doc.querySelectorAll('#ag-claude-recent-section .ag-recent-proj').length, 0, 'Variant A uses pure single-line rows');
   assert.match(recentRows[2].getAttribute('title') || '', /Project: 项目B/, 'hover title exposes project name in default English UI');
   assert.equal(recentRows[2].tagName, 'A');
@@ -1912,13 +1912,13 @@ test('unified sidebar Recents: mixes project & standalone chats without 8-item c
     summaries[`c-${i}`] = {
       annotations: { title: i === 1 ? 'Project Test Chat' : `Chat ${i}` },
       lastModifiedTime: { seconds: nowSec - i * 60 },
-      trajectoryMetadata: { projectId: i % 2 === 1 ? 'p-law' : 'outside-of-project' },
+      trajectoryMetadata: { projectId: i % 2 === 1 ? 'p-web' : 'outside-of-project' },
       status: 1
     };
   }
   const storeState = {
     sidebarProjects: {
-      projects: [{ id: 'p-law', name: '广州楚垚案', folderUris: ['file:///Users/demo/LawCase'] }]
+      projects: [{ id: 'p-web', name: '前端工程重构', folderUris: ['file:///Users/demo/WebApp'] }]
     },
     trajectorySummaries: { summaries }
   };
@@ -1959,7 +1959,7 @@ test('unified sidebar Recents: mixes project & standalone chats without 8-item c
   const rows = [...sec.querySelectorAll('.ag-recent-row')];
   assert.equal(rows.length, 10, 'renders all 10 mixed project + standalone chats without old 4/8 cap');
   assert.equal(rows[0].getAttribute('data-ag-recent-id'), 'c-1');
-  assert.match(rows[0].getAttribute('title') || '', /Project: 广州楚垚案/, 'shows owning project name in tooltip');
+  assert.match(rows[0].getAttribute('title') || '', /Project: 前端工程重构/, 'shows owning project name in tooltip');
 
   /* Inline hover Pin button */
   rows[0].querySelector('[data-ag-recent-pin="c-1"]').click();
@@ -1976,12 +1976,12 @@ test('unified sidebar Recents: mixes project & standalone chats without 8-item c
   assert.ok(menu, 'more menu opened');
   const projItem = menu.querySelector('[data-ag-rm-act="open-project"]');
   assert.ok(projItem, 'menu exposes owning project entry');
-  assert.match(projItem.textContent, /广州楚垚案/);
+  assert.match(projItem.textContent, /前端工程重构/);
   projItem.click();
   await h.microtasks();
   const view = h.doc.getElementById('ag-claude-projects-view');
   assert.ok(view && view.getAttribute('data-open') === 'true', 'clicking project entry opens project detail view');
-  assert.match(view.querySelector('.ag-pd-crumb-cur').textContent, /广州楚垚案/);
+  assert.match(view.querySelector('.ag-pd-crumb-cur').textContent, /前端工程重构/);
 
   /* Inline rename via menu */
   rows[0].querySelector('[data-ag-recent-menu="c-1"]').click();
@@ -1989,12 +1989,12 @@ test('unified sidebar Recents: mixes project & standalone chats without 8-item c
   await settle(h);
   const renameInput = sec.querySelector('[data-ag-recent-rename-input="c-1"]');
   assert.ok(renameInput, 'inline rename input mounted');
-  renameInput.value = 'Renamed Case Chat';
+  renameInput.value = 'Renamed Web Chat';
   renameInput.dispatchEvent(new h.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
   await h.microtasks();
   assert.deepEqual(
     JSON.parse(JSON.stringify(mutations[1])),
-    { id: 'c-1', patch: { title: 'Renamed Case Chat' }, merge: true },
+    { id: 'c-1', patch: { title: 'Renamed Web Chat' }, merge: true },
     'Enter commits rename'
   );
 
@@ -2045,14 +2045,14 @@ test('customizations layout enhancement: mounts category tabs, frames skills lis
       <div class="max-w-4xl w-full mx-auto">
         <section data-testid="customizations-installed-plugins">
           <div><h3><button>Installed Plugins <span data-testid="customization-section-count">4</span></button></h3></div>
-          <div class="grid"><div>bm-bridge</div></div>
+          <div class="grid"><div>gdocs-plugin</div></div>
         </section>
         <section>
           <div>
             <h3><button>Skills &amp; Rules <span data-testid="customization-section-count">64</span></button></h3>
             <div><button data-testid="skills-rules-filter">All</button></div>
           </div>
-          <div><div class="flex flex-col"><div class="group">/basic-memory</div></div></div>
+          <div><div class="flex flex-col"><div class="group">/code-review</div></div></div>
         </section>
         <section>
           <div><h3><button>Custom Agents <span data-testid="customization-section-count">0</span></button></h3></div>
@@ -2063,7 +2063,7 @@ test('customizations layout enhancement: mounts category tabs, frames skills lis
             <h3><button>MCP Servers <span data-testid="customization-section-count">4</span></button></h3>
             <div><button data-testid="add-mcp-button">+</button></div>
           </div>
-          <div>basic-memory</div>
+          <div>atlassian</div>
         </section>
       </div>
     </div>
@@ -2073,10 +2073,10 @@ test('customizations layout enhancement: mounts category tabs, frames skills lis
   h.window.__agProjectCall = async (action, payload) => {
     rpcCalls.push({ action, payload });
     if (action === 'createLocalSkill') {
-      return { ok: true, folderName: 'contract-audit', dirPath: '/Users/demo/.gemini/config/skills/contract-audit' };
+      return { ok: true, folderName: 'lint-check', dirPath: '/Users/demo/.gemini/config/skills/lint-check' };
     }
     if (action === 'createLocalAgent') {
-      return { ok: true, name: 'contract-reviewer', filePath: '/Users/demo/.gemini/config/agents/contract-reviewer.md' };
+      return { ok: true, name: 'code-reviewer', filePath: '/Users/demo/.gemini/config/agents/code-reviewer.md' };
     }
     if (action === 'openSkillsDir' || action === 'openAgentsDir') return { ok: true };
     return { ok: false };
@@ -2104,7 +2104,7 @@ test('customizations layout enhancement: mounts category tabs, frames skills lis
 
   /* Typing in search reveals all sections via searching mode */
   const search = h.doc.querySelector('[data-testid="customizations-search"]');
-  search.value = 'basic';
+  search.value = 'review';
   search.dispatchEvent(new h.window.Event('input', { bubbles: true }));
   assert.equal(h.doc.querySelector('[data-ag-cust-page="1"]').getAttribute('data-ag-cust-searching'), '1');
   assert.equal(secSkills.hasAttribute('data-ag-cust-hidden'), false, 'search un-hides all sections');
@@ -2118,9 +2118,9 @@ test('customizations layout enhancement: mounts category tabs, frames skills lis
   assert.ok(modal, 'Add skill modal opened');
   assert.equal(modal.querySelector('[data-ag-skill-save]').disabled, true, 'Create skill disabled until required fields filled');
   for (const [sel, val] of [
-    ['#ag-skill-name', 'contract-audit'],
-    ['#ag-skill-desc', 'Audit commercial contracts'],
-    ['#ag-skill-body', '# Steps\n1. Check clauses.']
+    ['#ag-skill-name', 'lint-check'],
+    ['#ag-skill-desc', 'Run repository lint checks'],
+    ['#ag-skill-body', '# Steps\n1. Check syntax.']
   ]) {
     const el = modal.querySelector(sel);
     el.value = val;
@@ -2132,10 +2132,10 @@ test('customizations layout enhancement: mounts category tabs, frames skills lis
   await h.microtasks();
   await h.microtasks();
   assert.ok(
-    rpcCalls.some((c) => c.action === 'createLocalSkill' && c.payload.name === 'contract-audit'),
+    rpcCalls.some((c) => c.action === 'createLocalSkill' && c.payload.name === 'lint-check'),
     'invokes createLocalSkill RPC'
   );
-  assert.match(h.doc.getElementById('ag-claude-project-modal').textContent, /contract-audit/);
+  assert.match(h.doc.getElementById('ag-claude-project-modal').textContent, /lint-check/);
   h.doc.querySelector('#ag-claude-project-modal [data-ag-pm-close]').click();
 
   /* Clicking + New subagent opens Custom Subagent modal, switches tool preset, and calls createLocalAgent */
@@ -2148,9 +2148,9 @@ test('customizations layout enhancement: mounts category tabs, frames skills lis
   agentModal.querySelector('[data-ag-agent-preset="editor"]').click();
   const agentModal2 = h.doc.getElementById('ag-claude-project-modal');
   for (const [sel, val] of [
-    ['#ag-agent-name', 'contract-reviewer'],
-    ['#ag-agent-desc', 'Reviews contracts and flags risks'],
-    ['#ag-agent-prompt', 'Always cite exact clause numbers.']
+    ['#ag-agent-name', 'code-reviewer'],
+    ['#ag-agent-desc', 'Reviews pull requests and flags issues'],
+    ['#ag-agent-prompt', 'Always cite exact line numbers.']
   ]) {
     const el = agentModal2.querySelector(sel);
     el.value = val;
@@ -2161,7 +2161,7 @@ test('customizations layout enhancement: mounts category tabs, frames skills lis
   await h.microtasks();
   const agentCall = rpcCalls.find((c) => c.action === 'createLocalAgent');
   assert.ok(agentCall, 'invokes createLocalAgent RPC');
-  assert.equal(agentCall.payload.name, 'contract-reviewer');
+  assert.equal(agentCall.payload.name, 'code-reviewer');
   assert.deepEqual(Array.from(agentCall.payload.tools), ['read_file', 'edit_file', 'write_file', 'search_web']);
 
   /* Clean disposal */

@@ -113,7 +113,9 @@
     recentSection: effectiveModBool('claudeUxRecentSection', false),
     projects: effectiveModBool('claudeUxProjects', true),
     hideSidebarProjects: effectiveModBool('claudeUxHideSidebarProjects', true),
-    customizations: effectiveModBool('claudeUxCustomizations', true)
+    customizations: effectiveModBool('claudeUxCustomizations', true),
+    codeFold: effectiveModBool('claudeUxCodeFold', true),
+    overviewPanel: effectiveModBool('claudeUxOverviewPanel', true)
   };
   const L = (zh, en) => (FEAT.i18n ? zh : en);
 
@@ -210,7 +212,8 @@
   const SVG_DONE =
     '<svg class="ag-todo-ico ag-todo-done" width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="7.1" fill="currentColor"/><path class="ag-todo-done-check" d="M5.05 8.15l1.95 1.95 3.95-4.1" stroke="#FFFFFF" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
-  const PAST_LABEL_RE = /^(?:Explored|Ran\b|Edited\b|Done\b|已探索|已运行|已编辑|已完成)/i;
+  const PAST_LABEL_RE =
+    /^(?:Explored|Ran\b|Edited\b|Done\b|Read\b|Searched|Listed|Viewed|Checked|Found\b|Created|Updated|Deleted|Wrote\b|Written|Built\b|Tested|Installed|Fetched|Analyzed|Reviewed|Thought\b|Worked\b|Completed|Finished|Failed|Stopped|Cancelled|Canceled|Skipped|已探索|已运行|已编辑|已完成|已读取|已搜索|已查看|已检查|已创建|已更新|已删除|已写入|已构建|已测试|已失败|已取消|完成了|思考了)/i;
 
   const onDocClick = (e) => {
     if (!e.isTrusted) return;
@@ -995,7 +998,8 @@
             if (sameTurn) {
               join = evolved;
             } else {
-              const looksLikeProgress = active || isAllTodoCompleted(entry.items);
+              const explicitContinuation = Boolean(entry.turnEl && turnContinuesChecklist(entry.turnEl, last.items));
+              const looksLikeProgress = active || (isAllTodoCompleted(entry.items) && explicitContinuation);
               join = evolved || (!isAllTodoCompleted(last.items) && looksLikeProgress);
             }
           }
@@ -1120,6 +1124,10 @@
     for (const ul of document.querySelectorAll('ul[data-ag-todo-merged], ul[data-ag-todo-primary]')) {
       if (!touched.has(ul)) restoreNativeUl(ul);
     }
+    if (!FEAT.todoCard) {
+      document.querySelectorAll('[data-ag-todo-empty-wrap]').forEach((el) => el.removeAttribute('data-ag-todo-empty-wrap'));
+      document.querySelectorAll('[data-ag-todo-marker-line]').forEach((el) => el.removeAttribute('data-ag-todo-marker-line'));
+    }
     for (const card of document.querySelectorAll('[data-ag-todo-mount]')) {
       if (card.parentElement && card.parentElement.hasAttribute('data-ag-todo-dock')) continue;
       const prev = card.previousElementSibling;
@@ -1239,10 +1247,10 @@
    * 2. Attaches U+2060 WORD JOINER between atomic inline pills (`inline-flex` file mentions) and adjacent CJK
    *    closing/middle punctuation (`、，。！？；：）》」』】`) or opening brackets (`（《「『【`) so punctuation never wraps to line start.
    * Mutates `Text.nodeValue` only (zero childList mutations, zero React Fiber interference) and restores on `dispose()`. */
-  const pillSiblingOrig = new WeakMap();
+  const pillSiblingEdits = new WeakMap();
   const WORD_JOINER = '\u2060';
-  const CJK_OR_FULL_PUNCT_END_SPACE_RE = /([\u4e00-\u9fff\u3000-\u303f\uff01-\uff60“‘])[ \t]+$/;
-  const CJK_OR_FULL_PUNCT_LEAD_SPACE_RE = /^[ \t]+([\u4e00-\u9fff\u3000-\u303f\uff01-\uff60”’])/;
+  const CJK_OR_FULL_PUNCT_END_SPACE_RE = /([\u4e00-\u9fff\u3000-\u303f\uff01-\uff60“‘])([ \t]+)$/;
+  const CJK_OR_FULL_PUNCT_LEAD_SPACE_RE = /^([ \t]+)([\u4e00-\u9fff\u3000-\u303f\uff01-\uff60”’])/;
   const CJK_OPEN_PUNCT_END_RE = /[（《「『【〈“‘]$/;
   const CJK_CLOSE_OR_MID_PUNCT_START_RE = /^[、，。！？；：）》」』】〉”’—…]/;
 
@@ -1262,12 +1270,18 @@
       const prev = pill.previousSibling;
       if (prev && prev.nodeType === 3) {
         const cur = prev.nodeValue || '';
-        let next = cur.replace(CJK_OR_FULL_PUNCT_END_SPACE_RE, '$1');
+        const spaceMatch = cur.match(CJK_OR_FULL_PUNCT_END_SPACE_RE);
+        let next = spaceMatch ? cur.slice(0, cur.length - spaceMatch[2].length) : cur;
+        let addedTrailWj = false;
         if (CJK_OPEN_PUNCT_END_RE.test(next) && !next.endsWith(WORD_JOINER)) {
           next += WORD_JOINER;
+          addedTrailWj = true;
         }
         if (next !== cur) {
-          if (!pillSiblingOrig.has(prev)) pillSiblingOrig.set(prev, cur);
+          const rec = pillSiblingEdits.get(prev) || {};
+          if (spaceMatch && !rec.strippedTrailSpace) rec.strippedTrailSpace = spaceMatch[2];
+          if (addedTrailWj) rec.addedTrailWj = true;
+          pillSiblingEdits.set(prev, rec);
           prev.nodeValue = next;
         }
       }
@@ -1275,13 +1289,20 @@
       const fol = pill.nextSibling;
       if (fol && fol.nodeType === 3) {
         const cur = fol.nodeValue || '';
-        const withoutWj = cur.startsWith(WORD_JOINER) ? cur.slice(1) : cur;
-        let next = withoutWj.replace(CJK_OR_FULL_PUNCT_LEAD_SPACE_RE, '$1');
+        const hadWj = cur.startsWith(WORD_JOINER);
+        const withoutWj = hadWj ? cur.slice(1) : cur;
+        const spaceMatch = withoutWj.match(CJK_OR_FULL_PUNCT_LEAD_SPACE_RE);
+        let next = spaceMatch ? withoutWj.slice(spaceMatch[1].length) : withoutWj;
+        let addedLeadWj = false;
         if (CJK_CLOSE_OR_MID_PUNCT_START_RE.test(next)) {
           next = WORD_JOINER + next;
+          addedLeadWj = true;
         }
         if (next !== cur) {
-          if (!pillSiblingOrig.has(fol)) pillSiblingOrig.set(fol, cur);
+          const rec = pillSiblingEdits.get(fol) || {};
+          if (spaceMatch && !rec.strippedLeadSpace) rec.strippedLeadSpace = spaceMatch[1];
+          if (addedLeadWj) rec.addedLeadWj = true;
+          pillSiblingEdits.set(fol, rec);
           fol.nodeValue = next;
         }
       }
@@ -1292,12 +1313,229 @@
     const pills = document.querySelectorAll(':not(pre) > code, bdi.context-scope-mention');
     for (const pill of pills) {
       for (const node of [pill.previousSibling, pill.nextSibling]) {
-        if (node && node.nodeType === 3 && pillSiblingOrig.has(node)) {
-          node.nodeValue = pillSiblingOrig.get(node);
-          pillSiblingOrig.delete(node);
-        }
+        if (!node || node.nodeType !== 3 || !pillSiblingEdits.has(node)) continue;
+        const rec = pillSiblingEdits.get(node);
+        let val = node.nodeValue || '';
+        if (rec.addedLeadWj && val.startsWith(WORD_JOINER)) val = val.slice(1);
+        if (rec.strippedLeadSpace && !val.startsWith(rec.strippedLeadSpace)) val = rec.strippedLeadSpace + val;
+        if (rec.addedTrailWj && val.endsWith(WORD_JOINER)) val = val.slice(0, -1);
+        if (rec.strippedTrailSpace && !val.endsWith(rec.strippedTrailSpace)) val = val + rec.strippedTrailSpace;
+        node.nodeValue = val;
+        pillSiblingEdits.delete(node);
       }
     }
+  }
+
+  /* ==========================================================================
+   * 4b. Long Code Block Folding & Sticky Header (claudeUxCodeFold)
+   *     - Sticks native code block headers while scrolling long responses
+   *     - Collapses blocks with >= 40 lines to a preview by default, remembering
+   *       user expand/collapse choices across React virtualized remounts
+   * ========================================================================== */
+  const CODE_FOLD_MIN_LINES = 40;
+  const CODE_FOLD_KEYS_MAX = 300;
+  const codeFoldUserState = new Map();
+  const codeBlockMetricCache = new WeakMap();
+  const SVG_CODE_FOLD_CHEVRON =
+    '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
+    '<path d="M4 6L8 10L12 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '</svg>';
+
+  function findNativeCodeBlocks() {
+    const blocks = [];
+    const codeEls = document.querySelectorAll('div.code-block');
+    for (const codeEl of codeEls) {
+      if (codeEl.classList.contains('overflow-y-auto')) continue;
+      const body = codeEl.parentElement;
+      if (!body || !body.classList || !body.classList.contains('p-3')) continue;
+      const wrap = body.parentElement;
+      if (!wrap) continue;
+      const header = wrap.firstElementChild;
+      if (!header || header === body || !header.classList) continue;
+      if (!header.classList.contains('min-h-7') || !header.classList.contains('border-b')) continue;
+      blocks.push({ wrap, header, body, codeEl });
+    }
+    return blocks;
+  }
+
+  function hashTextFnv1a(str) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(36);
+  }
+
+  function getCodeBlockMetrics(header, codeEl) {
+    if (!codeEl) return { lines: 0, key: '' };
+    const langEl = header && header.firstElementChild;
+    const lang = langEl && langEl.textContent ? langEl.textContent.trim() : '';
+    const childCount = codeEl.childNodes ? codeEl.childNodes.length : 0;
+    const firstNode = codeEl.firstChild;
+    const lastNode = codeEl.lastChild;
+    const cached = codeBlockMetricCache.get(codeEl);
+    if (
+      cached &&
+      cached.lang === lang &&
+      cached.childCount === childCount &&
+      cached.firstNode === firstNode &&
+      cached.lastNode === lastNode &&
+      (childCount > 1 || (firstNode && firstNode.nodeValue === cached.singleText))
+    ) {
+      return cached;
+    }
+    const lineNodes = codeEl.querySelectorAll('.code-line');
+    const txt = codeEl.textContent || '';
+    const lines = lineNodes.length > 0 ? lineNodes.length : txt ? txt.split('\n').length : 0;
+    const key = `${lang}|${txt.length}|${hashTextFnv1a(txt)}`;
+    const next = {
+      lang,
+      childCount,
+      firstNode,
+      lastNode,
+      singleText: childCount <= 1 && firstNode ? firstNode.nodeValue : undefined,
+      lines,
+      key
+    };
+    codeBlockMetricCache.set(codeEl, next);
+    return next;
+  }
+
+  function codeBlockKey(header, codeEl) {
+    return getCodeBlockMetrics(header, codeEl).key;
+  }
+
+  function rememberCodeFoldState(key, stateVal) {
+    if (codeFoldUserState.has(key)) codeFoldUserState.delete(key);
+    codeFoldUserState.set(key, stateVal);
+    if (codeFoldUserState.size > CODE_FOLD_KEYS_MAX) {
+      codeFoldUserState.delete(codeFoldUserState.keys().next().value);
+    }
+  }
+
+  function findCodeBlockScrollContainer(el) {
+    let cur = el ? el.parentElement : null;
+    for (let i = 0; i < 25 && cur && cur !== document.documentElement; i++, cur = cur.parentElement) {
+      if (typeof getComputedStyle === 'function') {
+        const ov = getComputedStyle(cur).overflowY;
+        if (ov === 'auto' || ov === 'scroll') return cur;
+      }
+    }
+    return null;
+  }
+
+  function onCodeFoldClick(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    const trigger = e.currentTarget;
+    const wrap = trigger && trigger.closest ? trigger.closest('[data-ag-code-wrap]') : null;
+    if (wrap) toggleCodeFold(wrap);
+  }
+
+  function syncSingleCodeBlock(wrap, header, codeEl) {
+    if (!wrap || !header || !codeEl) return;
+    if (wrap.getAttribute('data-ag-code-wrap') !== 'true') {
+      wrap.setAttribute('data-ag-code-wrap', 'true');
+    }
+    const { lines, key } = getCodeBlockMetrics(header, codeEl);
+    if (lines >= CODE_FOLD_MIN_LINES) {
+      if (wrap.getAttribute('data-ag-code-long') !== 'true') {
+        wrap.setAttribute('data-ag-code-long', 'true');
+      }
+      const collapsed = codeFoldUserState.get(key) !== 'expanded';
+      const nextAttr = collapsed ? 'true' : 'false';
+      if (wrap.getAttribute('data-ag-code-collapsed') !== nextAttr) {
+        wrap.setAttribute('data-ag-code-collapsed', nextAttr);
+      }
+
+      let toggleBtn = header.querySelector('.ag-code-fold-toggle');
+      if (!toggleBtn) {
+        toggleBtn = document.createElement('button');
+        toggleBtn.type = 'button';
+        toggleBtn.className =
+          'ag-code-fold-toggle appearance-none bg-transparent border-0 p-0 cursor-pointer text-secondary-foreground hover:text-foreground transition-colors';
+        toggleBtn.setAttribute('data-ag-i18n-ignore', '1');
+        toggleBtn.innerHTML = SVG_CODE_FOLD_CHEVRON;
+        toggleBtn.addEventListener('click', onCodeFoldClick);
+        const btnGroup =
+          header.lastElementChild && header.lastElementChild !== header.firstElementChild
+            ? header.lastElementChild
+            : header;
+        btnGroup.insertBefore(toggleBtn, btnGroup.firstChild);
+      }
+      const toggleLabel = collapsed ? L('展开代码', 'Expand code') : L('收起代码', 'Collapse code');
+      if (toggleBtn.getAttribute('aria-label') !== toggleLabel) {
+        toggleBtn.setAttribute('aria-label', toggleLabel);
+      }
+      if (toggleBtn.getAttribute('title') !== toggleLabel) {
+        toggleBtn.setAttribute('title', toggleLabel);
+      }
+
+      let bar = null;
+      for (const ch of wrap.children) {
+        if (ch.classList && ch.classList.contains('ag-code-fold-bar')) {
+          bar = ch;
+          break;
+        }
+      }
+      if (!bar) {
+        bar = document.createElement('button');
+        bar.type = 'button';
+        bar.className = 'ag-code-fold-bar';
+        bar.setAttribute('data-ag-i18n-ignore', '1');
+        bar.addEventListener('click', onCodeFoldClick);
+        wrap.appendChild(bar);
+      }
+      const barText = collapsed
+        ? L(`展开全部 · 共 ${lines} 行`, `Show all ${lines} lines`)
+        : L('收起代码', 'Collapse code');
+      if (bar.textContent !== barText) {
+        bar.textContent = barText;
+      }
+    } else {
+      if (wrap.hasAttribute('data-ag-code-long')) wrap.removeAttribute('data-ag-code-long');
+      if (wrap.hasAttribute('data-ag-code-collapsed')) wrap.removeAttribute('data-ag-code-collapsed');
+      header.querySelectorAll('.ag-code-fold-toggle').forEach((n) => n.remove());
+      for (const ch of Array.from(wrap.children)) {
+        if (ch.classList && ch.classList.contains('ag-code-fold-bar')) ch.remove();
+      }
+    }
+  }
+
+  function toggleCodeFold(wrap) {
+    const header = wrap.firstElementChild;
+    const codeEl = wrap.querySelector(':scope > div.p-3 > div.code-block');
+    if (!header || !codeEl) return;
+    const key = codeBlockKey(header, codeEl);
+    const nextCollapsed = wrap.getAttribute('data-ag-code-collapsed') !== 'true';
+    rememberCodeFoldState(key, nextCollapsed ? 'collapsed' : 'expanded');
+    syncSingleCodeBlock(wrap, header, codeEl);
+    if (nextCollapsed) {
+      try {
+        const scroller = findCodeBlockScrollContainer(wrap);
+        const minTop = scroller ? scroller.getBoundingClientRect().top : 0;
+        if (wrap.getBoundingClientRect().top < minTop) {
+          wrap.scrollIntoView({ block: 'start', behavior: 'auto' });
+        }
+      } catch {}
+    }
+  }
+
+  function syncCodeBlocks() {
+    if (!FEAT.codeFold) return;
+    for (const { wrap, header, codeEl } of findNativeCodeBlocks()) {
+      syncSingleCodeBlock(wrap, header, codeEl);
+    }
+  }
+
+  function teardownCodeBlocks() {
+    document.querySelectorAll('[data-ag-code-wrap]').forEach((wrap) => {
+      wrap.removeAttribute('data-ag-code-wrap');
+      wrap.removeAttribute('data-ag-code-long');
+      wrap.removeAttribute('data-ag-code-collapsed');
+    });
+    document.querySelectorAll('.ag-code-fold-toggle, .ag-code-fold-bar').forEach((el) => el.remove());
   }
 
   let lastSyncTs = 0;
@@ -1321,16 +1559,21 @@
           }
         }
       }
+    } else {
+      document.querySelectorAll('[data-ag-inline-stream]').forEach((el) => el.removeAttribute('data-ag-inline-stream'));
     }
     if (FEAT.collapseAnim) captureOpenToolPanels();
     const panes = collectPanes();
     syncTodoCards(panes);
     syncRunningToolIndicators(panes);
     syncInlinePillBoundaries();
-    if (FEAT.contextRing) {
+    syncCodeBlocks();
+    if (FEAT.contextRing || FEAT.overviewPanel) {
       ensureMetricsWrapped();
-      ensureComposerContextRing();
       syncCompactVisualState(false);
+    }
+    if (FEAT.contextRing) {
+      ensureComposerContextRing();
     } else {
       const oldRing = document.getElementById('ag-claude-ctx-ring');
       if (oldRing) oldRing.remove();
@@ -1339,6 +1582,7 @@
     syncModelTriggerDisplay();
     syncSidebarEnhancements();
     syncProjectsWorkspace();
+    syncOverviewPanel(false);
     reconcileSettingsPanel();
   }
 
@@ -1398,6 +1642,10 @@
   let cachedUserAccountKey = initialQuotaSnap ? String(initialQuotaSnap.accountKey || '') : '';
   let cachedQuotaGroups = initialQuotaSnap ? initialQuotaSnap.groups : null;
   let lastQuotaFetchTs = 0;
+  let lastForceQuotaFetchTs = 0;
+  let autoQuotaRefreshTimer = 0;
+  let lastQuotaUsageSig = '';
+  let wasOvPaneGenerating = false;
   let quotaFetchInFlight = null;
   let quotaHoldTimer = 0;
   let quotaWarmupDone = false;
@@ -1434,8 +1682,38 @@
     return (sel && sel.getAttribute('data-cascade-id')) || '';
   }
 
-  function discoverAgentInputProps() {
-    const inputBox = document.getElementById('antigravity.agentSidePanelInputBox');
+  function getActiveInputBox(anchorEl) {
+    if (anchorEl && anchorEl.closest) {
+      const own = anchorEl.closest('[id="antigravity.agentSidePanelInputBox"]');
+      if (own) return own;
+      const view = anchorEl.closest('[data-testid="conversation-view"]');
+      if (view) {
+        const inView = view.querySelector('[id="antigravity.agentSidePanelInputBox"]');
+        if (inView) return inView;
+      }
+    }
+    const boxes = document.querySelectorAll('[id="antigravity.agentSidePanelInputBox"]');
+    if (boxes.length <= 1) return boxes[0] || null;
+    const ae = document.activeElement;
+    if (ae && ae.closest) {
+      const aeView = ae.closest('[data-testid="conversation-view"]');
+      if (aeView) {
+        const aeBox = aeView.querySelector('[id="antigravity.agentSidePanelInputBox"]');
+        if (aeBox) return aeBox;
+      }
+    }
+    const cid = getActiveCascadeId();
+    if (cid) {
+      for (const b of boxes) {
+        const v = b.closest && b.closest('[data-testid="conversation-view"]');
+        if (v && v.getAttribute('data-cascade-id') === cid) return b;
+      }
+    }
+    return boxes[0] || null;
+  }
+
+  function discoverAgentInputProps(anchorEl) {
+    const inputBox = getActiveInputBox(anchorEl);
     if (!inputBox) return null;
     const fk = Object.keys(inputBox).find((k) => k.startsWith('__reactFiber$'));
     let f = fk ? inputBox[fk] : null;
@@ -1446,8 +1724,8 @@
     return null;
   }
 
-  function discoverComposerContextFromInputBox() {
-    const inputBox = document.getElementById('antigravity.agentSidePanelInputBox');
+  function discoverComposerContextFromInputBox(anchorEl) {
+    const inputBox = getActiveInputBox(anchorEl);
     if (!inputBox) return null;
     const fk = Object.keys(inputBox).find((k) => k.startsWith('__reactFiber$'));
     let f = fk ? inputBox[fk] : null;
@@ -1718,7 +1996,7 @@
   }
 
   function syncCompactVisualState(forceRender) {
-    if (disposed || !FEAT.contextRing) return;
+    if (disposed || (!FEAT.contextRing && !FEAT.overviewPanel)) return;
     const curCid = getActiveCascadeId();
     const st = detectCompactStatus(curCid);
     const running = isPaneCurrentlyRunning();
@@ -1735,8 +2013,11 @@
         return;
       } catch {}
     }
-    updateComposerRingVisuals();
-    if (quotaPopoverOpen) renderQuotaPopoverBody();
+    if (FEAT.contextRing) {
+      updateComposerRingVisuals();
+      if (quotaPopoverOpen) renderQuotaPopoverBody();
+    }
+    if (FEAT.overviewPanel) renderOverviewPanel(false);
   }
 
   async function triggerConversationCompact() {
@@ -1755,19 +2036,18 @@
 
     try {
       if (agentProps && typeof agentProps.handleSubmit === 'function') {
-        const slashItems = Array.isArray(agentProps.slashCommandItems) ? agentProps.slashCommandItems : [];
+        const hasSlashList = Array.isArray(agentProps.slashCommandItems);
+        const slashItems = hasSlashList ? agentProps.slashCommandItems : [];
         const compactDef = slashItems.find(
           (x) => x && (x.title === 'compact' || (x.info && x.info.name === 'compact'))
         );
-        const slashInfo = (compactDef && compactDef.info) || {
-          $typeName: 'exa.codeium_common_pb.SlashCommandInfo',
-          name: 'compact',
-          modelFacingText: '',
-          type: 1,
-          icon: 'collapse_all',
-          displayName: '',
-          logo: ''
-        };
+        if (!compactDef || !compactDef.info) {
+          /* Never fabricate a hard-coded SlashCommandInfo proto if official /compact definition is absent */
+          manualCompactPending = { cascadeId: '', startedAt: 0 };
+          syncCompactVisualState(true);
+          return false;
+        }
+        const slashInfo = compactDef.info;
         const submitItems = [
           {
             $typeName: 'exa.codeium_common_pb.TextOrScopeItem',
@@ -2209,7 +2489,9 @@
                 tooltipHtml: payload.__agOrigTooltipHtml !== undefined ? payload.__agOrigTooltipHtml : payload.tooltipHtml
               })
             : payload;
-        return origRenderMetrics.call(this, rawPayload);
+        const ret = origRenderMetrics.call(this, rawPayload);
+        if (!disposed && FEAT.overviewPanel) renderOverviewPanel(false);
+        return ret;
       }
       const slimPayload = parseAndSlimMetricsPayload(payload);
       const ret = origRenderMetrics.call(this, slimPayload);
@@ -2221,6 +2503,23 @@
       }
       updateComposerRingVisuals();
       if (quotaPopoverOpen) renderQuotaPopoverBody();
+      if (FEAT.overviewPanel) renderOverviewPanel(false);
+      if (payload && payload.hasData && payload.stats) {
+        const nextUsageSig = `${payload.cascadeId || ''}:${payload.stats.calls || 0}:${payload.stats.turns || 0}:${payload.stats.childCalls || 0}`;
+        const prevCid = lastQuotaUsageSig ? lastQuotaUsageSig.split(':')[0] : '';
+        const curCidSig = String(payload.cascadeId || '');
+        if (!lastQuotaUsageSig || prevCid !== curCidSig) {
+          lastQuotaUsageSig = nextUsageSig;
+          if ((isOverviewPanelVisible() || quotaPopoverOpen) && Date.now() - lastForceQuotaFetchTs >= 8000) {
+            scheduleAutoQuotaRefresh(250, 5000);
+          }
+        } else if (nextUsageSig !== lastQuotaUsageSig) {
+          lastQuotaUsageSig = nextUsageSig;
+          if (FEAT.overviewPanel || FEAT.contextRing) {
+            scheduleAutoQuotaRefresh(650, 4500);
+          }
+        }
+      }
       return ret;
     };
     wrappedRender.__agSlimWrapped = true;
@@ -2234,11 +2533,14 @@
   }
   ensureMetricsWrapped();
 
+  let lastQuotaSvcMissTs = 0;
   function discoverQuotaService(refreshAccount = false) {
     if (!refreshAccount && cachedQuotaSvc && cachedUserTierName && cachedUserAccountKey) return cachedQuotaSvc;
-    const inputBox = document.getElementById('antigravity.agentSidePanelInputBox');
-    if (!inputBox) return cachedQuotaSvc;
-    const fk = Object.keys(inputBox).find((k) => k.startsWith('__reactFiber$'));
+    if (!refreshAccount && !cachedQuotaSvc && lastQuotaSvcMissTs && Date.now() - lastQuotaSvcMissTs < 5000) {
+      return null;
+    }
+    const inputBox = getActiveInputBox();
+    const fk = inputBox ? Object.keys(inputBox).find((k) => k.startsWith('__reactFiber$')) : null;
     let f = fk ? inputBox[fk] : null;
     const seen = new Set();
     let foundSvc = null;
@@ -2291,7 +2593,32 @@
       if (foundSvc && foundTierName) break;
     }
 
-    if (foundSvc) cachedQuotaSvc = foundSvc;
+    if (!foundSvc || !foundTierName) {
+      const root = document.getElementById('root');
+      const rfk = root && Object.keys(root).find((k) => k.startsWith('__reactContainer') || k.startsWith('__reactFiber'));
+      if (rfk && root[rfk]) {
+        const rq = [root[rfk]];
+        const rSeen = new Set();
+        while (rq.length && rSeen.size < 320 && (!foundSvc || !foundTierName)) {
+          const rf = rq.shift();
+          if (!rf || rSeen.has(rf)) continue;
+          rSeen.add(rf);
+          walkObj(rf.memoizedProps, 0);
+          for (let dep = rf.dependencies && rf.dependencies.firstContext; dep; dep = dep.next) {
+            walkObj(dep.memoizedValue, 0);
+          }
+          if (rf.child) rq.push(rf.child);
+          if (rf.sibling) rq.push(rf.sibling);
+        }
+      }
+    }
+
+    if (foundSvc) {
+      cachedQuotaSvc = foundSvc;
+      lastQuotaSvcMissTs = 0;
+    } else {
+      lastQuotaSvcMissTs = Date.now();
+    }
     if (foundTierName) {
       const nextAccountKey = `${foundEmail}|${foundTierId}|${foundTierName}`;
       if (cachedUserAccountKey && cachedUserAccountKey !== nextAccountKey) {
@@ -2308,12 +2635,44 @@
   function invokeQuotaSummaryRpc(svc, forceRefresh) {
     const fn = svc && svc.retrieveUserQuotaSummary;
     if (typeof fn !== 'function') return Promise.resolve(null);
-    let wantsBool = false;
-    try {
-      wantsBool = fn.length === 1 && /forceRefresh/.test(Function.prototype.toString.call(fn));
-    } catch {}
+    let wantsBool = Boolean(
+      typeof svc.loadCodeAssist === 'function' || typeof svc.getUserAccountSettings === 'function'
+    );
+    if (!wantsBool && typeof svc.getUserStatus !== 'function') {
+      try {
+        const src = Function.prototype.toString.call(fn).trim();
+        wantsBool =
+          fn.length === 1 &&
+          !/\.forceRefresh\b/.test(src) &&
+          /^(?:async\s+)?(?:function\s*\w*\s*\(\s*forceRefresh\s*\)|(?:\(\s*)?forceRefresh(?:\s*\))?\s*=>)/.test(src);
+      } catch {}
+    }
     const arg = wantsBool ? Boolean(forceRefresh) : { forceRefresh: Boolean(forceRefresh) };
     return new Promise((resolve) => resolve(svc.retrieveUserQuotaSummary(arg)));
+  }
+
+  function isOverviewPanelVisible() {
+    if (!FEAT.overviewPanel) return false;
+    const panel = document.querySelector('[data-testid="overview-panel"]');
+    return Boolean(panel && !panel.hidden && panel.getAttribute('aria-hidden') !== 'true');
+  }
+
+  function scheduleAutoQuotaRefresh(delayMs = 650, minGapMs = 5000) {
+    if (disposed) return;
+    if (autoQuotaRefreshTimer) {
+      cancelLater(autoQuotaRefreshTimer);
+      autoQuotaRefreshTimer = 0;
+    }
+    const sinceLast = Date.now() - lastForceQuotaFetchTs;
+    const waitMs = Math.max(delayMs, lastForceQuotaFetchTs > 0 ? minGapMs - sinceLast : delayMs);
+    autoQuotaRefreshTimer = later(() => {
+      autoQuotaRefreshTimer = 0;
+      if (disposed) return;
+      if (typeof document.visibilityState === 'string' && document.visibilityState === 'hidden') return;
+      if (discoverQuotaService(false)) {
+        fetchQuotaSummary(true);
+      }
+    }, Math.max(60, waitMs));
   }
 
   function fetchQuotaSummary(forceRefresh = false) {
@@ -2331,6 +2690,7 @@
         const rawGroups = (res && res.response && res.response.groups) || (res && res.groups) || [];
         cachedQuotaGroups = rawGroups.filter((g) => g && Array.isArray(g.buckets) && g.buckets.length > 0);
         lastQuotaFetchTs = Date.now();
+        if (forceRefresh) lastForceQuotaFetchTs = lastQuotaFetchTs;
         persistQuotaSnapshot();
         if (quotaHoldTimer) {
           cancelLater(quotaHoldTimer);
@@ -2339,6 +2699,7 @@
         const popEl = document.getElementById('ag-claude-quota-popover');
         if (popEl) popEl.removeAttribute('data-loading-hold');
         if (quotaPopoverOpen) renderQuotaPopoverBody();
+        if (FEAT.overviewPanel) renderOverviewPanel(false);
         return cachedQuotaGroups;
       })
       .catch(() => {
@@ -2486,6 +2847,13 @@
     pop.style.bottom = `${bottom}px`;
   }
 
+  function formatQuotaUsedPctStr(val) {
+    const clamped = Math.max(0, Math.min(100, val));
+    if (clamped <= 0) return '0';
+    if (clamped >= 99.95) return '100';
+    return clamped.toFixed(1).replace(/\.0$/, '');
+  }
+
   function renderQuotaPopoverBody() {
     const pop = ensureQuotaPopover();
     const curCid = getActiveCascadeId();
@@ -2582,7 +2950,8 @@
               : typeof b.remainingFraction === 'number'
                 ? b.remainingFraction
                 : 1;
-          const usedPct = Math.max(0, Math.min(100, Math.round((1 - rem) * 100)));
+          const usedRaw = Math.max(0, Math.min(100, (1 - rem) * 100));
+          const usedPctStr = formatQuotaUsedPctStr(usedRaw);
           const win = String(b.window || '').trim().toLowerCase();
           const title =
             win === '5h'
@@ -2592,14 +2961,14 @@
                 : win === 'daily'
                   ? L(`每日 · ${grpShort}`, `Daily · ${grpShort}`)
                   : b.displayName || L('使用限额', 'Usage limit');
-          const resetTxt = formatResetLabel(b, usedPct);
-          const fillCol = barColorForPct(usedPct, 75, 90);
+          const resetTxt = formatResetLabel(b, usedRaw);
+          const fillCol = barColorForPct(usedRaw, 75, 90);
           return `<div class="ag-qp-item">
             <div class="ag-qp-row">
               <span class="ag-qp-title">${escapeHtml(title)}</span>
-              <span class="ag-qp-meta"><span class="ag-qp-reset">${escapeHtml(resetTxt)}</span><span class="ag-qp-pct">${usedPct}%</span></span>
+              <span class="ag-qp-meta"><span class="ag-qp-reset">${escapeHtml(resetTxt)}</span><span class="ag-qp-pct">${usedPctStr}%</span></span>
             </div>
-            <div class="ag-qp-track"><div class="ag-qp-fill" style="width:${usedPct}%;background:${fillCol}"></div></div>
+            <div class="ag-qp-track"><div class="ag-qp-fill" style="width:${usedRaw.toFixed(1)}%;background:${fillCol}"></div></div>
           </div>`;
         })
         .join('');
@@ -2637,7 +3006,7 @@
     quotaPopoverOpen = true;
     selectedQuotaGroupIdx = -1;
     discoverQuotaService(true);
-    const needForce = !cachedQuotaGroups || Date.now() - lastQuotaFetchTs > 5000;
+    const needForce = !cachedQuotaGroups || Date.now() - lastForceQuotaFetchTs > 5000;
     fetchQuotaSummary(needForce);
     const ring = document.getElementById('ag-claude-ctx-ring');
     if (ring) ring.setAttribute('data-open', 'true');
@@ -2731,7 +3100,7 @@
   }
 
   function ensureComposerContextRing() {
-    const inputBox = document.getElementById('antigravity.agentSidePanelInputBox');
+    const inputBox = getActiveInputBox();
     if (!inputBox) return;
 
     /* On the Home `/` screen, the composer has a top project/location row that ALSO matches
@@ -2776,8 +3145,8 @@
         )}" stroke-dashoffset="${RING_CIRC.toFixed(2)}"/>` +
         '</svg>';
       ring.addEventListener('pointerenter', () => {
-        if (!quotaPopoverOpen && (!cachedQuotaGroups || Date.now() - lastQuotaFetchTs > 12000)) {
-          fetchQuotaSummary(false);
+        if (!quotaPopoverOpen && (!cachedQuotaGroups || Date.now() - lastForceQuotaFetchTs > 10000)) {
+          fetchQuotaSummary(true);
         }
       });
       ring.addEventListener('click', (e) => {
@@ -2800,8 +3169,8 @@
     if (!quotaWarmupDone && discoverQuotaService(false)) {
       quotaWarmupDone = true;
       later(() => {
-        if (!disposed && FEAT.contextRing && (!cachedQuotaGroups || Date.now() - lastQuotaFetchTs > 15000)) {
-          fetchQuotaSummary(false);
+        if (!disposed && FEAT.contextRing && (!cachedQuotaGroups || Date.now() - lastForceQuotaFetchTs > 10000)) {
+          fetchQuotaSummary(true);
         }
       }, 120);
     }
@@ -2867,9 +3236,16 @@
 
   let modelPopoverOpen = false;
   let activeModelSubmenu = null; // null | 'effort' | 'more'
+  let activeModelTrimenu = null; // null | { kind: 'planner', familyName } | { kind: 'executor' }
   let activeModelTriggerBtn = null;
   let lastPreferredEffort = 'Medium';
   let currentCatalogSnapshot = null;
+  let cachedPrefStore = null;
+  let prefStoreUnsub = null;
+  let fallbackExecutorModelVal = 0;
+  let cachedExecutorRoleBaseIds = null;
+  let executorRolesFetchInFlight = false;
+  let executorRolesLastTryTs = 0;
 
   function escapeHtml(str) {
     return String(str || '')
@@ -2903,6 +3279,99 @@
         if (next !== raw) node.nodeValue = next;
       }
     }
+  }
+
+  function isOrchestratorModelOpt(opt) {
+    if (!opt) return false;
+    const id = typeof opt.modelId === 'string' ? opt.modelId : '';
+    if (
+      id === 'gemini-pro-coordinator' ||
+      id === 'gemini-pro-orchestrator' ||
+      id.startsWith('gemini-pro-orchestrator-')
+    ) {
+      return true;
+    }
+    return /orchestrator|编排器/i.test(String(opt.label || ''));
+  }
+
+  function parseModelLabelEffort(rawLabel) {
+    const normalizedLabel = String(rawLabel || '')
+      .replace(/编排器\s*\(([^)]+)\)/g, 'Orchestrator ($1)')
+      .replace(/\s*\(Extra High\)\s*$/i, ' (XHigh)');
+    const m = normalizedLabel.match(EFFORT_LABEL_RE);
+    const baseName = m ? m[1].trim() : normalizedLabel.trim();
+    const effort = m ? EFFORT_NORM[m[2].toLowerCase()] || m[2] : null;
+    return { baseName, effort };
+  }
+
+  function modelCoreRank(name) {
+    if (/carbon/i.test(name)) return 0;
+    if (/neon/i.test(name)) return 1;
+    if (/argon/i.test(name)) return 2;
+    if (/hydrogen/i.test(name)) return 3;
+    if (/flash/i.test(name)) return 4;
+    return 10;
+  }
+
+  function sortFamilyVariants(variants) {
+    return variants.sort((a, b) => {
+      const ra = a.effort && EFFORT_RANK[a.effort] !== undefined ? EFFORT_RANK[a.effort] : 99;
+      const rb = b.effort && EFFORT_RANK[b.effort] !== undefined ? EFFORT_RANK[b.effort] : 99;
+      return ra - rb;
+    });
+  }
+
+  function matchPlannerFromTriggerText(rawText, planners) {
+    let txt = String(rawText || '').trim().replace(/\s+/g, ' ');
+    if (!txt) return null;
+    txt = txt
+      .replace(/^Select model,\s*current:\s*/i, '')
+      .replace(/\s*·\s*[^·]*$/, '')
+      .trim();
+    if (!/^(?:Orchestrator|编排器)\s+/i.test(txt)) return null;
+    txt = txt.replace(/^(?:Orchestrator|编排器)\s+/i, '').trim();
+    const m = txt.match(/^(.*?)\s+(Low|Medium|High|Extra High|XHigh|Extra|Max)$/i);
+    const wantedBase = (m ? m[1] : txt).trim().toLowerCase();
+    const rawEff = m ? m[2].toLowerCase() : '';
+    const wantedEff = rawEff ? (rawEff === 'extra high' ? 'XHigh' : EFFORT_NORM[rawEff] || m[2]) : null;
+    if (!wantedBase) return null;
+    let baseMatch = null;
+    for (const p of planners) {
+      const parsed = parseModelLabelEffort(p.label);
+      if (parsed.baseName.toLowerCase() !== wantedBase) continue;
+      if (wantedEff && parsed.effort === wantedEff) return p;
+      if (!baseMatch) baseMatch = p;
+    }
+    return baseMatch;
+  }
+
+  function resolveActiveOrchestratorPlanner(api, planners) {
+    if (!Array.isArray(planners) || !planners.length) return null;
+    const pickVal = api && api.orchestratorPick ? api.orchestratorPick.model : undefined;
+    if (pickVal && pickVal !== 0) {
+      const byPick = planners.find((p) => p.value === pickVal);
+      if (byPick) return byPick;
+    }
+    const nativeBtn = document.querySelector('button[data-testid="model-selector-trigger"]');
+    if (nativeBtn) {
+      const candidates = [nativeBtn.getAttribute('aria-label'), nativeBtn.textContent];
+      for (const raw of candidates) {
+        const matched = matchPlannerFromTriggerText(raw, planners);
+        if (matched) return matched;
+      }
+    }
+    const defPlanner = api && api.orchestratorDefaultPlanner;
+    if (defPlanner) {
+      const byDef =
+        planners.find(
+          (p) =>
+            (defPlanner.value !== undefined && p.value === defPlanner.value) ||
+            (defPlanner.modelId && p.modelId === defPlanner.modelId) ||
+            (defPlanner.label && p.label === defPlanner.label)
+        ) || null;
+      if (byDef) return byDef;
+    }
+    return planners[0];
   }
 
   function buildReduxModelSelectorApi() {
@@ -2948,12 +3417,25 @@
         customModels.find((m) => m.value === defVal) ||
         modelOptions.find((m) => !m.disabled) ||
         modelOptions[0];
+      const orchMap = (st && st.modelSelection && st.modelSelection.orchestratorByConversation) || {};
+      const draftOrchModel = orchMap[''] !== undefined ? orchMap[''] : 0;
       return {
+        isReduxFallback: true,
         modelOptions,
         customModels,
         selectedModel,
         open: false,
         setIsOpen: () => {},
+        orchestratorPick: {
+          model: draftOrchModel,
+          select: (modelVal) => {
+            if (modelVal === undefined || typeof store.dispatch !== 'function') return;
+            store.dispatch({
+              type: 'modelSelection/orchestratorModelPicked',
+              payload: { model: modelVal }
+            });
+          }
+        },
         setSelectedModel: (opt) => {
           if (!opt || opt.value === undefined || typeof store.dispatch !== 'function') return;
           store.dispatch({
@@ -2976,17 +3458,20 @@
       (!btnEl && activeModelTriggerBtn && activeModelTriggerBtn.hasAttribute && activeModelTriggerBtn.hasAttribute('data-ag-pd-model-trigger'))
     );
     const nativeBtn = document.querySelector('button[data-testid="model-selector-trigger"]');
+    const isValidApi = (obj) =>
+      Boolean(obj && typeof obj === 'object' && typeof obj.setSelectedModel === 'function' && Array.isArray(obj.modelOptions) && obj.modelOptions.length > 0);
     const readNativeApi = (btn) => {
       if (!btn) return null;
       const fk = Object.keys(btn).find((k) => k.startsWith('__reactFiber$'));
       let f = fk ? btn[fk] : null;
-      for (let i = 0; i < 26 && f; i++, f = f.return) {
+      let fallback = null;
+      for (let i = 0; i < 28 && f; i++, f = f.return) {
         const p = f.memoizedProps;
-        if (p && typeof p.setSelectedModel === 'function' && Array.isArray(p.modelOptions) && p.modelOptions.length > 0) {
-          return p;
-        }
+        if (!p) continue;
+        if (isValidApi(p.value)) return p.value;
+        if (!fallback && isValidApi(p)) fallback = p;
       }
-      return null;
+      return fallback;
     };
 
     if (isProjectTrigger) {
@@ -2994,8 +3479,28 @@
       const nativeApi = readNativeApi(nativeBtn);
       if (reduxApi) {
         if (nativeApi) {
+          const reduxPick = reduxApi.orchestratorPick;
+          const nativePick = nativeApi.orchestratorPick;
+          const mergedPick =
+            (reduxPick && typeof reduxPick.select === 'function') || (nativePick && typeof nativePick.select === 'function')
+              ? {
+                  model: (reduxPick && reduxPick.model) || (nativePick && nativePick.model) || 0,
+                  select: (val) => {
+                    try {
+                      if (reduxPick && typeof reduxPick.select === 'function') reduxPick.select(val);
+                    } catch {}
+                    try {
+                      if (nativePick && typeof nativePick.select === 'function') nativePick.select(val);
+                    } catch {}
+                  }
+                }
+              : undefined;
           return {
             ...reduxApi,
+            orchestratorPlanners: nativeApi.orchestratorPlanners,
+            orchestratorPlannerIndex: nativeApi.orchestratorPlannerIndex,
+            orchestratorDefaultPlanner: nativeApi.orchestratorDefaultPlanner,
+            ...(mergedPick ? { orchestratorPick: mergedPick } : {}),
             setSelectedModel: (opt) => {
               reduxApi.setSelectedModel(opt);
               const match = nativeApi.modelOptions.find(
@@ -3013,6 +3518,12 @@
       return null;
     }
 
+    if (btnEl && btnEl.matches && btnEl.matches('button[data-testid="model-selector-trigger"]')) {
+      /* Stay scoped to this trigger's split pane; never steal another pane's native trigger API */
+      const ownApi = readNativeApi(btnEl);
+      if (ownApi) return ownApi;
+      return buildReduxModelSelectorApi();
+    }
     const candidates = [];
     if (btnEl) candidates.push(btnEl);
     if (nativeBtn && !candidates.includes(nativeBtn)) candidates.push(nativeBtn);
@@ -3025,6 +3536,59 @@
       if (api) return api;
     }
     return buildReduxModelSelectorApi();
+  }
+
+  /* ---- Native pass-through: this menu replaces Antigravity's own model menu, so anything the native menu
+     gains in a new release would be hidden behind it. Two guards keep official features reachable:
+       hard gap -> the native menu is in a mode this menu cannot drive correctly: step aside entirely;
+       soft gap -> the native menu offers extra options: keep this menu, flag the "Native menu" row.
+     Option/Alt + click on the trigger always opens the native menu. ---- */
+  const KNOWN_MODEL_API_KEYS = new Set([
+    'placement', 'selectedModel', 'setSelectedModel', 'modelSorts', 'modelOptions', 'userStatus', 'refreshModels',
+    'open', 'setIsOpen', 'customModels', 'supportsCustomModels', 'showCustomModelHeader', 'onAddCustomModel',
+    'onEditCustomModel', 'bestOfNConfig', 'contextWindow', 'isModelListLoading', 'finalFocus', 'footerExtra',
+    'orchestratorPick', 'children', 'groups', 'effortIndex', 'orchestratorPlanners', 'orchestratorPlannerIndex',
+    'orchestratorDefaultPlanner'
+  ]);
+  let bypassNativeModelTriggerUntil = 0;
+
+  function isCustomCssDisabled() {
+    return Boolean(typeof ctx !== 'undefined' && ctx && ctx.config && ctx.config.modules && ctx.config.modules.customCss === false);
+  }
+
+  function isNativeModelTriggerBtn(btn) {
+    return Boolean(btn && btn.matches && btn.matches('button[data-testid="model-selector-trigger"]'));
+  }
+
+  function canOpenNativeModelMenu(api, btn) {
+    return isNativeModelTriggerBtn(btn);
+  }
+
+  function nativeModelMenuGaps(api) {
+    const gaps = { hard: [], soft: [] };
+    if (!api || api.isReduxFallback) return gaps;
+    if (api.bestOfNConfig && api.bestOfNConfig.isBestOfNEnabled === true) gaps.hard.push('bestOfN');
+    if (api.footerExtra) gaps.soft.push('footerExtra');
+    if (api.supportsCustomModels === true) gaps.soft.push('customModels');
+    if (
+      api.contextWindow &&
+      (api.modelOptions || []).some((o) => o && Array.isArray(o.contextWindowOptions) && o.contextWindowOptions.length > 0)
+    ) {
+      gaps.soft.push('contextWindow');
+    }
+    for (const k of Object.keys(api)) {
+      if (!KNOWN_MODEL_API_KEYS.has(k)) gaps.soft.push(`new:${k}`);
+    }
+    return gaps;
+  }
+
+  function shouldDeferToNativeModelMenu(e, trigger, api) {
+    if (!isNativeModelTriggerBtn(trigger)) return false;
+    if (Date.now() < bypassNativeModelTriggerUntil) return true;
+    if (isCustomCssDisabled()) return true;
+    if (e && e.altKey) return true;
+    if (!api) return true;
+    return nativeModelMenuGaps(api).hard.length > 0;
   }
 
   function formatProjectComposerModelParts(api) {
@@ -3059,14 +3623,38 @@
     }
   }
 
-  function applyModelSelectionOption(api, targetOpt) {
+  function applyModelSelectionOption(api, targetOpt, orchestratorPlannerOpt) {
     if (!targetOpt) return;
+    const isReduxFallback = Boolean(!api || api.isReduxFallback);
+    if (orchestratorPlannerOpt && orchestratorPlannerOpt.value !== undefined) {
+      let calledNativeOrch = false;
+      if (api && api.orchestratorPick && typeof api.orchestratorPick.select === 'function') {
+        try {
+          api.orchestratorPick.select(orchestratorPlannerOpt.value);
+          calledNativeOrch = true;
+        } catch {}
+      }
+      if (!calledNativeOrch || isReduxFallback) {
+        try {
+          const { store } = resolveProjectsStoreAndBindings();
+          if (store && typeof store.dispatch === 'function') {
+            store.dispatch({
+              type: 'modelSelection/orchestratorModelPicked',
+              payload: { model: orchestratorPlannerOpt.value }
+            });
+          }
+        } catch {}
+      }
+    }
+    let calledNativeSelect = false;
     if (api && typeof api.setSelectedModel === 'function') {
       try {
         api.setSelectedModel(targetOpt);
+        calledNativeSelect = true;
       } catch {}
     }
-    if (targetOpt.value !== undefined) {
+    /* Only mirror into global Redux modelSelection when no native session setter handled it (or on Redux fallback) */
+    if ((!calledNativeSelect || isReduxFallback) && targetOpt.value !== undefined) {
       try {
         const { store } = resolveProjectsStoreAndBindings();
         if (store && typeof store.dispatch === 'function') {
@@ -3093,12 +3681,28 @@
       : [];
     const allOpts = rawOpts.concat(customOpts);
 
+    const rawOrchOpts = rawOpts.filter(isOrchestratorModelOpt);
+    const canonicalOrchOpt =
+      (api.selectedModel && !api.selectedModel.disabled && isOrchestratorModelOpt(api.selectedModel) ? api.selectedModel : null) ||
+      rawOrchOpts[0] ||
+      (api.modelOptions || []).find(isOrchestratorModelOpt) ||
+      null;
+    const orchPlanners = Array.isArray(api.orchestratorPlanners)
+      ? api.orchestratorPlanners.filter((o) => o && !o.disabled && o.label)
+      : [];
+    const hasDynamicOrch = Boolean(
+      orchPlanners.length > 0 &&
+      canonicalOrchOpt &&
+      api.orchestratorPick &&
+      typeof api.orchestratorPick.select === 'function'
+    );
+
     const familyMap = new Map();
     for (const opt of allOpts) {
-      const normalizedLabel = String(opt.label).replace(/编排器\s*\(([^)]+)\)/g, 'Orchestrator ($1)');
-      const m = normalizedLabel.match(EFFORT_LABEL_RE);
-      const baseName = m ? m[1].trim() : normalizedLabel.trim();
-      const effort = m ? EFFORT_NORM[m[2].toLowerCase()] || m[2] : null;
+      if (hasDynamicOrch && isOrchestratorModelOpt(opt)) continue;
+      const parsed = parseModelLabelEffort(opt.label);
+      const baseName = parsed.baseName;
+      const effort = parsed.effort;
       let fam = familyMap.get(baseName);
       if (!fam) {
         fam = { baseName, variants: [] };
@@ -3108,38 +3712,52 @@
     }
 
     for (const fam of familyMap.values()) {
-      fam.variants.sort((a, b) => {
-        const ra = a.effort && EFFORT_RANK[a.effort] !== undefined ? EFFORT_RANK[a.effort] : 99;
-        const rb = b.effort && EFFORT_RANK[b.effort] !== undefined ? EFFORT_RANK[b.effort] : 99;
-        return ra - rb;
-      });
+      sortFamilyVariants(fam.variants);
+    }
+
+    const orchFamilies = [];
+    if (hasDynamicOrch) {
+      const orchFamilyMap = new Map();
+      for (const p of orchPlanners) {
+        const parsed = parseModelLabelEffort(p.label);
+        const famName = `Orchestrator · ${parsed.baseName}`;
+        let fam = orchFamilyMap.get(famName);
+        if (!fam) {
+          fam = { baseName: famName, isOrchestratorFamily: true, variants: [] };
+          orchFamilyMap.set(famName, fam);
+        }
+        fam.variants.push({ effort: parsed.effort, opt: canonicalOrchOpt, plannerOpt: p });
+      }
+      for (const fam of orchFamilyMap.values()) {
+        sortFamilyVariants(fam.variants);
+        orchFamilies.push(fam);
+      }
     }
 
     const families = Array.from(familyMap.values());
-    const isOrch = (f) => /orchestrator/i.test(f.baseName);
+    const isOrch = (f) => Boolean(f && (f.isOrchestratorFamily || /orchestrator/i.test(f.baseName)));
     const isCoreGemini = (f) => /^gemini\b/i.test(f.baseName) && !isOrch(f);
 
-    const coreRank = (name) => {
-      if (/carbon/i.test(name)) return 0;
-      if (/neon/i.test(name)) return 1;
-      if (/argon/i.test(name)) return 2;
-      if (/hydrogen/i.test(name)) return 3;
-      if (/flash/i.test(name)) return 4;
-      return 10;
-    };
-
-    const primaryFamilies = families
+    let primaryFamilies = families
       .filter(isCoreGemini)
-      .sort((a, b) => coreRank(a.baseName) - coreRank(b.baseName))
+      .sort((a, b) => modelCoreRank(a.baseName) - modelCoreRank(b.baseName))
       .slice(0, 5);
+    if (!primaryFamilies.length) {
+      /* Accounts that only expose non-Gemini models (e.g. "Claude Opus 5.5 · Devin") would otherwise get an
+         empty "Models · This chat" list with everything buried under More models: keep the native order. */
+      primaryFamilies = families.filter((f) => !isOrch(f)).slice(0, 5);
+    }
 
     const primarySet = new Set(primaryFamilies);
-    const moreFamilies = families
+    const nonPrimaryEntries = families
       .filter((f) => !primarySet.has(f))
       .map((f) => ({
         group: isOrch(f) ? 'orch' : 'other',
         fam: f
-      }))
+      }));
+    const orchEntries = hasDynamicOrch ? orchFamilies.map((f) => ({ group: 'orch', fam: f })) : [];
+    const moreFamilies = orchEntries
+      .concat(nonPrimaryEntries)
       .sort((a, b) => (a.group === b.group ? 0 : a.group === 'orch' ? -1 : 1));
 
     const sel = api.selectedModel || null;
@@ -3147,19 +3765,42 @@
     let activeVariant = null;
 
     if (sel) {
-      for (const fam of families) {
-        for (const v of fam.variants) {
-          if (
-            (sel.value !== undefined && v.opt.value === sel.value) ||
-            (sel.modelId && v.opt.modelId === sel.modelId) ||
-            v.opt.label === sel.label
-          ) {
-            activeFamily = fam;
-            activeVariant = v;
-            break;
+      if (hasDynamicOrch && isOrchestratorModelOpt(sel)) {
+        const activePlanner = resolveActiveOrchestratorPlanner(api, orchPlanners);
+        if (activePlanner) {
+          for (const fam of orchFamilies) {
+            for (const v of fam.variants) {
+              const p = v.plannerOpt;
+              if (
+                p &&
+                ((activePlanner.value !== undefined && p.value === activePlanner.value) ||
+                  (activePlanner.modelId && p.modelId === activePlanner.modelId) ||
+                  p.label === activePlanner.label)
+              ) {
+                activeFamily = fam;
+                activeVariant = v;
+                break;
+              }
+            }
+            if (activeFamily) break;
           }
         }
-        if (activeFamily) break;
+      }
+      if (!activeFamily) {
+        for (const fam of families) {
+          for (const v of fam.variants) {
+            if (
+              (sel.value !== undefined && v.opt.value === sel.value) ||
+              (sel.modelId && v.opt.modelId === sel.modelId) ||
+              v.opt.label === sel.label
+            ) {
+              activeFamily = fam;
+              activeVariant = v;
+              break;
+            }
+          }
+          if (activeFamily) break;
+        }
       }
     }
 
@@ -3184,14 +3825,300 @@
     if (!fam || !fam.variants.length) return null;
     if (desiredEffort) {
       const exact = fam.variants.find((v) => v.effort === desiredEffort);
-      if (exact) return exact.opt;
+      if (exact) return exact;
       if (desiredEffort === 'XHigh' || desiredEffort === 'Max') {
         const high = fam.variants.find((v) => v.effort === 'High');
-        if (high) return high.opt;
+        if (high) return high;
       }
     }
     const med = fam.variants.find((v) => v.effort === 'Medium');
-    return (med || fam.variants[0]).opt;
+    return med || fam.variants[0];
+  }
+
+  function bindPrefStoreSubscription(ps) {
+    if (prefStoreUnsub) {
+      try {
+        prefStoreUnsub();
+      } catch {}
+      prefStoreUnsub = null;
+    }
+    if (ps && typeof ps.onDidChange === 'function') {
+      try {
+        const sub = ps.onDidChange(() => {
+          if (!disposed && modelPopoverOpen) renderModelPopovers();
+        });
+        if (typeof sub === 'function') prefStoreUnsub = sub;
+        else if (sub && typeof sub.dispose === 'function') prefStoreUnsub = () => sub.dispose();
+      } catch {}
+    }
+  }
+
+  function discoverPrefStore() {
+    if (
+      typeof window === 'object' &&
+      window &&
+      window.__ag_test_pref_store &&
+      typeof window.__ag_test_pref_store.getState === 'function'
+    ) {
+      if (cachedPrefStore !== window.__ag_test_pref_store) {
+        cachedPrefStore = window.__ag_test_pref_store;
+        bindPrefStoreSubscription(cachedPrefStore);
+      }
+      return cachedPrefStore;
+    }
+    if (cachedPrefStore && typeof cachedPrefStore.getState === 'function') {
+      try {
+        const st = cachedPrefStore.getState();
+        if (st && typeof st.getPrefValue === 'function' && typeof st.setPrefValue === 'function') {
+          return cachedPrefStore;
+        }
+      } catch {}
+    }
+    const root = document.getElementById('root') || (document.body && document.body.firstElementChild);
+    if (!root) return null;
+    const fk = Object.keys(root).find((k) => k.startsWith('__reactContainer') || k.startsWith('__reactFiber'));
+    const start = fk ? root[fk] : null;
+    if (!start) return null;
+    const queue = [start];
+    const seen = new Set();
+    let steps = 0;
+    const isPrefStore = (cand) => {
+      if (!cand || typeof cand.getState !== 'function') return false;
+      try {
+        const st = cand.getState();
+        return Boolean(st && typeof st.getPrefValue === 'function' && typeof st.setPrefValue === 'function');
+      } catch {
+        return false;
+      }
+    };
+    while (queue.length && steps < 600) {
+      const f = queue.shift();
+      if (!f || seen.has(f)) continue;
+      seen.add(f);
+      steps++;
+      const mp = f.memoizedProps;
+      if (mp && isPrefStore(mp.value)) {
+        cachedPrefStore = mp.value;
+        bindPrefStoreSubscription(mp.value);
+        return mp.value;
+      }
+      for (let dep = f.dependencies && f.dependencies.firstContext; dep; dep = dep.next) {
+        if (isPrefStore(dep.memoizedValue)) {
+          cachedPrefStore = dep.memoizedValue;
+          bindPrefStoreSubscription(dep.memoizedValue);
+          return dep.memoizedValue;
+        }
+      }
+      if (f.child) queue.push(f.child);
+      if (f.sibling) queue.push(f.sibling);
+    }
+    return null;
+  }
+
+  function extractLsClientCandidate(cand) {
+    if (!cand || typeof cand !== 'object') return null;
+    if (typeof cand.getMendelFlags === 'function') return cand;
+    if (cand.lsClient && typeof cand.lsClient.getMendelFlags === 'function') return cand.lsClient;
+    if (cand.client && typeof cand.client.getMendelFlags === 'function') return cand.client;
+    return null;
+  }
+
+  function ensureOrchestratorRolesLoaded() {
+    if (
+      typeof window === 'object' &&
+      window &&
+      Array.isArray(window.__ag_test_executor_roles)
+    ) {
+      cachedExecutorRoleBaseIds = window.__ag_test_executor_roles.filter((s) => typeof s === 'string');
+      return;
+    }
+    if (Array.isArray(cachedExecutorRoleBaseIds)) return;
+    const now = Date.now();
+    if (executorRolesFetchInFlight || now - executorRolesLastTryTs < 3000) return;
+
+    const root = document.getElementById('root') || (document.body && document.body.firstElementChild);
+    const fk = root && Object.keys(root).find((k) => k.startsWith('__reactContainer') || k.startsWith('__reactFiber'));
+    if (!fk) return;
+    const queue = [root[fk]];
+    const seen = new Set();
+    let lsClient = null;
+    while (queue.length && seen.size < 600 && !lsClient) {
+      const f = queue.shift();
+      if (!f || seen.has(f)) continue;
+      seen.add(f);
+      const mp = f.memoizedProps;
+      lsClient = extractLsClientCandidate(mp) || extractLsClientCandidate(mp && mp.value);
+      if (!lsClient) {
+        for (let dep = f.dependencies && f.dependencies.firstContext; dep; dep = dep.next) {
+          lsClient = extractLsClientCandidate(dep.memoizedValue);
+          if (lsClient) break;
+        }
+      }
+      if (!lsClient && f.memoizedState) {
+        let s = f.memoizedState;
+        for (let k = 0; k < 15 && s && !lsClient; k++, s = s.next) {
+          lsClient = extractLsClientCandidate(s.memoizedState);
+        }
+      }
+      if (f.child) queue.push(f.child);
+      if (f.sibling) queue.push(f.sibling);
+    }
+    if (!lsClient) return;
+    executorRolesLastTryTs = now;
+    executorRolesFetchInFlight = true;
+    try {
+      Promise.resolve(lsClient.getMendelFlags({}))
+        .then((resp) => {
+          executorRolesFetchInFlight = false;
+          if (disposed) return;
+          const exps = (resp && resp.experimentConfig && resp.experimentConfig.experiments) || [];
+          const hit = Array.isArray(exps) ? exps.find((x) => x && x.keyString === 'orchestrator-model-roles') : null;
+          const rawStr = hit && hit.payload && hit.payload.value;
+          if (typeof rawStr === 'string' && rawStr) {
+            const parsed = JSON.parse(rawStr);
+            if (
+              parsed &&
+              Array.isArray(parsed.executors) &&
+              parsed.executors.every((s) => typeof s === 'string')
+            ) {
+              cachedExecutorRoleBaseIds = parsed.executors.slice();
+              if (modelPopoverOpen) renderModelPopovers();
+            }
+          }
+        })
+        .catch(() => {
+          executorRolesFetchInFlight = false;
+        });
+    } catch {
+      executorRolesFetchInFlight = false;
+    }
+  }
+
+  function readExecutorModelPrefValue() {
+    const ps = discoverPrefStore();
+    if (ps) {
+      try {
+        const v = Number(ps.getState().getPrefValue('orchestratorExecutorModel'));
+        if (Number.isFinite(v) && v >= 0) return v;
+      } catch {}
+    }
+    try {
+      const { store } = resolveProjectsStoreAndBindings();
+      const st = store && typeof store.getState === 'function' ? store.getState() : null;
+      const rv = Number(st && st.userConfig && st.userConfig.userSettings && st.userConfig.userSettings.orchestratorExecutorModel);
+      if (Number.isFinite(rv) && rv >= 0) return rv;
+    } catch {}
+    return fallbackExecutorModelVal;
+  }
+
+  function applyExecutorModelPrefValue(modelVal, defaultVal) {
+    const rawNext = Number(modelVal) > 0 ? Number(modelVal) : 0;
+    const nextVal = defaultVal && rawNext === Number(defaultVal) ? 0 : rawNext;
+    fallbackExecutorModelVal = nextVal;
+    const ps = discoverPrefStore();
+    if (ps) {
+      try {
+        ps.getState().setPrefValue('orchestratorExecutorModel', nextVal);
+      } catch {}
+    }
+  }
+
+  function formatShortExecutorLabel(baseName, effort) {
+    const shortBase =
+      String(baseName || '')
+        .replace(/^Gemini\s+\d+(?:\.\d+)?\s+/i, '')
+        .replace(/^Claude\s+/i, '')
+        .trim() || String(baseName || '').trim();
+    const eff = effort ? displayEffortLabel(effort) : '';
+    return eff ? `${shortBase} · ${eff}` : shortBase;
+  }
+
+  function buildExecutorCatalog(api) {
+    ensureOrchestratorRolesLoaded();
+    const empty = {
+      families: [],
+      activeFamily: null,
+      activeVariant: null,
+      defaultFamily: null,
+      defaultVariant: null,
+      isDefault: true,
+      shortSummary: '',
+      defaultShortLabel: ''
+    };
+    /* Strictly mirror official Antigravity oW() / LSb(): never expose non-whitelisted executor models */
+    if (!Array.isArray(cachedExecutorRoleBaseIds) || cachedExecutorRoleBaseIds.length === 0) {
+      return empty;
+    }
+    const rawOpts = ((api && api.modelOptions) || []).filter(
+      (o) => o && !o.disabled && !o.isCustom && o.value !== undefined && o.value !== 0 && o.label && !isOrchestratorModelOpt(o)
+    );
+    if (!rawOpts.length) return empty;
+    const roleOrder = cachedExecutorRoleBaseIds;
+    const roleSet = new Set(roleOrder);
+    const stripEffortId = (id) => String(id || '').replace(/-(low|medium|high|xhigh|max)$/i, '');
+    const candidateOpts = rawOpts.filter((o) => o.modelId && roleSet.has(stripEffortId(o.modelId)));
+    if (!candidateOpts.length) return empty;
+
+    const famMap = new Map();
+    for (const opt of candidateOpts) {
+      const parsed = parseModelLabelEffort(opt.label);
+      const baseId = stripEffortId(opt.modelId);
+      let fam = famMap.get(baseId);
+      if (!fam) {
+        fam = { baseName: parsed.baseName, baseId, variants: [] };
+        famMap.set(baseId, fam);
+      }
+      fam.variants.push({ effort: parsed.effort, opt });
+    }
+    const families = Array.from(famMap.values());
+    for (const fam of families) {
+      sortFamilyVariants(fam.variants);
+    }
+    families.sort((a, b) => roleOrder.indexOf(a.baseId) - roleOrder.indexOf(b.baseId));
+
+    const defaultFamily = families[0] || null;
+    const defaultVariant =
+      defaultFamily && defaultFamily.variants.length
+        ? defaultFamily.variants[defaultFamily.variants.length - 1]
+        : null;
+
+    const prefVal = readExecutorModelPrefValue();
+    let activeFamily = null;
+    let activeVariant = null;
+    let isDefault = true;
+    if (prefVal > 0) {
+      for (const fam of families) {
+        for (const v of fam.variants) {
+          if (v.opt && v.opt.value === prefVal) {
+            activeFamily = fam;
+            activeVariant = v;
+            isDefault = Boolean(defaultVariant && defaultVariant.opt && defaultVariant.opt.value === prefVal);
+            break;
+          }
+        }
+        if (activeFamily) break;
+      }
+    }
+    if (!activeFamily) {
+      activeFamily = defaultFamily;
+      activeVariant = defaultVariant;
+      isDefault = true;
+    }
+
+    return {
+      families,
+      activeFamily,
+      activeVariant,
+      defaultFamily,
+      defaultVariant,
+      isDefault,
+      shortSummary: activeFamily
+        ? formatShortExecutorLabel(activeFamily.baseName, activeVariant && activeVariant.effort)
+        : '',
+      defaultShortLabel: defaultFamily
+        ? formatShortExecutorLabel(defaultFamily.baseName, defaultVariant && defaultVariant.effort)
+        : ''
+    };
   }
 
   function ensureModelPopovers() {
@@ -3208,6 +4135,7 @@
         const nextSub = kind === 'none' ? null : kind;
         if (activeModelSubmenu !== nextSub) {
           activeModelSubmenu = nextSub;
+          activeModelTrimenu = null;
           renderModelPopovers();
         }
       });
@@ -3216,12 +4144,12 @@
         const famBtn = e.target.closest('[data-ag-cm-family]');
         if (famBtn) {
           const baseName = famBtn.getAttribute('data-ag-cm-family');
-          const api = discoverModelSelectorApi();
+          const api = discoverModelSelectorApi(activeModelTriggerBtn);
           if (api) {
             const cat = buildModelCatalog(api);
             const fam = cat.primaryFamilies.find((f) => f.baseName === baseName);
-            const targetOpt = pickVariantForFamily(fam, lastPreferredEffort);
-            if (targetOpt) applyModelSelectionOption(api, targetOpt);
+            const targetVar = pickVariantForFamily(fam, lastPreferredEffort);
+            if (targetVar && targetVar.opt) applyModelSelectionOption(api, targetVar.opt, targetVar.plannerOpt);
           }
           closeClaudeModelPopover();
           return;
@@ -3231,7 +4159,29 @@
           if (subTrigger.getAttribute('data-disabled') === 'true') return;
           const kind = subTrigger.getAttribute('data-ag-cm-subtrigger');
           activeModelSubmenu = activeModelSubmenu === kind ? null : kind;
+          activeModelTrimenu = null;
           renderModelPopovers();
+          return;
+        }
+        if (e.target.closest('[data-ag-cm-native]')) {
+          const btn = activeModelTriggerBtn || findModelTriggerBtn();
+          const api = discoverModelSelectorApi(btn);
+          closeClaudeModelPopover();
+          if (isNativeModelTriggerBtn(btn)) {
+            later(() => {
+              if (api && !api.isReduxFallback && typeof api.setIsOpen === 'function') {
+                try {
+                  api.setIsOpen(true);
+                  return;
+                } catch {}
+              }
+              /* Fallback pass-through when native Fiber API is unavailable */
+              bypassNativeModelTriggerUntil = Date.now() + 350;
+              try {
+                btn.click();
+              } catch {}
+            }, 0);
+          }
         }
       });
       document.body.appendChild(mainPop);
@@ -3243,48 +4193,140 @@
       subPop.id = 'ag-claude-model-subpop';
       subPop.setAttribute('data-ag-i18n-ignore', '1');
       subPop.setAttribute('data-open', 'false');
+      subPop.addEventListener('mouseover', (e) => {
+        const row = e.target.closest('[data-ag-cm-tri-hover]');
+        if (!row) return;
+        const kind = row.getAttribute('data-ag-cm-tri-hover');
+        let nextTri = null;
+        if (kind === 'executor') {
+          nextTri = { kind: 'executor' };
+        } else if (kind === 'planner') {
+          const familyName = row.getAttribute('data-ag-cm-tri-family') || '';
+          if (familyName) nextTri = { kind: 'planner', familyName };
+        }
+        const same =
+          (activeModelTrimenu === null && nextTri === null) ||
+          (activeModelTrimenu &&
+            nextTri &&
+            activeModelTrimenu.kind === nextTri.kind &&
+            activeModelTrimenu.familyName === nextTri.familyName);
+        if (!same) {
+          activeModelTrimenu = nextTri;
+          renderModelPopovers();
+        }
+      });
       subPop.addEventListener('click', (e) => {
         e.stopPropagation();
         const effBtn = e.target.closest('[data-ag-cm-effort]');
         if (effBtn) {
           const eff = effBtn.getAttribute('data-ag-cm-effort');
-          const api = discoverModelSelectorApi();
+          const api = discoverModelSelectorApi(activeModelTriggerBtn);
           if (api) {
             const cat = buildModelCatalog(api);
             if (cat.activeFamily) {
               const v = cat.activeFamily.variants.find((x) => x.effort === eff);
               if (v && v.opt) {
                 lastPreferredEffort = eff;
-                applyModelSelectionOption(api, v.opt);
+                applyModelSelectionOption(api, v.opt, v.plannerOpt);
               }
             }
           }
           closeClaudeModelPopover();
           return;
         }
+        const triTrig = e.target.closest('[data-ag-cm-tritrigger]');
+        if (triTrig) {
+          const kind = triTrig.getAttribute('data-ag-cm-tritrigger');
+          if (kind === 'executor') {
+            activeModelTrimenu =
+              activeModelTrimenu && activeModelTrimenu.kind === 'executor' ? null : { kind: 'executor' };
+            renderModelPopovers();
+          }
+          return;
+        }
         const moreBtn = e.target.closest('[data-ag-cm-more-family]');
         if (moreBtn) {
           const baseName = moreBtn.getAttribute('data-ag-cm-more-family');
-          const api = discoverModelSelectorApi();
+          const api = discoverModelSelectorApi(activeModelTriggerBtn);
           if (api) {
             const cat = buildModelCatalog(api);
             const entry = cat.moreFamilies.find((x) => x.fam.baseName === baseName);
-            const targetOpt = entry ? pickVariantForFamily(entry.fam, lastPreferredEffort) : null;
-            if (targetOpt) applyModelSelectionOption(api, targetOpt);
+            const targetVar = entry ? pickVariantForFamily(entry.fam, lastPreferredEffort) : null;
+            if (targetVar && targetVar.opt) applyModelSelectionOption(api, targetVar.opt, targetVar.plannerOpt);
           }
           closeClaudeModelPopover();
+          return;
         }
       });
       document.body.appendChild(subPop);
     }
 
-    return { mainPop, subPop };
+    let triPop = document.getElementById('ag-claude-model-tripop');
+    if (!triPop) {
+      triPop = document.createElement('div');
+      triPop.id = 'ag-claude-model-tripop';
+      triPop.setAttribute('data-ag-i18n-ignore', '1');
+      triPop.setAttribute('data-open', 'false');
+      triPop.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const orchEffBtn = e.target.closest('[data-ag-cm-orch-effort]');
+        if (orchEffBtn) {
+          const famName = orchEffBtn.getAttribute('data-ag-cm-orch-family');
+          const eff = orchEffBtn.getAttribute('data-ag-cm-orch-effort');
+          const api = discoverModelSelectorApi(activeModelTriggerBtn);
+          if (api && famName && eff) {
+            const cat = buildModelCatalog(api);
+            const entry = cat.moreFamilies.find((x) => x.group === 'orch' && x.fam.baseName === famName);
+            const targetVar = entry ? entry.fam.variants.find((v) => v.effort === eff) : null;
+            if (targetVar && targetVar.opt) {
+              lastPreferredEffort = eff;
+              applyModelSelectionOption(api, targetVar.opt, targetVar.plannerOpt);
+            }
+          }
+          closeClaudeModelPopover();
+          return;
+        }
+        const execValBtn = e.target.closest('[data-ag-cm-exec-val]');
+        if (execValBtn) {
+          const val = Number(execValBtn.getAttribute('data-ag-cm-exec-val')) || 0;
+          const api = discoverModelSelectorApi(activeModelTriggerBtn);
+          const execCat = api ? buildExecutorCatalog(api) : null;
+          const defVal = execCat && execCat.defaultVariant && execCat.defaultVariant.opt ? execCat.defaultVariant.opt.value : 0;
+          applyExecutorModelPrefValue(val, defVal);
+          renderModelPopovers();
+          return;
+        }
+        const execFamBtn = e.target.closest('[data-ag-cm-exec-family]');
+        if (execFamBtn) {
+          const baseName = execFamBtn.getAttribute('data-ag-cm-exec-family');
+          const api = discoverModelSelectorApi(activeModelTriggerBtn);
+          if (api) {
+            const execCat = buildExecutorCatalog(api);
+            const fam = execCat.families.find((f) => f.baseName === baseName);
+            if (fam && fam.variants.length) {
+              const curEff = execCat.activeVariant && execCat.activeVariant.effort;
+              const chosen =
+                (curEff && fam.variants.find((v) => v.effort === curEff)) || fam.variants[fam.variants.length - 1];
+              const defVal = execCat.defaultVariant && execCat.defaultVariant.opt ? execCat.defaultVariant.opt.value : 0;
+              if (chosen && chosen.opt && chosen.opt.value !== undefined) {
+                applyExecutorModelPrefValue(chosen.opt.value, defVal);
+                renderModelPopovers();
+              }
+            }
+          }
+        }
+      });
+      document.body.appendChild(triPop);
+    }
+
+    return { mainPop, subPop, triPop };
   }
 
   function positionModelPopovers() {
     const btn = findModelTriggerBtn();
     const mainPop = document.getElementById('ag-claude-model-popover');
     const subPop = document.getElementById('ag-claude-model-subpop');
+    const triPop = document.getElementById('ag-claude-model-tripop');
     if (!btn || !mainPop) return;
 
     const r = btn.getBoundingClientRect();
@@ -3307,7 +4349,7 @@
 
     if (subPop && subPop.getAttribute('data-open') === 'true') {
       const mr = mainPop.getBoundingClientRect();
-      const subW = 236;
+      const subW = 278;
       let subLeft = Math.round(mr.right + 6);
       if (subLeft + subW > window.innerWidth - 10) {
         subLeft = Math.max(10, Math.round(mr.left - subW - 6));
@@ -3320,13 +4362,44 @@
         subPop.style.top = 'auto';
         subPop.style.bottom = mainPop.style.bottom;
       }
+
+      if (triPop && triPop.getAttribute('data-open') === 'true') {
+        const sr = subPop.getBoundingClientRect();
+        const isExec = triPop.getAttribute('data-tri-kind') === 'executor';
+        const triW = isExec ? 264 : 232;
+        const subOnRight = sr.left >= mr.left;
+        let triLeft = subOnRight ? Math.round(sr.right + 6) : Math.round(sr.left - triW - 6);
+        if (triLeft + triW > window.innerWidth - 10) {
+          triLeft = Math.max(10, Math.round(sr.left - triW - 6));
+        }
+        if (triLeft < 10) {
+          triLeft = Math.min(window.innerWidth - triW - 10, Math.round(sr.right + 6));
+        }
+        triPop.style.left = `${Math.max(10, triLeft)}px`;
+
+        const activeSubRow = subPop.querySelector('[data-active-sub="true"]');
+        const triH = Math.max(triPop.offsetHeight || 0, isExec ? 190 : 170);
+        if (activeSubRow) {
+          const ar = activeSubRow.getBoundingClientRect();
+          const idealTop = Math.round(ar.top - 8);
+          const clampedTop = Math.max(12, Math.min(idealTop, window.innerHeight - triH - 12));
+          triPop.style.top = `${clampedTop}px`;
+          triPop.style.bottom = 'auto';
+        } else if (openBelow) {
+          triPop.style.top = subPop.style.top;
+          triPop.style.bottom = 'auto';
+        } else {
+          triPop.style.top = 'auto';
+          triPop.style.bottom = subPop.style.bottom;
+        }
+      }
     }
   }
 
   function renderModelPopoversRaw() {
-    const api = discoverModelSelectorApi();
+    const api = discoverModelSelectorApi(activeModelTriggerBtn);
     if (!api) return;
-    const { mainPop, subPop } = ensureModelPopovers();
+    const { mainPop, subPop, triPop } = ensureModelPopovers();
     const cat = buildModelCatalog(api);
     currentCatalogSnapshot = cat;
 
@@ -3356,6 +4429,24 @@
       })
       .join('');
 
+    /* Native menu row: always present on the native trigger. When the official menu carries options this
+       menu does not render (agent selector footer, context window, custom models) the hint reads
+       "More options"; the dot is reserved for fields this version has never seen (release drift). */
+    const nativeGaps = nativeModelMenuGaps(api);
+    const nativeHasNewFields = nativeGaps.soft.some((g) => g.startsWith('new:'));
+    const nativeRowHtml = canOpenNativeModelMenu(api, activeModelTriggerBtn || findModelTriggerBtn())
+      ? `<div class="ag-cm-divider"></div>
+      <button type="button" class="ag-cm-row" data-ag-cm-hover="none" data-ag-cm-native="1"${
+        nativeGaps.soft.length ? ` data-ag-cm-native-gaps="${escapeHtml(nativeGaps.soft.join(' '))}"` : ''
+      }>
+        <span style="display:inline-flex;align-items:center;gap:6px;">
+          <span>${L('官方菜单', 'Native menu')}</span>
+          ${nativeHasNewFields ? '<span class="ag-cm-dot"></span>' : ''}
+        </span>
+        <span class="ag-cm-key">${nativeGaps.soft.length ? L('更多选项', 'More options') : L('⌥ 点击', '⌥ Click')}</span>
+      </button>`
+      : '';
+
     const effSubActive = activeModelSubmenu === 'effort' && hasAdjustableEffort ? ' data-active-sub="true"' : '';
     const effDisabled = hasAdjustableEffort ? '' : ' data-disabled="true"';
     const moreSubActive = activeModelSubmenu === 'more' ? ' data-active-sub="true"' : '';
@@ -3381,6 +4472,7 @@
           ${SVG_CM_CHEVRON}
         </span>
       </button>
+      ${nativeRowHtml}
     `;
 
     if (activeModelSubmenu === 'effort' && hasAdjustableEffort) {
@@ -3402,37 +4494,179 @@
           })
           .join('');
       subPop.setAttribute('data-open', 'true');
+      triPop.setAttribute('data-open', 'false');
     } else if (activeModelSubmenu === 'more' && cat.moreFamilies.length > 0) {
-      let lastGrp = '';
-      subPop.innerHTML = cat.moreFamilies
-        .map(({ group, fam }) => {
-          let hdr = '';
-          if (group !== lastGrp) {
-            const groupLabel = group === 'orch' ? L('多智能体编排', 'Orchestrators') : L('其他模型', 'Other models');
-            hdr = `${lastGrp ? '<div class="ag-cm-divider"></div>' : ''}<div class="ag-cm-sec-hdr">${escapeHtml(
-              groupLabel
-            )}</div>`;
-            lastGrp = group;
-          }
-          const on = Boolean(cat.activeFamily && cat.activeFamily.baseName === fam.baseName);
-          return `${hdr}<button type="button" class="ag-cm-row" style="min-height:34px;font-size:13.5px;" data-ag-cm-more-family="${escapeHtml(
-            fam.baseName
-          )}">
-            <span>${escapeHtml(fam.baseName)}</span>
-            ${on ? SVG_CM_CHECK : ''}
-          </button>`;
-        })
-        .join('');
+      const orchEntries = cat.moreFamilies.filter((x) => x.group === 'orch');
+      const otherEntries = cat.moreFamilies.filter((x) => x.group !== 'orch');
+      const execCat = orchEntries.length > 0 ? buildExecutorCatalog(api) : null;
+      const hasExecRow = Boolean(execCat && execCat.families.length > 0);
+      const isExecTriActive = Boolean(activeModelTrimenu && activeModelTrimenu.kind === 'executor' && hasExecRow);
+
+      let subHtml = '';
+      if (orchEntries.length > 0) {
+        subHtml += `<div class="ag-cm-sec-hdr">${escapeHtml(L('多智能体编排', 'Orchestrators'))}</div>`;
+        subHtml += orchEntries
+          .map(({ fam }) => {
+            const on = Boolean(cat.activeFamily && cat.activeFamily.baseName === fam.baseName);
+            const multiEff = fam.variants.filter((v) => Boolean(v.effort));
+            const hasMulti = multiEff.length > 1;
+            const triOn = Boolean(
+              hasMulti &&
+                activeModelTrimenu &&
+                activeModelTrimenu.kind === 'planner' &&
+                activeModelTrimenu.familyName === fam.baseName
+            );
+            const activeEffText =
+              on && cat.activeVariant && cat.activeVariant.effort
+                ? `<span class="ag-cm-orch-eff">${escapeHtml(displayEffortLabel(cat.activeVariant.effort))}</span>`
+                : '';
+            const rightHtml = hasMulti
+              ? `<span class="ag-cm-right">${activeEffText}${SVG_CM_CHEVRON}</span>`
+              : on
+                ? SVG_CM_CHECK
+                : '';
+            return `<button type="button" class="ag-cm-row" style="min-height:34px;font-size:13.5px;" data-ag-cm-more-family="${escapeHtml(
+              fam.baseName
+            )}" data-ag-cm-tri-hover="${hasMulti ? 'planner' : 'none'}" data-ag-cm-tri-family="${escapeHtml(
+              fam.baseName
+            )}"${triOn ? ' data-active-sub="true"' : ''}>
+              <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(fam.baseName)}</span>
+              ${rightHtml}
+            </button>`;
+          })
+          .join('');
+        if (hasExecRow) {
+          subHtml += `<div class="ag-cm-sub-divider"></div>
+            <button type="button" class="ag-cm-row ag-cm-sub-exec-row" data-ag-cm-tri-hover="executor" data-ag-cm-tritrigger="executor"${
+              isExecTriActive ? ' data-active-sub="true"' : ''
+            }>
+              <span class="ag-cm-exec-label">
+                <span>${L('执行模型', 'Executor model')}</span>
+                ${!execCat.isDefault ? '<span class="ag-cm-dot"></span>' : ''}
+              </span>
+              <span class="ag-cm-right ag-cm-exec-summary">
+                <span>${escapeHtml(execCat.shortSummary)}</span>
+                ${SVG_CM_CHEVRON}
+              </span>
+            </button>`;
+        }
+      }
+
+      if (otherEntries.length > 0) {
+        subHtml += `${orchEntries.length > 0 ? '<div class="ag-cm-divider"></div>' : ''}<div class="ag-cm-sec-hdr">${escapeHtml(
+          L('其他模型', 'Other models')
+        )}</div>`;
+        subHtml += otherEntries
+          .map(({ fam }) => {
+            const on = Boolean(cat.activeFamily && cat.activeFamily.baseName === fam.baseName);
+            return `<button type="button" class="ag-cm-row" style="min-height:34px;font-size:13.5px;" data-ag-cm-more-family="${escapeHtml(
+              fam.baseName
+            )}" data-ag-cm-tri-hover="none">
+              <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(fam.baseName)}</span>
+              ${on ? SVG_CM_CHECK : ''}
+            </button>`;
+          })
+          .join('');
+      }
+
+      subPop.innerHTML = subHtml;
       subPop.setAttribute('data-open', 'true');
+
+      /* Level 3 popover: either Orchestrator planner thinking effort OR official whitelisted Executor picker */
+      let triOpen = false;
+      if (activeModelTrimenu && activeModelTrimenu.kind === 'planner' && activeModelTrimenu.familyName) {
+        const entry = orchEntries.find((x) => x.fam.baseName === activeModelTrimenu.familyName);
+        const effs = entry ? entry.fam.variants.filter((v) => Boolean(v.effort)) : [];
+        if (entry && effs.length > 1) {
+          const shortTitle = entry.fam.baseName.replace(/^Orchestrator\s*·\s*/i, '').trim() || entry.fam.baseName;
+          const isActiveFam = Boolean(cat.activeFamily && cat.activeFamily.baseName === entry.fam.baseName);
+          triPop.setAttribute('data-tri-kind', 'planner');
+          triPop.innerHTML =
+            `<div class="ag-cm-sec-hdr">${L('主模型强度', 'Planner effort')} · ${escapeHtml(shortTitle)}</div>` +
+            effs
+              .map((v) => {
+                const on = Boolean(isActiveFam && cat.activeVariant && cat.activeVariant.effort === v.effort);
+                const desc = displayEffortDesc(v.effort);
+                const label = displayEffortLabel(v.effort);
+                return `<button type="button" class="ag-cm-row" data-ag-cm-orch-family="${escapeHtml(
+                  entry.fam.baseName
+                )}" data-ag-cm-orch-effort="${escapeHtml(v.effort)}">
+                  <span>
+                    <span style="display:block;line-height:1.25;">${escapeHtml(label)}</span>
+                    ${desc ? `<span class="ag-cm-sub-desc" style="display:block;">${escapeHtml(desc)}</span>` : ''}
+                  </span>
+                  ${on ? SVG_CM_CHECK : ''}
+                </button>`;
+              })
+              .join('');
+          triPop.setAttribute('data-open', 'true');
+          triOpen = true;
+        }
+      } else if (isExecTriActive && execCat) {
+        const execRowsHtml = execCat.families
+          .map((fam) => {
+            const isFamActive = Boolean(execCat.activeFamily && execCat.activeFamily.baseName === fam.baseName);
+            const pillsHtml =
+              fam.variants.length > 1
+                ? `<div class="ag-cm-exec-pills">${fam.variants
+                    .map((v) => {
+                      const isVarOn = Boolean(
+                        isFamActive && execCat.activeVariant && execCat.activeVariant.opt.value === v.opt.value
+                      );
+                      const lbl = displayEffortLabel(v.effort) || v.opt.label;
+                      return `<button type="button" class="ag-cm-exec-pill" data-ag-cm-exec-val="${escapeHtml(
+                        String(v.opt.value)
+                      )}" data-active="${isVarOn ? 'true' : 'false'}">${escapeHtml(lbl)}</button>`;
+                    })
+                    .join('')}</div>`
+                : '';
+            return `<div class="ag-cm-exec-item">
+              <button type="button" class="ag-cm-row ag-cm-exec-row" data-ag-cm-exec-family="${escapeHtml(fam.baseName)}">
+                <span class="ag-cm-exec-name">${escapeHtml(fam.baseName)}</span>
+                ${isFamActive ? SVG_CM_CHECK : ''}
+              </button>
+              ${pillsHtml}
+            </div>`;
+          })
+          .join('');
+        const resetHtml = !execCat.isDefault
+          ? `<div class="ag-cm-divider"></div>
+             <button type="button" class="ag-cm-row" style="min-height:32px;font-size:13px;" data-ag-cm-exec-val="0">
+               <span>${L('恢复默认执行模型', 'Reset to default')}</span>
+               <span class="ag-cm-key">${escapeHtml(execCat.defaultShortLabel)}</span>
+             </button>`
+          : '';
+        triPop.setAttribute('data-tri-kind', 'executor');
+        triPop.innerHTML =
+          `<div class="ag-cm-sec-hdr ag-cm-exec-hdr"><span>${L('执行模型与强度 · 全局', 'Executor · Global')}</span><span class="ag-cm-exec-tag">${L('白名单', 'Official')}</span></div>` +
+          execRowsHtml +
+          resetHtml;
+        triPop.setAttribute('data-open', 'true');
+        triOpen = true;
+      }
+      if (!triOpen) {
+        triPop.setAttribute('data-open', 'false');
+      }
     } else {
       subPop.setAttribute('data-open', 'false');
+      triPop.setAttribute('data-open', 'false');
     }
 
     positionModelPopovers();
   }
 
   /* ---- menu accessibility: roles, inert when closed, focus preserved across re-renders ---- */
-  const MENU_KEY_ATTRS = ['data-ag-cm-family', 'data-ag-cm-subtrigger', 'data-ag-cm-effort', 'data-ag-cm-more-family'];
+  const MENU_KEY_ATTRS = [
+    'data-ag-cm-family',
+    'data-ag-cm-subtrigger',
+    'data-ag-cm-tritrigger',
+    'data-ag-cm-effort',
+    'data-ag-cm-orch-effort',
+    'data-ag-cm-exec-family',
+    'data-ag-cm-exec-val',
+    'data-ag-cm-more-family',
+    'data-ag-cm-native'
+  ];
   let focusBeforeModelMenu = null;
   let lastKeyToggleTs = 0;
 
@@ -3444,7 +4678,7 @@
 
   function findMenuRowByKey(key) {
     if (!key) return null;
-    for (const id of ['ag-claude-model-popover', 'ag-claude-model-subpop']) {
+    for (const id of ['ag-claude-model-popover', 'ag-claude-model-subpop', 'ag-claude-model-tripop']) {
       const pop = document.getElementById(id);
       if (!pop) continue;
       for (const row of pop.querySelectorAll(`[${key[0]}]`)) if (row.getAttribute(key[0]) === key[1]) return row;
@@ -3453,11 +4687,11 @@
   }
 
   function isInModelMenu(el) {
-    return Boolean(el && el.closest && el.closest('#ag-claude-model-popover, #ag-claude-model-subpop'));
+    return Boolean(el && el.closest && el.closest('#ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop'));
   }
 
   function syncMenuA11y() {
-    for (const id of ['ag-claude-model-popover', 'ag-claude-model-subpop']) {
+    for (const id of ['ag-claude-model-popover', 'ag-claude-model-subpop', 'ag-claude-model-tripop']) {
       const pop = document.getElementById(id);
       if (!pop) continue;
       const open = pop.getAttribute('data-open') === 'true';
@@ -3470,7 +4704,7 @@
         row.setAttribute('tabindex', '-1');
         if (row.getAttribute('data-disabled') === 'true') row.setAttribute('aria-disabled', 'true');
       });
-      pop.querySelectorAll('[data-ag-cm-subtrigger]').forEach((row) => {
+      pop.querySelectorAll('[data-ag-cm-subtrigger], [data-ag-cm-tritrigger], [data-ag-cm-tri-hover="planner"]').forEach((row) => {
         row.setAttribute('aria-haspopup', 'menu');
         row.setAttribute('aria-expanded', row.hasAttribute('data-active-sub') ? 'true' : 'false');
       });
@@ -3513,6 +4747,8 @@
     activeModelTriggerBtn = btn;
     modelPopoverOpen = true;
     activeModelSubmenu = null;
+    activeModelTrimenu = null;
+    ensureOrchestratorRolesLoaded();
     if (btn) {
       btn.setAttribute('data-ag-model-open', 'true');
       btn.setAttribute('aria-expanded', 'true');
@@ -3530,6 +4766,7 @@
     const hadFocus = isInModelMenu(document.activeElement);
     modelPopoverOpen = false;
     activeModelSubmenu = null;
+    activeModelTrimenu = null;
     currentCatalogSnapshot = null;
     if (activeModelTriggerBtn) {
       activeModelTriggerBtn.removeAttribute('data-ag-model-open');
@@ -3538,8 +4775,10 @@
     document.querySelectorAll('button[data-ag-model-open]').forEach((el) => el.removeAttribute('data-ag-model-open'));
     const mainPop = document.getElementById('ag-claude-model-popover');
     const subPop = document.getElementById('ag-claude-model-subpop');
+    const triPop = document.getElementById('ag-claude-model-tripop');
     if (mainPop) mainPop.setAttribute('data-open', 'false');
     if (subPop) subPop.setAttribute('data-open', 'false');
+    if (triPop) triPop.setAttribute('data-open', 'false');
     syncMenuA11y();
     if (opts.returnFocus || hadFocus) {
       const target =
@@ -3560,12 +4799,20 @@
   const TRIGGER_SEL = 'button[data-testid="model-selector-trigger"], button[data-ag-pd-model-trigger="true"]';
 
   const onModelTriggerPointerDown = (e) => {
-    if (!FEAT.modelMenu) return;
+    if (!FEAT.modelMenu || isCustomCssDisabled()) return;
     const trigger = e.target && e.target.closest && e.target.closest(TRIGGER_SEL);
     if (trigger) {
       if (e.button !== undefined && e.button !== 0) return;
+      if (e.altKey && isNativeModelTriggerBtn(trigger)) {
+        if (modelPopoverOpen) closeClaudeModelPopover();
+        return;
+      }
       const api = discoverModelSelectorApi(trigger);
       if (!api) return;
+      if (shouldDeferToNativeModelMenu(e, trigger, api)) {
+        if (modelPopoverOpen) closeClaudeModelPopover();
+        return;
+      }
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();
@@ -3580,11 +4827,14 @@
   /* Mouse: the menu already toggled on pointerdown, so swallow the follow-up mousedown/click.
      Keyboard / assistive tech: activation arrives as a click with detail === 0 -> toggle here. */
   const onModelTriggerSwallowMouseClick = (e) => {
-    if (!FEAT.modelMenu) return;
+    if (!FEAT.modelMenu || isCustomCssDisabled()) return;
     const trigger = e.target && e.target.closest && e.target.closest(TRIGGER_SEL);
     if (!trigger) return;
+    if (e.altKey && isNativeModelTriggerBtn(trigger)) return;
+    if (Date.now() < bypassNativeModelTriggerUntil) return;
     const api = discoverModelSelectorApi(trigger);
     if (!api) return;
+    if (shouldDeferToNativeModelMenu(e, trigger, api)) return;
     e.preventDefault();
     e.stopPropagation();
     e.stopImmediatePropagation();
@@ -3595,11 +4845,12 @@
   };
 
   const onModelPopoverKeyDown = (e) => {
-    if (disposed || !FEAT.modelMenu) return;
+    if (disposed || !FEAT.modelMenu || isCustomCssDisabled()) return;
     const plain = !e.metaKey && !e.ctrlKey && !e.altKey;
     if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === '/') {
       const btn = findModelTriggerBtn();
-      if (btn && discoverModelSelectorApi(btn)) {
+      const btnApi = btn ? discoverModelSelectorApi(btn) : null;
+      if (btnApi && !shouldDeferToNativeModelMenu(null, btn, btnApi)) {
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
@@ -3610,7 +4861,8 @@
 
     const trig = e.target && e.target.closest && e.target.closest(TRIGGER_SEL);
     if (trig && plain && (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
-      if (discoverModelSelectorApi(trig)) {
+      const trigApi = discoverModelSelectorApi(trig);
+      if (trigApi && !shouldDeferToNativeModelMenu(null, trig, trigApi)) {
         e.preventDefault();
         e.stopPropagation();
         e.stopImmediatePropagation();
@@ -3627,7 +4879,9 @@
     if (!modelPopoverOpen) return;
     const mainPop = document.getElementById('ag-claude-model-popover');
     const subPop = document.getElementById('ag-claude-model-subpop');
+    const triPop = document.getElementById('ag-claude-model-tripop');
     const active = document.activeElement;
+    const inTri = Boolean(triPop && triPop.contains(active));
     const inSub = Boolean(subPop && subPop.contains(active));
     const inMain = Boolean(mainPop && mainPop.contains(active));
     const stop = () => {
@@ -3636,11 +4890,33 @@
       e.stopImmediatePropagation();
     };
 
+    const closeTriAndFocusSub = () => {
+      const prevTri = activeModelTrimenu;
+      activeModelTrimenu = null;
+      renderModelPopovers();
+      if (!subPop || !prevTri) return;
+      let target = null;
+      if (prevTri.kind === 'executor') {
+        target = subPop.querySelector('[data-ag-cm-tritrigger="executor"]');
+      } else if (prevTri.kind === 'planner' && prevTri.familyName) {
+        for (const r of subPop.querySelectorAll('[data-ag-cm-tri-family]')) {
+          if (r.getAttribute('data-ag-cm-tri-family') === prevTri.familyName) {
+            target = r;
+            break;
+          }
+        }
+      }
+      if (target) target.focus();
+    };
+
     if (e.key === 'Escape') {
       stop();
-      if (inSub && activeModelSubmenu) {
+      if (inTri && activeModelTrimenu) {
+        closeTriAndFocusSub();
+      } else if (inSub && activeModelSubmenu) {
         const kind = activeModelSubmenu;
         activeModelSubmenu = null;
+        activeModelTrimenu = null;
         renderModelPopovers();
         const t = mainPop && mainPop.querySelector(`[data-ag-cm-subtrigger="${kind}"]`);
         if (t) t.focus();
@@ -3649,14 +4925,14 @@
       }
       return;
     }
-    if (e.key === 'Tab' && (inMain || inSub)) {
+    if (e.key === 'Tab' && (inMain || inSub || inTri)) {
       stop();
       closeClaudeModelPopover({ returnFocus: true });
       return;
     }
     if (plain && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
       stop();
-      const rows = menuRows(inSub ? subPop : mainPop);
+      const rows = menuRows(inTri ? triPop : inSub ? subPop : mainPop);
       if (!rows.length) return;
       const down = e.key === 'ArrowDown';
       let idx = rows.indexOf(active);
@@ -3668,29 +4944,64 @@
       stop();
       if (active.getAttribute('data-disabled') === 'true') return;
       activeModelSubmenu = active.getAttribute('data-ag-cm-subtrigger');
+      activeModelTrimenu = null;
       renderModelPopovers();
       focusFirstRow(subPop, true);
+      return;
+    }
+    if (plain && e.key === 'ArrowRight' && inSub) {
+      const triKind = active.getAttribute('data-ag-cm-tri-hover');
+      if (triKind === 'executor') {
+        stop();
+        activeModelTrimenu = { kind: 'executor' };
+        renderModelPopovers();
+        focusFirstRow(triPop, true);
+        return;
+      }
+      if (triKind === 'planner') {
+        const familyName = active.getAttribute('data-ag-cm-tri-family');
+        if (familyName) {
+          stop();
+          activeModelTrimenu = { kind: 'planner', familyName };
+          renderModelPopovers();
+          focusFirstRow(triPop, true);
+          return;
+        }
+      }
+    }
+    if (plain && e.key === 'ArrowLeft' && inTri) {
+      stop();
+      closeTriAndFocusSub();
       return;
     }
     if (plain && e.key === 'ArrowLeft' && inSub) {
       stop();
       const kind = activeModelSubmenu;
       activeModelSubmenu = null;
+      activeModelTrimenu = null;
       renderModelPopovers();
       const t = mainPop && mainPop.querySelector(`[data-ag-cm-subtrigger="${kind}"]`);
       if (t) t.focus();
       return;
     }
     if (plain && /^[1-5]$/.test(e.key)) {
+      const inEditable = Boolean(
+        active &&
+          (active.isContentEditable ||
+            active.tagName === 'INPUT' ||
+            active.tagName === 'TEXTAREA' ||
+            (active.closest && active.closest('[contenteditable="true"]')))
+      );
+      if (inEditable) return;
       const idx = Number(e.key) - 1;
-      const api = discoverModelSelectorApi();
+      const api = discoverModelSelectorApi(activeModelTriggerBtn);
       if (api) {
         const cat = currentCatalogSnapshot || buildModelCatalog(api);
         const fam = cat.primaryFamilies[idx];
         if (fam) {
           stop();
-          const targetOpt = pickVariantForFamily(fam, lastPreferredEffort);
-          if (targetOpt) applyModelSelectionOption(api, targetOpt);
+          const targetVar = pickVariantForFamily(fam, lastPreferredEffort);
+          if (targetVar && targetVar.opt) applyModelSelectionOption(api, targetVar.opt, targetVar.plannerOpt);
           closeClaudeModelPopover({ returnFocus: true });
         }
       }
@@ -3701,6 +5012,9 @@
   document.addEventListener('mousedown', onModelTriggerSwallowMouseClick, true);
   document.addEventListener('click', onModelTriggerSwallowMouseClick, true);
   document.addEventListener('keydown', onModelPopoverKeyDown, true);
+  later(() => {
+    if (!disposed && FEAT.modelMenu) ensureOrchestratorRolesLoaded();
+  }, 600);
 
   /* ==========================================================================
    * 7. Inline Undo & Edit (Claude-Style Message In-Bubble Re-Edit)
@@ -3729,12 +5043,14 @@
     let session;
     let index;
     let text;
+    let rawItems = null;
     for (let f = activeReactFiber(button), depth = 0; f && depth < 65; f = f.return, depth++) {
       const props = f.memoizedProps;
       if (!state && props && props.revertState) state = props.revertState;
       if (session === undefined && props && typeof props.cascadeId === 'string') session = props.cascadeId;
       if (index === undefined && props && Number.isInteger(props.userStepIndex)) index = props.userStepIndex;
       if (text === undefined && props && Array.isArray(props.items)) {
+        rawItems = props.items.slice();
         text = props.items
           .filter((it) => it && it.chunk && it.chunk.case === 'text')
           .map((it) => it.chunk.value || '')
@@ -3751,14 +5067,22 @@
     if (!state || !state.canRevert || !state.revertPreviewState || !state.revertPreviewState.revert || !context || !session || index === undefined) {
       return null;
     }
+    const stepEl = button.closest && button.closest('[data-testid="user-input-step"]');
     if (text === undefined) {
-      const stepEl = button.closest && button.closest('[data-testid="user-input-step"]');
       const q =
         stepEl &&
         stepEl.querySelector('[data-testid="user-message-content"] [data-quotable="true"], [data-testid="user-message-content"]');
       text = (q && q.textContent) || '';
     }
-    return { state: state.revertPreviewState, context, session, index, text };
+    const nonTextItems = Array.isArray(rawItems)
+      ? rawItems.filter((it) => it && it.chunk && it.chunk.case === 'item')
+      : [];
+    const hasDomRichItems = Boolean(
+      stepEl &&
+        stepEl.querySelector('[data-uri], bdi.context-scope-mention, [data-testid="skill-scope-item-pill"], [data-testid="context-scope-item-cider"]')
+    );
+    const hasRichItems = nonTextItems.length > 0 || hasDomRichItems;
+    return { state: state.revertPreviewState, context, session, index, text, rawItems, nonTextItems, hasRichItems, stepEl };
   }
 
   function getComposerLexicalRoot(context) {
@@ -3807,25 +5131,62 @@
     if (el) el.textContent = value;
   }
 
+  function buildRebuiltRichItems(rawItems, nextText) {
+    if (!Array.isArray(rawItems) || rawItems.length === 0) return null;
+    const preserved = rawItems.filter((it) => it && it.chunk && it.chunk.case !== 'text');
+    if (preserved.length === 0) return null;
+    const out = preserved.slice();
+    const val = String(nextText ?? '');
+    if (val) {
+      out.push({
+        $typeName: 'exa.codeium_common_pb.TextOrScopeItem',
+        chunk: { case: 'text', value: val }
+      });
+    }
+    return out;
+  }
+
   async function performNativeRevert(target) {
     const handler = target.context.stepHandler;
     const orig = handler.revertToIndex;
-    let pending;
-    handler.revertToIndex = function (...args) {
+    let pending = null;
+    let resolveCalled = null;
+    const calledPromise = new Promise((r) => {
+      resolveCalled = r;
+    });
+    const wrapped = function (...args) {
       const res = orig.apply(this, args);
       if (args[0] === target.session && args[1] === target.index - 1) {
         pending = Promise.resolve(res);
+        resolveCalled(true);
       }
       return res;
     };
+    handler.revertToIndex = wrapped;
     try {
-      target.state.revert();
+      const ret = target.state.revert();
+      if (ret && typeof ret.then === 'function') {
+        await ret;
+      }
+      if (!pending) {
+        /* Support async native revert implementations that call revertToIndex on a later microtask/tick */
+        await Promise.race([calledPromise, new Promise((r) => setTimeout(r, 250))]);
+      }
     } finally {
-      handler.revertToIndex = orig;
+      if (handler.revertToIndex === wrapped) {
+        handler.revertToIndex = orig;
+      }
     }
-    if (!pending) throw new Error('revert_not_dispatched');
-    await pending;
-    await new Promise((r) => setTimeout(r, 0));
+    if (pending) {
+      await pending;
+      await new Promise((r) => setTimeout(r, 0));
+      return;
+    }
+    if (target.stepEl && !target.stepEl.isConnected) {
+      await new Promise((r) => setTimeout(r, 0));
+      return;
+    }
+    throw new Error('revert_not_dispatched');
   }
 
   async function submitComposerAfterRevert(context, composerEl) {
@@ -3885,11 +5246,15 @@
     const hasMedia = Boolean(
       stObj.bubble && stObj.bubble.querySelector('.agy-user-bubble-header, img, [data-testid*="attachment"], [data-testid*="media"]')
     );
+    const hasRichRefs = Boolean(cur && cur.hasRichItems);
     metaEl.innerHTML =
       (rState.conversationOnlyRevertEnabled
         ? `<button type="button" class="ag-claude-switch" role="switch" data-ag-revert-files-switch aria-label="${escapeHtml(L('同步撤回文件修改', 'Revert modified files'))}" aria-checked="${!convOnly}"><span></span></button><span>${L('同步撤回文件', 'Revert files')}</span><span style="opacity:0.45">·</span>`
         : '') +
       `<span>${escapeHtml(fileSummary)}</span>` +
+      (hasRichRefs
+        ? `<span style="opacity:0.75" title="${escapeHtml(L('自动保留原消息中的 @ 引用、斜杠命令与技能胶囊；按住 ⌥ 点撤回可打开官方撤回界面', 'Preserves original @ mentions, slash commands & skills; Option+click Revert for native UI'))}">· ${L('保留原引用', 'Keep mentions')}</span>`
+        : '') +
       (hasMedia
         ? `<span style="opacity:0.75" title="${escapeHtml(L('重发时自动保留原消息图片/附件；如需增删附件请点「移至底栏」', 'Keeps original attachments on resend; click Move to input to edit attachments'))}">· ${L('保留原附件', 'Keep attachments')}</span>`
         : '');
@@ -3981,7 +5346,23 @@
       }
       await performNativeRevert(current);
       if (disposed || activeInlineEdit !== stObj) return;
-      setComposerText(current.context, stObj.draftText);
+      const textUnchanged = stObj.draftText === (stObj.target.text || '');
+      const rebuiltRichItems =
+        shouldSubmit && current.hasRichItems ? buildRebuiltRichItems(current.rawItems, stObj.draftText) : null;
+      const agentPropsForRich = rebuiltRichItems ? discoverAgentInputProps(composerEl || rootEl) : null;
+      if (rebuiltRichItems && agentPropsForRich && typeof agentPropsForRich.handleSubmit === 'function') {
+        const ref = current.context && current.context.inputBoxRef && current.context.inputBoxRef.current;
+        const media = ref && typeof ref.getMediaAttachments === 'function' ? ref.getMediaAttachments() : [];
+        closeInlineEdit(false);
+        await new Promise((r) => setTimeout(r, 360));
+        if (disposed) return;
+        await agentPropsForRich.handleSubmit(rebuiltRichItems, Array.isArray(media) ? media : [], () => {});
+        return;
+      }
+      /* Preserve rich Lexical mention/slash/skill nodes restored by native revert when text was not modified */
+      if (!(current.hasRichItems && textUnchanged)) {
+        setComposerText(current.context, stObj.draftText);
+      }
       closeInlineEdit(false);
       if (shouldSubmit) {
         await submitComposerAfterRevert(current.context, composerEl);
@@ -4073,7 +5454,8 @@
       autoResize();
     });
     ta.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing && ev.keyCode !== 229) {
+      if (ev.isComposing || ev.keyCode === 229) return;
+      if (ev.key === 'Enter' && !ev.shiftKey) {
         ev.preventDefault();
         ev.stopPropagation();
         applyInlineUndo(true);
@@ -4101,7 +5483,7 @@
   }
 
   const onRevertButtonClick = (e) => {
-    if (disposed || !FEAT.inlineUndo) return;
+    if (disposed || !FEAT.inlineUndo || e.altKey) return;
     const btn = e.target && e.target.closest && e.target.closest('button[data-testid="revert-button"]');
     if (!btn || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return;
     const target = resolveNativeRevertTarget(btn);
@@ -4120,6 +5502,11 @@
 
   const onInlineEditDocKeyDown = (e) => {
     if (disposed || !activeInlineEdit || inlineUndoBusy) return;
+    if (!activeInlineEdit.editorBox || !activeInlineEdit.editorBox.isConnected) {
+      closeInlineEdit(false);
+      return;
+    }
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
@@ -4144,18 +5531,12 @@
     '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="7" width="9" height="6" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>';
   const PENDING_BELL_SVG =
     '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.45" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11.5 6.5a3.5 3.5 0 1 0-7 0c0 3.2-1.3 4.3-1.3 4.3h9.6s-1.3-1.1-1.3-4.3"/><path d="M6.8 13a1.3 1.3 0 0 0 2.4 0"/></svg>';
-  const RECENT_CHEVRON_SVG =
-    '<svg class="ag-recent-chevron" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 -960 960 960" fill="currentColor" aria-hidden="true"><path d="M517.85-480l-184-184L376-706.15L602.15-480L376-253.85L333.85-296l184-184Z"/></svg>';
   const RECENT_PLUS_SVG =
     '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>';
   const RECENT_PIN_SVG =
     '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.7 2.8l3.5 3.5-1.4 1.4-.9-.3-2.6 2.6.4 1.6-1.1 1.1-2.5-2.5-2.6 2.6-.7-.7 2.6-2.6-2.5-2.5 1.1-1.1 1.6.4 2.6-2.6-.3-.9z"/></svg>';
-  const RECENT_UNPIN_SVG = RECENT_PIN_SVG.replace('</svg>', '<path d="M2 2l12 12"/></svg>');
-  const RECENT_COPY_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="5" y="2" width="8" height="10" rx="1"/><path d="M3 5H2v9h8v-1"/></svg>';
-  const RECENT_UNREAD_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M12 3H2v11l3-3h9V6"/><circle cx="13" cy="3" r="2" fill="currentColor" stroke="none"/></svg>';
-  const RECENT_SPLIT_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="2" y="2" width="4" height="12" rx=".5"/><path d="M10 8V2h4v6M9 12h6m-3-3v6"/></svg>';
   const RECENT_MORE_SVG =
-    '<svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><circle cx="8" cy="3.5" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="8" cy="12.5" r="1.2"/></svg>';
+    '<svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="12.5" cy="8" r="1.2"/></svg>';
   const RECENT_FOLDER_SVG =
     '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.2 4.4A1.2 1.2 0 0 1 3.4 3.2h3.1l1.2 1.3h4.9a1.2 1.2 0 0 1 1.2 1.2v6.1a1.2 1.2 0 0 1-1.2 1.2H3.4a1.2 1.2 0 0 1-1.2-1.2V4.4z"/></svg>';
   const RECENT_RENAME_SVG =
@@ -4169,12 +5550,490 @@
   let sidebarStoreUnsub = null;
   let sidebarSyncTimer = 0;
   let cachedSidebarActionsCtx = null;
+  let recentExpanded = false;
   let recentPageLimit = 50;
   let recentLastSig = '';
   let recentRenamingId = '';
   let recentMenuState = null;
   let recentMenuDocBound = false;
   let recentItemsById = new Map();
+  let recentLastDragEndTs = 0;
+
+  /* ---- v2.34+ Conversation & File Drag-to-Composer (`application/context-scope-item-cider`) ---- */
+  function buildCiderConversationPayload(id, title) {
+    const cleanTitle = String(title || '').trim() || L('对话', 'Conversation');
+    return JSON.stringify({ conversation: { id: String(id || ''), title: cleanTitle } });
+  }
+
+  function buildCiderFilePayload(absPathOrUri) {
+    const raw = String(absPathOrUri || '').trim();
+    if (!raw) return '';
+    const uri = /^file:\/\//i.test(raw) ? raw : `file://${encodeURI(raw.startsWith('/') ? raw : `/${raw}`)}`;
+    return JSON.stringify({ file: { absoluteUri: uri } });
+  }
+
+  function attachConversationDragTransfer(dt, id, title) {
+    if (!dt || !id) return false;
+    const payload = buildCiderConversationPayload(id, title);
+    try {
+      dt.effectAllowed = 'copyMove';
+    } catch {}
+    try {
+      dt.setData('application/context-scope-item-cider', payload);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function attachFileDragTransfer(dt, absPathOrUri) {
+    if (!dt || !absPathOrUri) return false;
+    const payload = buildCiderFilePayload(absPathOrUri);
+    if (!payload) return false;
+    const raw = String(absPathOrUri || '').trim();
+    const uri = /^file:\/\//i.test(raw) ? raw : `file://${encodeURI(raw.startsWith('/') ? raw : `/${raw}`)}`;
+    try {
+      dt.effectAllowed = 'copyMove';
+    } catch {}
+    try {
+      dt.setData('application/context-scope-item-cider', payload);
+      dt.setData('application/vnd.code.uri-list', uri);
+      dt.setData('text/uri-list', uri);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function hasDroppedContextPayload(dt) {
+    if (!dt) return false;
+    const types = Array.from(dt.types || [], (t) => String(t || '').toLowerCase());
+    return (
+      types.includes('application/context-scope-item-cider') ||
+      types.includes('application/vnd.code.uri-list') ||
+      types.includes('resourceurls')
+    );
+  }
+
+  function extractDroppedContextMentions(dt) {
+    if (!dt) return [];
+    const out = [];
+    let rawCider = '';
+    try {
+      rawCider = dt.getData('application/context-scope-item-cider') || '';
+    } catch {}
+    if (rawCider && rawCider.trim()) {
+      try {
+        const parsed = JSON.parse(rawCider.trim());
+        const arr = Array.isArray(parsed) ? parsed : [parsed];
+        for (let entry of arr) {
+          if (typeof entry === 'string') {
+            try {
+              entry = JSON.parse(entry);
+            } catch {
+              continue;
+            }
+          }
+          if (!entry || typeof entry !== 'object') continue;
+          const conv =
+            entry.conversation ||
+            (entry.scopeItem && entry.scopeItem.case === 'conversation' ? entry.scopeItem.value : null);
+          if (conv && conv.id) {
+            const label = String(conv.title || '').trim() || conv.id.slice(0, 8);
+            out.push({
+              kind: 'conversation',
+              label,
+              scopeItem: {
+                $typeName: 'exa.codeium_common_pb.ContextScopeItem',
+                scopeItem: {
+                  case: 'conversation',
+                  value: {
+                    $typeName: 'exa.codeium_common_pb.ConversationScopeItem',
+                    id: String(conv.id),
+                    title: label,
+                    source: String(conv.source || '')
+                  }
+                }
+              }
+            });
+            continue;
+          }
+          const fileObj =
+            entry.file ||
+            entry.fileLineRange ||
+            (entry.scopeItem && (entry.scopeItem.case === 'file' || entry.scopeItem.case === 'fileLineRange')
+              ? entry.scopeItem.value
+              : null);
+          if (fileObj && fileObj.absoluteUri) {
+            const uri = String(fileObj.absoluteUri);
+            let label = uri.split('/').pop() || uri;
+            try {
+              label = decodeURIComponent(label);
+            } catch {}
+            out.push({
+              kind: 'file',
+              label,
+              scopeItem: {
+                $typeName: 'exa.codeium_common_pb.ContextScopeItem',
+                scopeItem: {
+                  case: 'file',
+                  value: {
+                    $typeName: 'exa.codeium_common_pb.FileScopeItem',
+                    absoluteUri: uri
+                  }
+                }
+              }
+            });
+            continue;
+          }
+          const dirObj =
+            entry.directory ||
+            (entry.scopeItem && entry.scopeItem.case === 'directory' ? entry.scopeItem.value : null);
+          if (dirObj && dirObj.absoluteUri) {
+            const uri = String(dirObj.absoluteUri);
+            let label = uri.replace(/\/+$/, '').split('/').pop() || uri;
+            try {
+              label = decodeURIComponent(label);
+            } catch {}
+            out.push({
+              kind: 'directory',
+              label,
+              scopeItem: {
+                $typeName: 'exa.codeium_common_pb.ContextScopeItem',
+                scopeItem: {
+                  case: 'directory',
+                  value: {
+                    $typeName: 'exa.codeium_common_pb.DirectoryScopeItem',
+                    absoluteUri: uri
+                  }
+                }
+              }
+            });
+          }
+        }
+      } catch {}
+    }
+    if (out.length) return out;
+
+    let uriList = '';
+    try {
+      uriList = dt.getData('application/vnd.code.uri-list') || '';
+    } catch {}
+    if (uriList && uriList.trim()) {
+      for (const line of uriList.split(/\r?\n/)) {
+        const u = line.trim();
+        if (!u || u.startsWith('#') || !/^file:\/\//i.test(u)) continue;
+        let label = u.split('/').pop() || u;
+        try {
+          label = decodeURIComponent(label);
+        } catch {}
+        out.push({
+          kind: 'file',
+          label,
+          scopeItem: {
+            $typeName: 'exa.codeium_common_pb.ContextScopeItem',
+            scopeItem: {
+              case: 'file',
+              value: {
+                $typeName: 'exa.codeium_common_pb.FileScopeItem',
+                absoluteUri: u
+              }
+            }
+          }
+        });
+      }
+    }
+    return out;
+  }
+
+  /* Bridge native pointer-dragged Pinned Sidebar rows (`[data-testid="conversation-row-sidebar"]`) into composers */
+  let pinnedDragState = null;
+  let pinnedDragOverCid = null;
+  let pinnedDragGhostEl = null;
+  function getLayoutReduxStore() {
+    const bindings = findSidebarBindings();
+    if (bindings && bindings.store && typeof bindings.store.dispatch === 'function') {
+      return bindings.store;
+    }
+    return null;
+  }
+  function setPinnedChatDragOverTarget(nextCid) {
+    const normalized = nextCid || null;
+    if (pinnedDragOverCid === normalized) return;
+    pinnedDragOverCid = normalized;
+    const store = getLayoutReduxStore();
+    if (store) {
+      try {
+        store.dispatch({ type: 'layout/setDragOverChatCascadeId', payload: normalized });
+        if (normalized) {
+          store.dispatch({ type: 'layout/setPendingSplitDrop', payload: null });
+        }
+      } catch {}
+    }
+  }
+  function removePinnedDragGhost() {
+    if (pinnedDragGhostEl) {
+      try {
+        pinnedDragGhostEl.remove();
+      } catch {}
+      pinnedDragGhostEl = null;
+    }
+    if (docRoot) docRoot.removeAttribute('data-ag-pinned-ghost-active');
+  }
+  function updatePinnedDragGhost(st, x, y) {
+    if (!st || x <= st.sidebarRight - 8 || !document.body) {
+      removePinnedDragGhost();
+      return;
+    }
+    if (!pinnedDragGhostEl) {
+      const ghost = document.createElement('div');
+      ghost.id = 'ag-pinned-drag-ghost';
+      ghost.className = 'ag-pinned-drag-ghost';
+      ghost.setAttribute('aria-hidden', 'true');
+      ghost.setAttribute('data-ag-i18n-ignore', '1');
+      ghost.innerHTML = `<span class="ag-pinned-drag-ghost-title">${escapeHtml(st.title)}</span><span class="ag-pinned-drag-ghost-pin">${RECENT_PIN_SVG}</span>`;
+      document.body.appendChild(ghost);
+      pinnedDragGhostEl = ghost;
+    }
+    if (docRoot) docRoot.setAttribute('data-ag-pinned-ghost-active', 'true');
+    pinnedDragGhostEl.style.width = `${st.rowWidth}px`;
+    pinnedDragGhostEl.style.transform = `translate3d(${Math.round(x - st.grabOffsetX)}px, ${Math.round(y - st.grabOffsetY)}px, 0)`;
+  }
+  function clearPinnedDropZoneHighlightOnly() {
+    if (docRoot) docRoot.removeAttribute('data-ag-pinned-chat-drop');
+    setPinnedChatDragOverTarget(null);
+    document
+      .querySelectorAll('#antigravity\\.agentSidePanelInputBox[data-ag-convo-drop], [data-ag-pd-composer-box][data-drag="convo"]')
+      .forEach((el) => {
+        el.removeAttribute('data-ag-convo-drop');
+        if (el.getAttribute('data-drag') === 'convo') el.removeAttribute('data-drag');
+      });
+  }
+  function clearPinnedComposerDropHighlights() {
+    clearPinnedDropZoneHighlightOnly();
+    removePinnedDragGhost();
+  }
+  function findComposerUnderPoint(x, y) {
+    const pdView = document.querySelector('#ag-claude-projects-view:not([hidden])');
+    if (pdView) {
+      const pdBox = pdView.querySelector('[data-ag-pd-composer-box]');
+      if (pdBox) {
+        const pdLeft = pdBox.closest('.ag-pd-left') || pdBox;
+        const r = pdLeft.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0 && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+          return { kind: 'project', el: pdBox };
+        }
+      }
+    }
+    const views = document.querySelectorAll('[data-testid="conversation-view"]');
+    for (const view of views) {
+      const r = view.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0 && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+        const box = view.querySelector('[id="antigravity.agentSidePanelInputBox"]');
+        const boxRect = box ? box.getBoundingClientRect() : null;
+        const inBox = Boolean(
+          boxRect && boxRect.width > 0 && boxRect.height > 0 && x >= boxRect.left && x <= boxRect.right && y >= boxRect.top && y <= boxRect.bottom
+        );
+        /* Leave left/right edge bands (~14%, capped at 96px) outside the composer free for official split-pane drag */
+        const splitEdge = Math.min(96, r.width * 0.14);
+        if (!inBox && r.width >= 360 && (x - r.left < splitEdge || r.right - x < splitEdge)) {
+          return null;
+        }
+        return { kind: 'native', el: box || view, viewEl: view, targetCid: view.getAttribute('data-cascade-id') || '' };
+      }
+    }
+    const nativeBoxes = document.querySelectorAll('[id="antigravity.agentSidePanelInputBox"]');
+    for (const box of nativeBoxes) {
+      const r = box.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0 && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+        const viewEl = box.closest('[data-testid="conversation-view"]');
+        return { kind: 'native', el: box, viewEl, targetCid: (viewEl && viewEl.getAttribute('data-cascade-id')) || '' };
+      }
+    }
+    return null;
+  }
+  let dispatchingSyntheticPointerCancel = false;
+  function cancelNativeDndSilently() {
+    /* Cancel dnd-kit PointerSensor via synthetic pointercancel instead of Escape (which can stop live generation) */
+    dispatchingSyntheticPointerCancel = true;
+    try {
+      const cancelEv =
+        typeof PointerEvent === 'function'
+          ? new PointerEvent('pointercancel', { bubbles: true, cancelable: false })
+          : new Event('pointercancel', { bubbles: true });
+      window.dispatchEvent(cancelEv);
+    } catch {}
+    dispatchingSyntheticPointerCancel = false;
+  }
+  const onPinnedRowPointerDown = (ev) => {
+    if (disposed || ev.button !== 0 || ev.altKey) return;
+    if (
+      ev.target &&
+      ev.target.closest &&
+      ev.target.closest('button, input, textarea, [contenteditable="true"], .agy-row-actions')
+    ) {
+      return;
+    }
+    const row = ev.target && ev.target.closest && ev.target.closest('[data-testid="conversation-row-sidebar"][data-cascade-id]');
+    if (!row) return;
+    /* Only intercept Pinned rows (native unpinned rows keep native split-drag unless unified Recents replaces them) */
+    const isPinnedRow =
+      row.getAttribute('data-pinned') === 'true' ||
+      Boolean(row.closest && row.closest('[data-ag-sb-unified="pinned"]'));
+    if (!isPinnedRow) return;
+    const cid = row.getAttribute('data-cascade-id');
+    if (!cid) return;
+    const a = row.querySelector('a[href]');
+    const span = row.querySelector('.flex-col > span');
+    const title =
+      (span && span.textContent && span.textContent.trim()) ||
+      (a && a.getAttribute('aria-label')) ||
+      cid.slice(0, 8);
+    const rowRect = row.getBoundingClientRect();
+    const sbEl = row.closest('.bg-sidebar');
+    const sbRect = sbEl ? sbEl.getBoundingClientRect() : null;
+    pinnedDragState = {
+      id: cid,
+      title,
+      startX: ev.clientX,
+      startY: ev.clientY,
+      active: false,
+      grabOffsetX: rowRect.width > 0 ? Math.max(12, Math.min(rowRect.width - 12, ev.clientX - rowRect.left)) : 48,
+      grabOffsetY: rowRect.height > 0 ? Math.max(8, Math.min(rowRect.height - 8, ev.clientY - rowRect.top)) : 16,
+      rowWidth: rowRect.width > 0 ? Math.max(168, Math.min(248, Math.round(rowRect.width))) : 216,
+      sidebarRight: sbRect && sbRect.width > 0 ? sbRect.right : rowRect.right || 256
+    };
+  };
+  const onPinnedRowPointerMove = (ev) => {
+    if (!pinnedDragState || disposed) return;
+    if (ev.altKey) {
+      clearPinnedComposerDropHighlights();
+      return;
+    }
+    const dx = ev.clientX - pinnedDragState.startX;
+    const dy = ev.clientY - pinnedDragState.startY;
+    if (!pinnedDragState.active && dx * dx + dy * dy < 49) return;
+    pinnedDragState.active = true;
+    updatePinnedDragGhost(pinnedDragState, ev.clientX, ev.clientY);
+    const hit = findComposerUnderPoint(ev.clientX, ev.clientY);
+    if (!hit) {
+      clearPinnedDropZoneHighlightOnly();
+      return;
+    }
+    if (hit.kind === 'project') {
+      if (docRoot) docRoot.setAttribute('data-ag-pinned-chat-drop', 'true');
+      setPinnedChatDragOverTarget(null);
+      hit.el.setAttribute('data-drag', 'convo');
+    } else if (hit.kind === 'native') {
+      const targetCid = hit.targetCid || '';
+      if (targetCid && targetCid === pinnedDragState.id) {
+        clearPinnedDropZoneHighlightOnly();
+        return;
+      }
+      if (docRoot) docRoot.setAttribute('data-ag-pinned-chat-drop', 'true');
+      if (targetCid) {
+        setPinnedChatDragOverTarget(targetCid);
+        const store = getLayoutReduxStore();
+        if (store) {
+          frame(() => {
+            if (pinnedDragState && pinnedDragOverCid === targetCid) {
+              try {
+                if (store.getState && store.getState().layout && store.getState().layout.pendingSplitDrop) {
+                  store.dispatch({ type: 'layout/setPendingSplitDrop', payload: null });
+                }
+              } catch {}
+            }
+          });
+        }
+      } else {
+        setPinnedChatDragOverTarget(null);
+        hit.el.setAttribute('data-ag-convo-drop', 'true');
+      }
+    }
+  };
+  const onPinnedRowPointerUp = (ev) => {
+    if (!pinnedDragState) return;
+    const st = pinnedDragState;
+    pinnedDragState = null;
+    clearPinnedComposerDropHighlights();
+    if (!st.active || disposed || ev.altKey) return;
+    const hit = findComposerUnderPoint(ev.clientX, ev.clientY);
+    if (!hit) return;
+    if (hit.kind === 'project') {
+      ev.preventDefault();
+      ev.stopPropagation();
+      ev.stopImmediatePropagation();
+      cancelNativeDndSilently();
+      const projView = document.getElementById('ag-claude-projects-view');
+      const projId = projView && projView.getAttribute('data-ag-pd-proj-id');
+      const compInput = hit.el.querySelector('#ag-pd-composer-input');
+      if (projId && compInput) {
+        appendDroppedMentionsToPdComposer({ id: projId }, compInput, [
+          {
+            kind: 'conversation',
+            label: st.title,
+            scopeItem: {
+              $typeName: 'exa.codeium_common_pb.ContextScopeItem',
+              scopeItem: {
+                case: 'conversation',
+                value: {
+                  $typeName: 'exa.codeium_common_pb.ConversationScopeItem',
+                  id: st.id,
+                  title: st.title,
+                  source: ''
+                }
+              }
+            }
+          }
+        ]);
+      }
+      return;
+    }
+    if (hit.kind === 'native') {
+      const targetCid = hit.targetCid || '';
+      if (targetCid && targetCid === st.id) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      ev.stopImmediatePropagation();
+      cancelNativeDndSilently();
+      const store = getLayoutReduxStore();
+      if (targetCid && store) {
+        store.dispatch({ type: 'layout/setPendingSplitDrop', payload: null });
+        store.dispatch({
+          type: 'layout/setPendingChatDrop',
+          payload: {
+            cascadeId: targetCid,
+            payload: { type: 'conversation', conversationId: st.id, title: st.title }
+          }
+        });
+        return;
+      }
+      try {
+        if (typeof DataTransfer === 'function' && typeof DragEvent === 'function') {
+          const dt = new DataTransfer();
+          attachConversationDragTransfer(dt, st.id, st.title);
+          hit.el.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt }));
+        }
+      } catch {}
+    }
+  };
+  const onPinnedRowPointerCancel = () => {
+    if (dispatchingSyntheticPointerCancel) return;
+    pinnedDragState = null;
+    clearPinnedComposerDropHighlights();
+  };
+  document.addEventListener('pointerdown', onPinnedRowPointerDown, true);
+  window.addEventListener('pointermove', onPinnedRowPointerMove, true);
+  window.addEventListener('pointerup', onPinnedRowPointerUp, true);
+  window.addEventListener('pointercancel', onPinnedRowPointerCancel, true);
+
+  const RECENT_CHEVRON_SVG =
+    '<svg class="ag-recent-chevron" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 -960 960 960" fill="currentColor" aria-hidden="true"><path d="M517.85-480l-184-184L376-706.15L602.15-480L376-253.85L333.85-296l184-184Z"/></svg>';
+  const RECENT_UNPIN_SVG = RECENT_PIN_SVG.replace('</svg>', '<path d="M2 2l12 12"/></svg>');
+  const RECENT_COPY_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="5" y="2" width="8" height="10" rx="1"/><path d="M3 5H2v9h8v-1"/></svg>';
+  const RECENT_UNREAD_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M12 3H2v11l3-3h9V6"/><circle cx="13" cy="3" r="2" fill="currentColor" stroke="none"/></svg>';
+  const RECENT_SPLIT_SVG = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="2" y="2" width="4" height="12" rx=".5"/><path d="M10 8V2h4v6M9 12h6m-3-3v6"/></svg>';
+
   let recentCollapsed = (() => {
     try {
       if (trustLocalOverrides && typeof localStorage === 'object' && localStorage) {
@@ -4999,11 +6858,16 @@
     for (const [id, summary] of Object.entries(summaries)) {
       if (!isSidebarVisibleSummary(id, summary, state)) continue;
       if (isUnified && isSummaryPinned(id, summary, state)) continue;
-      const rawTitle = (summary.annotations && summary.annotations.title) || summary.summary;
-      if (!rawTitle) continue;
-      const title = String(rawTitle);
-      const updatedAt = Math.max(protoSeconds(summary.lastModifiedTime), protoSeconds(summary.createdTime));
       const status = classifySidebarConversation(id, summary, state, activeId, hasFocus);
+      const rawTitle = (summary.annotations && summary.annotations.title) || summary.summary;
+      const isLiveOrActiveUntitled =
+        !rawTitle &&
+        (id === activeId ||
+          (status && (status.kind === 'running' || status.kind === 'pending')) ||
+          Number(summary.stepCount || 0) > 0);
+      if (!rawTitle && !isLiveOrActiveUntitled) continue;
+      const title = rawTitle ? String(rawTitle) : L('新对话', 'New conversation');
+      const updatedAt = Math.max(protoSeconds(summary.lastModifiedTime), protoSeconds(summary.createdTime));
       const priority = status && status.kind === 'pending' ? 3 : status && status.kind === 'running' ? 2 : 1;
       const projInfo = resolveSummaryProjectInfo(summary, bindings.projectLabels, state);
       list.push({
@@ -5118,6 +6982,7 @@
             if (ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
             ev.preventDefault();
           }
+          if (Date.now() - recentLastDragEndTs < 260) return;
           const cid = row.getAttribute('data-ag-recent-id');
           if (recentRenamingId && recentRenamingId === cid) return;
           closeRecentRowMenu();
@@ -5125,6 +6990,33 @@
           navigateSidebarConversation(cid, curBindings);
           scheduleSidebarSync();
         }
+      });
+      sec.addEventListener('dragstart', (ev) => {
+        if (
+          ev.target &&
+          ev.target.closest &&
+          ev.target.closest('[data-ag-recent-pin], [data-ag-recent-menu], [data-ag-recent-rename-input]')
+        ) {
+          ev.preventDefault();
+          return;
+        }
+        const row = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-id]');
+        if (!row) return;
+        const cid = row.getAttribute('data-ag-recent-id');
+        if (!cid || (recentRenamingId && recentRenamingId === cid)) {
+          ev.preventDefault();
+          return;
+        }
+        const item = recentItemsById.get(cid);
+        const title = (item && item.title) || row.getAttribute('data-ag-recent-title') || '';
+        attachConversationDragTransfer(ev.dataTransfer, cid, title);
+        row.setAttribute('data-dragging', 'true');
+      });
+      sec.addEventListener('dragend', (ev) => {
+        recentLastDragEndTs = Date.now();
+        const row = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-id]');
+        if (row) row.removeAttribute('data-dragging');
+        sec.querySelectorAll('[data-dragging="true"]').forEach((n) => n.removeAttribute('data-dragging'));
       });
       sec.addEventListener('contextmenu', (ev) => {
         const row = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-id]');
@@ -5155,6 +7047,7 @@
         const row = ev.target && ev.target.closest && ev.target.closest('[data-ag-recent-id]');
         if (row && row.tagName !== 'A' && (ev.key === 'Enter' || ev.key === ' ')) {
           ev.preventDefault();
+          if (projectsViewOpen) closeProjectsView();
           const cid = row.getAttribute('data-ag-recent-id');
           navigateSidebarConversation(cid, findSidebarBindings() || bindings);
           scheduleSidebarSync();
@@ -5232,10 +7125,10 @@
               if (!isUnified) {
                 const row = isRenaming
                   ? `<div class="ag-recent-row" data-ag-recent-id="${escapeHtml(it.id)}" data-renaming="true">${mainInner}</div>`
-                  : `<a class="ag-recent-row" href="/c/${encodeURIComponent(it.id)}" aria-label="${escapeHtml(it.title)}"${isAct ? ' aria-current="page"' : ''} data-ag-recent-id="${escapeHtml(it.id)}" data-updated-at="${it.updatedAt}" data-active="${isAct ? 'true' : 'false'}" title="${escapeHtml(tip)}"><div class="ag-recent-main">${mainInner}</div><div class="ag-recent-side" aria-hidden="true">${sideHtml}</div></a>`;
+                  : `<a class="ag-recent-row" draggable="true" data-ag-recent-title="${escapeHtml(it.title)}" href="/c/${encodeURIComponent(it.id)}" aria-label="${escapeHtml(it.title)}"${isAct ? ' aria-current="page"' : ''} data-ag-recent-id="${escapeHtml(it.id)}" data-updated-at="${it.updatedAt}" data-active="${isAct ? 'true' : 'false'}" title="${escapeHtml(tip)}"><div class="ag-recent-main">${mainInner}</div><div class="ag-recent-side" aria-hidden="true">${sideHtml}</div></a>`;
                 return `<div class="ag-recent-entry">${row}${actionsHtml}</div>`;
               }
-              return `<div class="ag-recent-row" role="button" tabindex="0" data-ag-recent-id="${escapeHtml(it.id)}" data-active="${isAct ? 'true' : 'false'}"${it.project ? ` data-has-project="true"` : ''}${isRenaming ? ' data-renaming="true"' : ''} title="${escapeHtml(tip)}"><div class="ag-recent-main">${mainInner}</div>${isRenaming ? '' : `<div class="ag-recent-side">${sideHtml}</div>${actionsHtml}`}</div>`;
+              return `<div class="ag-recent-row" role="button" tabindex="0"${isRenaming ? '' : ' draggable="true"'} data-ag-recent-id="${escapeHtml(it.id)}" data-ag-recent-title="${escapeHtml(it.title)}" data-active="${isAct ? 'true' : 'false'}"${it.project ? ` data-has-project="true"` : ''}${isRenaming ? ' data-renaming="true"' : ''} title="${escapeHtml(tip)}"><div class="ag-recent-main">${mainInner}</div>${isRenaming ? '' : `<div class="ag-recent-side">${sideHtml}</div>${actionsHtml}`}</div>`;
             })
             .join('')}</div>` + moreHtml
         : `<div class="ag-recent-empty">${escapeHtml(L('暂无最近对话', 'No recent conversations'))}</div>`;
@@ -5249,6 +7142,15 @@
       sidebarSyncTimer = 0;
       syncSidebarEnhancements();
     }, 90);
+  }
+
+  let sidebarHideRaf = 0;
+  function scheduleSidebarHideSync() {
+    if (disposed || sidebarHideRaf) return;
+    sidebarHideRaf = frame(() => {
+      sidebarHideRaf = 0;
+      if (!disposed && FEAT.hideSidebarProjects) syncSidebarHideNativeProjects();
+    });
   }
 
   function syncSidebarEnhancements() {
@@ -5266,14 +7168,17 @@
       return;
     }
     const bindings = findSidebarBindings();
-    if (!bindings) return;
+    if (!bindings) {
+      if (unifiedRecentsOn) clearSidebarHideNativeProjects();
+      return;
+    }
     if (sidebarStoreRef !== bindings.store) {
       if (sidebarStoreUnsub) sidebarStoreUnsub();
       sidebarStoreRef = bindings.store;
       if (typeof bindings.store.subscribe === 'function') {
         sidebarStoreUnsub = bindings.store.subscribe(() => {
           scheduleSidebarSync();
-          if (FEAT.hideSidebarProjects) syncSidebarHideNativeProjects();
+          if (FEAT.hideSidebarProjects) scheduleSidebarHideSync();
         });
       } else {
         sidebarStoreUnsub = null;
@@ -5298,9 +7203,9 @@
    *       text nodes & title/placeholder/aria-label attributes with zero page reload.
    * ========================================================================== */
   const UX_I18N_BASE_EXCLUDE =
-    'code, pre, kbd, samp, textarea, input, style, script, noscript, [contenteditable="true"], [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .monaco-editor, .monaco-diff-editor, .xterm, [class*="onyx-key"], .prose, .markdown, [class*="chat-message"], [class*="group/file-title"], [data-testid="conversation-row-sidebar"] a[href^="/c/"], [data-testid="conversation-row-sidebar"] span.truncate, [data-testid="conversation-navigator-turn"], .msg-body, #raw, [data-testid="swarm-raw"], #swarm-title, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, #ag-project-action-menu, [data-testid="model-selector-trigger"], [data-testid="model-selector-menu"], [data-testid="permissions-selector-trigger"]';
+    'code, pre, kbd, samp, textarea, input, style, script, noscript, [contenteditable="true"], [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, [data-testid="skill-scope-item-pill"], bdi.context-scope-mention, .monaco-editor, .monaco-diff-editor, .xterm, [class*="onyx-key"], .prose, .markdown, [class*="chat-message"], [class*="group/file-title"], [data-testid="conversation-row-sidebar"] a[href^="/c/"], [data-testid="conversation-row-sidebar"] span.truncate, [data-testid="conversation-navigator-turn"], .msg-body, #raw, #swarm-title, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, #ag-project-action-menu, [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]';
   const UX_I18N_ATTR_EXCLUDE =
-    'code, pre, kbd, samp, style, script, noscript, [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, .monaco-editor, .monaco-diff-editor, .xterm, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, #ag-project-action-menu, [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]';
+    'code, pre, kbd, samp, style, script, noscript, [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, [data-testid="skill-scope-item-pill"], bdi.context-scope-mention, .monaco-editor, .monaco-diff-editor, .xterm, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, #ag-project-action-menu, [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]';
   let uxI18nObserver = null;
   let uxI18nFlushTimer = 0;
   let uxI18nDirtyRoots = new Set();
@@ -5390,6 +7295,41 @@
     return clause.trim();
   }
 
+  function translateUxQuotaWindow(rawWin) {
+    const w = String(rawWin || '').trim();
+    const low = w.toLowerCase();
+    if (low === 'weekly' || low === '7-day' || low === '7d') return '每周';
+    if (low === 'daily' || low === '24-hour' || low === '24h') return '每日';
+    if (low === 'hourly' || low === '1-hour' || low === '1h') return '每小时';
+    if (low === 'monthly' || low === '30-day' || low === '30d') return '每月';
+    const mHr = low.match(/^(\d+)\s*-?\s*hours?$/i) || low.match(/^(\d+)h$/i);
+    if (mHr) return `${mHr[1]} 小时`;
+    const mDay = low.match(/^(\d+)\s*-?\s*days?$/i) || low.match(/^(\d+)d$/i);
+    if (mDay) return `${mDay[1]} 天`;
+    return w;
+  }
+
+  function translateUxDurationPhrase(rawDur) {
+    let s = String(rawDur || '').trim().replace(/\.$/, '');
+    if (!s) return '';
+    if (/^(?:<1m|less than a minute|under a minute)$/i.test(s)) return '不到 1 分钟';
+    s = s
+      .replace(/(\d+)\s*days?\b/gi, '$1 天')
+      .replace(/(\d+)\s*hours?\b/gi, '$1 小时')
+      .replace(/(\d+)\s*minutes?\b/gi, '$1 分钟')
+      .replace(/(\d+)\s*mins?\b/gi, '$1 分钟')
+      .replace(/(\d+)\s*seconds?\b/gi, '$1 秒')
+      .replace(/\b(\d+)d\b/gi, '$1 天')
+      .replace(/\b(\d+)h\b/gi, '$1 小时')
+      .replace(/\b(\d+)m\b/gi, '$1 分钟')
+      .replace(/\b(\d+)s\b/gi, '$1 秒')
+      .replace(/\s*,\s*(?:and\s+)?/gi, ' ')
+      .replace(/\s+and\s+/gi, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+    return s;
+  }
+
   function uxI18nLookup(trimmed, contextEl) {
     const dict = getUxI18nDict();
     if (!dict || !trimmed) return null;
@@ -5405,7 +7345,7 @@
       if (hit) return hit.endsWith('。') ? hit : `${hit}。`;
     }
     /* High-frequency dynamic Antigravity UI strings when runtime.js i18n is disabled */
-    if (!/[A-Za-z]/.test(trimmed) || trimmed.length > 140) return null;
+    if (!/[A-Za-z]/.test(trimmed) || trimmed.length > 340) return null;
     let m;
     if (UX_RE_EPHEMERAL_SUMMARY.test(trimmed)) {
       return trimmed.split(/,\s*/).map((part) => translateUxEphemeralClause(part)).join('、');
@@ -5430,6 +7370,64 @@
       return `${m[1]} ${unitMap[m[2].toLowerCase()] || m[2]}前`;
     }
     if ((m = trimmed.match(/^(\d+(?:\.\d+)?)%\s+left$/i))) return `${m[1]}% 剩余`;
+    if ((m = trimmed.match(/^Your Plan:\s*(.+)$/i))) return `当前方案：${m[1]}`;
+    if ((m = trimmed.match(/^You can upgrade to a higher\s+(.+?)\s+plan to receive the highest rate limits\.?$/i))) {
+      return `您可以升级到更高的 ${m[1]} 方案以获取最高速率配额。`;
+    }
+    const padWinZh = (raw) => {
+      const w = translateUxQuotaWindow(raw);
+      return /^[0-9A-Za-z]/.test(w) ? ` ${w}` : w;
+    };
+    if (
+      (m = trimmed.match(
+        /^You have used (some|all|most|\d+(?:\.\d+)?%?) of your (.+?) limit,\s*it will (?:(fully)\s+)?refresh in (.+?)\.?$/i
+      ))
+    ) {
+      const amt = m[1].toLowerCase();
+      const winZh = padWinZh(m[2]);
+      const fullZh = m[3] ? '完全' : '';
+      const durZh = translateUxDurationPhrase(m[4]);
+      if (amt === 'all') return `您的${winZh}额度已用尽，将在 ${durZh}后${fullZh}恢复。`;
+      if (amt === 'some') return `您已使用部分${winZh}额度，将在 ${durZh}后${fullZh}恢复。`;
+      if (amt === 'most') return `您已使用大部分${winZh}额度，将在 ${durZh}后${fullZh}恢复。`;
+      return `您已使用 ${m[1]} 的${winZh}额度，将在 ${durZh}后${fullZh}恢复。`;
+    }
+    if ((m = trimmed.match(/^You (?:haven't|have not) used any of your (.+?) limit(?:\s+yet)?\.?$/i))) {
+      return `您尚未消耗${padWinZh(m[1])}额度。`;
+    }
+    if ((m = trimmed.match(/^You have reached your (.+?) limit(?:,\s*it will (?:(fully)\s+)?refresh in (.+?))?\.?$/i))) {
+      const winZh = padWinZh(m[1]);
+      if (m[3]) {
+        return `您已达到${winZh}额度上限，将在 ${translateUxDurationPhrase(m[3])}后${m[2] ? '完全' : ''}恢复。`;
+      }
+      return `您已达到${winZh}额度上限。`;
+    }
+    if ((m = trimmed.match(/^Your (.+?) limit (?:will )?(?:(fully)\s+)?refresh(?:es)? in (.+?)\.?$/i))) {
+      return `您的${padWinZh(m[1])}额度将在 ${translateUxDurationPhrase(m[3])}后${m[2] ? '完全' : ''}恢复。`;
+    }
+    if ((m = trimmed.match(/^Your (.+?) limit starts when you send your first message\.?$/i))) {
+      return `您的${padWinZh(m[1])}额度将从发送第一条消息时起算。`;
+    }
+    if ((m = trimmed.match(/^Resets in\s+(.+)$/i))) {
+      return `${translateUxDurationPhrase(m[1])}后重置`;
+    }
+    if ((m = trimmed.match(/^(?:Quota is )?shared across\s+(.+?)\.?$/i))) {
+      return `由 ${m[1].replace(/,\s*and\s+/gi, '、').replace(/\s+and\s+/gi, ' 与 ')} 共享额度。`;
+    }
+    if ((m = trimmed.match(/^Show\s+(\d+)\s+breakdowns?$/i))) return `展开 ${m[1]} 项明细`;
+    if ((m = trimmed.match(/^Hide\s+(?:\d+\s+)?breakdowns?$/i))) return '收起明细';
+    if ((m = trimmed.match(/^Send feedback as\s+(.+)$/i))) return `以 ${m[1]} 身份发送反馈`;
+    if (
+      (m = trimmed.match(
+        /^You have (a|\d+) conversations? in progress\.\s*Updating will (interrupt|cancel) (?:it|them),\s*and (.+?)\.?$/i
+      ))
+    ) {
+      const cnt = m[1].toLowerCase() === 'a' ? '1' : m[1];
+      if (m[2].toLowerCase() === 'interrupt') {
+        return `当前有 ${cnt} 个对话正在运行。更新将暂时中断对话，并在更新完成后自动恢复。`;
+      }
+      return `当前有 ${cnt} 个对话正在运行。更新将取消这些对话，更新后需手动重新发起。`;
+    }
     return null;
   }
 
@@ -5621,6 +7619,155 @@
     }
   }
 
+  /* ---- Native Electron NSMenu Context Menu Localization (e.g., Pinned Conversations) ---- */
+  function normalizeNativeMenuAccelerator(acc) {
+    if (typeof acc !== 'string' || !acc) return undefined;
+    return acc
+      .replace(/\u2303/g, 'Control+')
+      .replace(/\u2325/g, 'Alt+')
+      .replace(/\u21e7/g, 'Shift+')
+      .replace(/\u2318/g, 'CmdOrCtrl+')
+      .replace(/\u23ce/g, 'Enter');
+  }
+
+  function translateNativeMenuLabel(rawLabel) {
+    if (typeof rawLabel !== 'string' || !rawLabel) return rawLabel;
+    const trimmed = rawLabel.trim();
+    if (!trimmed) return rawLabel;
+    const hit = uxI18nLookup(trimmed, null);
+    if (typeof hit === 'string' && hit) return hit;
+    const mGroup = trimmed.match(/^Move to Group:\s*(.+)$/i);
+    if (mGroup) return `移至分组：${mGroup[1]}`;
+    return rawLabel;
+  }
+
+  function resolveNativeContextMenuFromTarget(targetEl, nativeEv) {
+    const startEl = targetEl && targetEl.nodeType === 1 ? targetEl : targetEl && targetEl.parentElement;
+    if (!startEl) return null;
+    let cur = startEl;
+    let startFiber = null;
+    for (let up = 0; up < 8 && cur && !startFiber; up++, cur = cur.parentElement) {
+      const fk = Object.keys(cur).find((k) => k.startsWith('__reactFiber$'));
+      if (fk && cur[fk]) startFiber = cur[fk];
+    }
+    if (!startFiber) return null;
+    let f = startFiber;
+    for (let depth = 0; depth < 16 && f; depth++, f = f.return) {
+      const p = f.memoizedProps;
+      if (!p || p.disabled) continue;
+      if (typeof p.items !== 'function' && !Array.isArray(p.items)) continue;
+      const childHasCtx = Boolean(
+        f.child && f.child.memoizedProps && typeof f.child.memoizedProps.onContextMenu === 'function'
+      );
+      if (!childHasCtx) continue;
+      let rawItems;
+      try {
+        rawItems = typeof p.items === 'function' ? p.items(nativeEv) : p.items;
+      } catch {
+        return null;
+      }
+      if (!Array.isArray(rawItems) || rawItems.length === 0) return null;
+      const valid = rawItems.some(
+        (it) =>
+          it &&
+          (it.type === 'separator' ||
+            (typeof it.label === 'string' &&
+              (typeof it.onClick === 'function' || typeof it.click === 'function' || Array.isArray(it.items))))
+      );
+      if (!valid) continue;
+      return {
+        items: rawItems,
+        onOpenChange: typeof p.onOpenChange === 'function' ? p.onOpenChange : null
+      };
+    }
+    return null;
+  }
+
+  function buildLocalizedNativeMenuPayload(items, cbMap, prefix = 'cmi') {
+    const out = [];
+    for (let idx = 0; idx < items.length; idx++) {
+      const d = items[idx];
+      if (!d) continue;
+      const id = d.id || `${prefix}-${idx}`;
+      const handler = typeof d.onClick === 'function' ? d.onClick : typeof d.click === 'function' ? d.click : null;
+      if (handler) cbMap.set(id, handler);
+      const disabled =
+        d.type === 'label'
+          ? true
+          : d.disabled !== undefined
+            ? Boolean(d.disabled)
+            : d.enabled !== undefined
+              ? !d.enabled
+              : false;
+      const entry = {
+        id,
+        label: typeof d.label === 'string' ? translateNativeMenuLabel(d.label) : d.label,
+        type: d.type && d.type !== 'item' && d.type !== 'label' ? d.type : 'normal',
+        checked: d.checked,
+        disabled,
+        accelerator: normalizeNativeMenuAccelerator(d.accelerator)
+      };
+      if (Array.isArray(d.items) && d.items.length > 0) {
+        entry.submenu = buildLocalizedNativeMenuPayload(d.items, cbMap, `${id}-sub`);
+      }
+      out.push(entry);
+    }
+    return out;
+  }
+
+  const onNativeContextMenuCapture = (e) => {
+    if (disposed || !FEAT.i18n || e.altKey) return;
+    if (typeof window.electronNative?.showContextMenu !== 'function') return;
+    const t = e.target;
+    const el = t && t.nodeType === 1 ? t : t && t.parentElement;
+    if (!el || !el.closest) return;
+    if (
+      el.closest(
+        'input, textarea, [contenteditable="true"], .monaco-editor, .monaco-diff-editor, .xterm, #ag-recent-row-menu, #ag-project-action-menu, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop'
+      )
+    ) {
+      return;
+    }
+    if (el.closest('.prose, .markdown, [data-markdown-root], [data-testid="user-message-content"]')) {
+      try {
+        const sel = window.getSelection && window.getSelection();
+        if (sel && String(sel).trim()) return;
+      } catch {}
+    }
+    const resolved = resolveNativeContextMenuFromTarget(el, e);
+    if (!resolved) return;
+    const cbMap = new Map();
+    const payload = buildLocalizedNativeMenuPayload(resolved.items, cbMap);
+    if (!payload.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    try {
+      if (resolved.onOpenChange) resolved.onOpenChange(true);
+    } catch {}
+    try {
+      Promise.resolve(window.electronNative.showContextMenu(payload))
+        .then((chosenId) => {
+          if (chosenId && cbMap.has(chosenId)) {
+            try {
+              cbMap.get(chosenId)();
+            } catch {}
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          try {
+            if (resolved.onOpenChange) resolved.onOpenChange(false);
+          } catch {}
+        });
+    } catch {
+      try {
+        if (resolved.onOpenChange) resolved.onOpenChange(false);
+      } catch {}
+    }
+  };
+  document.addEventListener('contextmenu', onNativeContextMenuCapture, true);
+
   /* ==========================================================================
    * 9. Native Settings -> `UI Enhancements` / `界面增强` Live Module Toggle Panel
    *    - Injects `settings-nav-item-ClaudeUX` right after `Appearance` (`外观`)
@@ -5700,6 +7847,14 @@
           'Smooth Tool Panel Collapse',
           '收拢工具详情面板时补齐 190ms 丝滑过渡动画',
           'Adds a 190ms smooth collapse transition when closing tool detail panels'
+        ],
+        [
+          'claudeUxCodeFold',
+          'codeFold',
+          '长代码块折叠与顶栏吸顶',
+          'Long Code Folding & Sticky Header',
+          '超过 40 行的代码块默认收起为预览并可一键展开，滚动时语言名与复制按钮保持吸顶',
+          'Collapses code blocks over 40 lines into a preview with one-click expand, and pins the language label & copy button while scrolling'
         ]
       ]
     },
@@ -5754,6 +7909,14 @@
           'Customizations Layout & Skill Importer',
           '为「技能与自定义」页增加分类标签切换、防卡片硬切底线、技能卡片化排版以及「+ 添加技能 / 打开技能目录」快捷入口',
           'Adds category tabs, sticky header divider, framed skill cards, and local + Add Skill / Open Folder actions to Customizations'
+        ],
+        [
+          'claudeUxOverviewPanel',
+          'overviewPanel',
+          '右侧「概览」增强仪表盘',
+          'Enhanced Right Overview Panel',
+          '在右侧「概览」面板整合紧凑导航、工作环境、实时上下文与缓存拆解、谷歌蓝双窗口配额、子智能体状态及 MCP / 技能清单',
+          'Enhances the right Overview panel with compact shortcuts, workspace environment, live Context & cache breakdown, Google Blue dual-window quotas, subagents, and MCP/skills inventory'
         ]
       ]
     }
@@ -5959,6 +8122,7 @@
       if (activeInlineEdit) renderInlineEditMeta(activeInlineEdit);
       refreshProjectsLanguageUi();
       syncCustomizationsEnhancement();
+      renderOverviewPanel(true);
     } else if (featKey === 'projects') {
       if (!on) teardownProjectsWorkspace();
       else syncProjectsWorkspace();
@@ -5982,13 +8146,23 @@
           window.__ag_render_metrics(window.__ag_last_metrics);
         } catch {}
       }
+    } else if (featKey === 'stepUnfold' && !on) {
+      document.querySelectorAll('[data-ag-inline-stream]').forEach((el) => el.removeAttribute('data-ag-inline-stream'));
     } else if (featKey === 'todoCard' && !on) {
       document.querySelectorAll('[data-ag-todo-dock]').forEach((d) => d.remove());
+      document.querySelectorAll('[data-ag-todo-mount]').forEach((m) => m.remove());
       document.querySelectorAll('ul[data-ag-todo-primary], ul[data-ag-todo-merged]').forEach((u) => restoreNativeUl(u));
+      document.querySelectorAll('[data-ag-todo-empty-wrap]').forEach((el) => el.removeAttribute('data-ag-todo-empty-wrap'));
+      document.querySelectorAll('[data-ag-todo-marker-line]').forEach((el) => el.removeAttribute('data-ag-todo-marker-line'));
     } else if (featKey === 'runningTimer' && !on) {
       document.querySelectorAll('.ag-orbit-dots, .ag-elapsed-timer').forEach((n) => n.remove());
     } else if (featKey === 'inlineUndo' && !on) {
       closeInlineEdit(false);
+    } else if (featKey === 'codeFold' && !on) {
+      teardownCodeBlocks();
+    } else if (featKey === 'overviewPanel') {
+      if (!on) teardownOverviewPanel();
+      else syncOverviewPanel(true);
     }
     syncSidebarEnhancements();
     scheduleSync();
@@ -6137,12 +8311,19 @@
     settingsStatsBtnWrap = null;
     const root = sb || null;
     if (!root) return;
+    root.removeAttribute('data-ag-stats-ready');
     root.querySelectorAll('.ag-settings-subhdr-chev').forEach((el) => el.remove());
     root
       .querySelectorAll(
         '[data-ag-stats-hidden], [data-ag-stats-subhdr], [data-ag-stats-list], [data-ag-stats-open], [data-ag-stats-active], [data-ag-stats-passthrough]'
       )
       .forEach((el) => {
+        if (el.__agStatsHandlers) {
+          el.removeEventListener('click', el.__agStatsHandlers.onClick);
+          el.removeEventListener('keydown', el.__agStatsHandlers.onKeyDown);
+          delete el.__agStatsHandlers;
+        }
+        delete el.__agStatsBound;
         el.removeAttribute('data-ag-stats-hidden');
         el.removeAttribute('data-ag-stats-subhdr');
         el.removeAttribute('data-ag-stats-list');
@@ -6196,6 +8377,7 @@
       cleanupSettingsStatsGroup(sidebar);
       return;
     }
+    sidebar.setAttribute('data-ag-stats-ready', '1');
 
     /* Mount top-level "统计 / Stats" collapsible row styled identically to native Settings nav items */
     const nativeNavBtn =
@@ -6259,18 +8441,27 @@
       else hdrEl.setAttribute('data-ag-stats-hidden', '1');
       if (!hdrEl.__agStatsBound) {
         hdrEl.__agStatsBound = true;
-        hdrEl.addEventListener('click', (e) => {
+        const onClick = (e) => {
+          if (e.target && e.target !== hdrEl && e.target.closest && e.target.closest('button, a, input, select')) {
+            return;
+          }
           e.preventDefault();
           e.stopPropagation();
           onToggle();
-        });
-        hdrEl.addEventListener('keydown', (e) => {
+        };
+        const onKeyDown = (e) => {
+          if (e.target && e.target !== hdrEl && e.target.closest && e.target.closest('button, a, input, select')) {
+            return;
+          }
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             e.stopPropagation();
             onToggle();
           }
-        });
+        };
+        hdrEl.__agStatsHandlers = { onClick, onKeyDown };
+        hdrEl.addEventListener('click', onClick);
+        hdrEl.addEventListener('keydown', onKeyDown);
       }
     };
 
@@ -6324,6 +8515,17 @@
       return;
     }
     if (settingsNavWrap && settingsNavWrap.isConnected && settingsSidebarRef === sb) {
+      if (!settingsRightRef || !settingsRightRef.isConnected) {
+        const splitRootLive =
+          sb.closest('[data-split-root="true"], [data-split-root]') ||
+          (sb.parentElement && sb.parentElement.parentElement && sb.parentElement.parentElement.parentElement);
+        const rightOuterLive =
+          splitRootLive && splitRootLive.children && splitRootLive.children.length >= 2
+            ? splitRootLive.children[splitRootLive.children.length - 1]
+            : null;
+        const rightContentLive = (rightOuterLive && rightOuterLive.firstElementChild) || rightOuterLive;
+        if (rightContentLive) settingsRightRef = rightContentLive;
+      }
       window.__agAutoApproval?.attachSettings(sb, settingsRightRef, settingsNavWrap, closeClaudeUxSettingsPane);
       syncSettingsStatsGroup(sb);
       return;
@@ -7117,6 +9319,9 @@
     const strip = document.getElementById('ag-pd-media-strip');
     if (!strip || !project) return;
     const list = getProjectMediaList(project.id, false);
+    const sig = list && list.length ? list.map((m) => m.id).join(',') : '';
+    if (strip.dataset.agMediaSig === sig) return;
+    strip.dataset.agMediaSig = sig;
     if (!list || !list.length) {
       strip.style.display = 'none';
       strip.innerHTML = '';
@@ -7171,6 +9376,57 @@
     renderPdMentionPopover();
   }
 
+  function getMentionScopeIdentity(scopeItem) {
+    const inner = scopeItem && scopeItem.scopeItem;
+    if (!inner || !inner.case) return '';
+    const v = inner.value || {};
+    if (inner.case === 'file' || inner.case === 'directory') return `${inner.case}:${v.absoluteUri || ''}`;
+    if (inner.case === 'conversation') return `conversation:${v.id || ''}`;
+    if (inner.case === 'dynamicContext') return `dyn:${v.providerLabel || ''}:${v.uri || v.itemValue || v.itemLabel || ''}`;
+    if (inner.case === 'rule' || inner.case === 'skill' || inner.case === 'workflow') {
+      return `${inner.case}:${v.uri || v.name || v.id || ''}`;
+    }
+    try {
+      return `${inner.case}:${JSON.stringify(v)}`;
+    } catch {
+      return inner.case;
+    }
+  }
+
+  function allocateUniqueMentionToken(mMap, rawLabel, item) {
+    const cleanLabel = String(rawLabel || '').replace(/[\[\]\r\n]+/g, ' ').trim() || 'item';
+    const identity = getMentionScopeIdentity(item && item.scopeItem);
+    if (identity) {
+      for (const [existingTok, existingEntry] of mMap.entries()) {
+        if (getMentionScopeIdentity(existingEntry && existingEntry.scopeItem) === identity) {
+          return { token: existingTok, label: existingEntry.label || cleanLabel };
+        }
+      }
+    }
+    const baseToken = `@[${cleanLabel}]`;
+    if (!mMap.has(baseToken)) {
+      return { token: baseToken, label: cleanLabel };
+    }
+    /* Disambiguate colliding display names (e.g. src/a/index.ts vs src/b/index.ts) using parent path or index */
+    const rawDesc = String((item && item.desc) || '').replace(/[\[\]\r\n]+/g, ' ').trim();
+    const absUri = item && item.scopeItem && item.scopeItem.scopeItem && item.scopeItem.scopeItem.value && item.scopeItem.scopeItem.value.absoluteUri;
+    const hintPath = rawDesc || (absUri ? decodeFileUriToPath(absUri) : '');
+    if (hintPath) {
+      const segs = hintPath.split(/[\\/]/).filter(Boolean);
+      for (let take = 2; take <= Math.min(segs.length, 4); take++) {
+        const candidateLbl = segs.slice(-take).join('/');
+        const candidateTok = `@[${candidateLbl}]`;
+        if (!mMap.has(candidateTok)) {
+          return { token: candidateTok, label: candidateLbl };
+        }
+      }
+    }
+    let n = 2;
+    while (mMap.has(`@[${cleanLabel} (${n})]`)) n += 1;
+    const numbered = `${cleanLabel} (${n})`;
+    return { token: `@[${numbered}]`, label: numbered };
+  }
+
   function applyPdMentionSelection(index) {
     if (!pdMentionState.open) return;
     const item = pdMentionState.items[index];
@@ -7196,12 +9452,11 @@
       return;
     }
 
-    const cleanLabel = String(item.label || '').replace(/[\[\]\r\n]+/g, ' ').trim() || 'item';
-    const token = `@[${cleanLabel}]`;
     const mMap = getProjectMentionMap(project.id, true);
+    const { token, label: finalLabel } = allocateUniqueMentionToken(mMap, item.label, item);
     mMap.set(token, {
       token,
-      label: cleanLabel,
+      label: finalLabel,
       kind: item.kind || 'plugin',
       logo: item.logo || '',
       scopeItem: item.scopeItem
@@ -7217,6 +9472,54 @@
       compInput.setSelectionRange(nextCaret, nextCaret);
     } catch {}
     compInput.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  function appendDroppedMentionsToPdComposer(project, compInput, items) {
+    if (!project || !compInput || !Array.isArray(items) || !items.length) return;
+    const mMap = getProjectMentionMap(project.id, true);
+    let curVal = compInput.value || '';
+    for (const item of items) {
+      if (!item || !item.scopeItem) continue;
+      const { token, label: finalLabel } = allocateUniqueMentionToken(mMap, item.label, item);
+      mMap.set(token, {
+        token,
+        label: finalLabel,
+        kind: item.kind || 'conversation',
+        logo: item.logo || '',
+        scopeItem: item.scopeItem
+      });
+      if (!curVal.includes(token)) {
+        const sep = curVal && !/\s$/.test(curVal) ? ' ' : '';
+        curVal = `${curVal}${sep}${token} `;
+      }
+    }
+    compInput.value = curVal;
+    compInput.focus();
+    try {
+      compInput.setSelectionRange(curVal.length, curVal.length);
+    } catch {}
+    compInput.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  const PD_INLINE_URL_RE = /(?<![\w./@-])(?:https?:\/\/|www\.)[^\s<>"'`]*[^\s<>"'`.,;:!?)\]}]/g;
+  function openUrlAtTextareaCaret(textarea) {
+    if (!textarea || typeof textarea.selectionStart !== 'number') return false;
+    const text = textarea.value || '';
+    const pos = textarea.selectionStart;
+    PD_INLINE_URL_RE.lastIndex = 0;
+    let m;
+    while ((m = PD_INLINE_URL_RE.exec(text)) !== null) {
+      const start = m.index;
+      const end = start + m[0].length;
+      if (pos >= start && pos <= end) {
+        const url = m[0].startsWith('www.') ? `https://${m[0]}` : m[0];
+        try {
+          window.open(url, '_blank', 'noopener,noreferrer');
+        } catch {}
+        return true;
+      }
+    }
+    return false;
   }
 
   async function updatePdMentionMenuForInput(project, compInput) {
@@ -7663,16 +9966,15 @@
     return null;
   }
 
+  const optimisticallyArchivedProjectIds = new Map(); // projectId -> ts
+
   async function renameNativeProject(project, nextName) {
     const trimmed = String(nextName || '').trim();
     if (!project || !project.id || project.isBuiltin || !trimmed) return { ok: false, error: 'invalid_name' };
     const pm = resolveProjectManagementService();
     if (!pm || typeof pm.updateProject !== 'function') return { ok: false, error: 'service_unavailable' };
-    const raw = getRawNativeProjectRecord(project.id, pm) || {
-      $typeName: 'exa.project_pb.Project',
-      id: project.id,
-      name: project.name
-    };
+    const raw = getRawNativeProjectRecord(project.id, pm);
+    if (!raw) return { ok: false, error: 'project_record_unavailable' };
     optimisticProjectNames.set(project.id, trimmed);
     if (projectsViewOpen) renderProjectsView();
     try {
@@ -7695,7 +9997,7 @@
     if (!pm || typeof pm.updateProject !== 'function') return false;
     const raw = getRawNativeProjectRecord(project.id, pm);
     if (!raw) return false;
-    optimisticallyDeletedProjectIds.add(project.id);
+    optimisticallyArchivedProjectIds.set(project.id, Date.now());
     if (activeProjectId === project.id) {
       activeProjectId = null;
       projectSelectedFolderPath = '';
@@ -7709,7 +10011,7 @@
       }
       return true;
     } catch {
-      optimisticallyDeletedProjectIds.delete(project.id);
+      optimisticallyArchivedProjectIds.delete(project.id);
       if (!disposed && projectsViewOpen) renderProjectsView();
       return false;
     }
@@ -7959,23 +10261,24 @@
     const input = projectsModalEl.querySelector('#ag-pm-rename-input');
     const saveBtn = projectsModalEl.querySelector('[data-ag-pm-rename-save]');
     const doSubmit = async () => {
-      if (!projectsModalState || projectsModalState.kind !== 'renameProject' || projectsModalState.saving) return;
-      const nextName = String(projectsModalState.name || '').trim();
+      const modalRef = projectsModalState;
+      if (!modalRef || modalRef.kind !== 'renameProject' || modalRef.saving) return;
+      const nextName = String(modalRef.name || '').trim();
       if (!nextName) return;
       if (nextName === st.project.name) {
         closeProjectsModal();
         return;
       }
-      projectsModalState.saving = true;
-      projectsModalState.error = '';
+      modalRef.saving = true;
+      modalRef.error = '';
       renderRenameProjectModal();
       const res = await renameNativeProject(st.project, nextName);
-      if (disposed || !projectsModalState || projectsModalState.kind !== 'renameProject') return;
+      if (disposed || projectsModalState !== modalRef) return;
       if (res && res.ok) {
         closeProjectsModal();
       } else {
-        projectsModalState.saving = false;
-        projectsModalState.error = L('重命名失败：', 'Rename failed: ') + String((res && res.error) || 'unknown');
+        modalRef.saving = false;
+        modalRef.error = L('重命名失败：', 'Rename failed: ') + String((res && res.error) || 'unknown');
         renderRenameProjectModal();
       }
     };
@@ -8010,10 +10313,21 @@
     const rawProjects = (state && state.sidebarProjects && state.sidebarProjects.projects) || [];
     const presentRawIds = new Set();
     const out = [];
+    const nowArchMs = Date.now();
     for (const p of rawProjects) {
       if (!p || !p.id) continue;
       presentRawIds.add(p.id);
-      if (optimisticallyDeletedProjectIds.has(p.id) || p.archived) continue;
+      if (p.archived) {
+        /* Once Redux reflects archived: true, release optimistic archive mask so un-archiving reappears immediately */
+        optimisticallyArchivedProjectIds.delete(p.id);
+        continue;
+      }
+      const optArchTs = optimisticallyArchivedProjectIds.get(p.id);
+      if (optArchTs !== undefined) {
+        if (nowArchMs - optArchTs < 10000) continue;
+        optimisticallyArchivedProjectIds.delete(p.id);
+      }
+      if (optimisticallyDeletedProjectIds.has(p.id)) continue;
       const rawName = String(p.name || '').trim();
       if (!rawName || rawName === 'swarm/swarm_board' || p.id === 'outside-of-project') continue;
       const isCliProject = p.id === 'default-cli-project';
@@ -8087,6 +10401,28 @@
     if (lbl) lbl.textContent = L('项目', 'Projects');
   }
 
+  let projectsOpenedPathname = '';
+  let sharedModalEscBound = false;
+
+  function isCustomizationsModalKind(st) {
+    return Boolean(st && (st.kind === 'addSkill' || st.kind === 'addAgent'));
+  }
+
+  function onSharedModalEscKeyDown(e) {
+    if (disposed || e.key !== 'Escape' || e.isComposing || e.keyCode === 229) return;
+    if (!projectsModalEl || !projectsModalEl.isConnected) return;
+    if (projectsDocListenerBound) return; // handled by onProjectsGlobalKeyDown when Projects is enabled
+    e.preventDefault();
+    e.stopPropagation();
+    closeProjectsModal();
+  }
+
+  function ensureSharedModalEscBound() {
+    if (sharedModalEscBound) return;
+    sharedModalEscBound = true;
+    document.addEventListener('keydown', onSharedModalEscKeyDown, true);
+  }
+
   function closeProjectsModal() {
     projectsModalState = null;
     if (projectsModalEl) {
@@ -8095,15 +10431,17 @@
     }
   }
 
-  function closeProjectsView() {
+  function closeProjectsView(opts = {}) {
     clearNewProjectWatcher();
     closeProjectActionMenu();
     closePdMentionMenu();
-    if (!projectsViewOpen && !projectsModalEl) return;
-    closeProjectsModal();
+    const keepCustModal = !opts.forceCloseAllModals && isCustomizationsModalKind(projectsModalState);
+    if (!projectsViewOpen && (keepCustModal || !projectsModalEl)) return;
+    if (!keepCustModal) closeProjectsModal();
     projectFolderDropdownOpen = false;
     projectFolderSearch = '';
     projectsViewOpen = false;
+    projectsOpenedPathname = '';
     if (projectsViewEl) {
       projectsViewEl.setAttribute('data-open', 'false');
     }
@@ -8111,13 +10449,21 @@
   }
 
   function isNativeModalDialogOpen() {
-    const dialogs = document.querySelectorAll('[role="dialog"], .agy-dialog');
+    const dialogs = document.querySelectorAll('[role="dialog"], .agy-dialog, [role="menu"], [role="listbox"], [data-popover-popup]');
     for (const el of dialogs) {
-      if (!el || !el.isConnected || el.closest('#ag-claude-project-modal, #ag-claude-projects-view')) continue;
-      if (el.getAttribute('aria-hidden') === 'true') continue;
+      if (
+        !el ||
+        !el.isConnected ||
+        el.closest(
+          '#ag-claude-project-modal, #ag-claude-projects-view, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, #ag-claude-quota-popover, #ag-recent-row-menu, #ag-project-action-menu'
+        )
+      ) {
+        continue;
+      }
+      if (el.getAttribute('aria-hidden') === 'true' || el.hasAttribute('inert')) continue;
       try {
         const cs = window.getComputedStyle(el);
-        if (cs && (cs.display === 'none' || cs.visibility === 'hidden')) continue;
+        if (cs && (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0')) continue;
       } catch {}
       return true;
     }
@@ -8158,7 +10504,7 @@
     }
     if (
       t.closest(
-        '#ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-recent-row-menu, #ag-project-action-menu, .agy-dialog, [role="dialog"]'
+        '#ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, #ag-recent-row-menu, #ag-project-action-menu, .agy-dialog, [role="dialog"]'
       )
     ) {
       return;
@@ -8175,7 +10521,16 @@
   }
 
   function onProjectsGlobalKeyDown(e) {
-    if (e.key !== 'Escape') return;
+    if (e.key !== 'Escape' || e.isComposing || e.keyCode === 229) return;
+    /* Let sidebar inline rename, recent row menu, model/quota popovers handle Escape first */
+    if (
+      (e.target && e.target.closest && e.target.closest('[data-ag-recent-rename-input]')) ||
+      document.getElementById('ag-recent-row-menu') ||
+      modelPopoverOpen ||
+      quotaPopoverOpen
+    ) {
+      return;
+    }
     if (pdMentionState.open) {
       e.preventDefault();
       e.stopPropagation();
@@ -8184,7 +10539,7 @@
       e.preventDefault();
       e.stopPropagation();
       closeProjectActionMenu();
-    } else if (projectsModalEl) {
+    } else if (projectsModalEl && projectsModalEl.isConnected) {
       e.preventDefault();
       e.stopPropagation();
       closeProjectsModal();
@@ -8245,6 +10600,7 @@
     const beforeSearchProj = readSearchProj();
     let sawDialogOpen = false;
     let closeGraceTimer = 0;
+    let lastWatchSig = '';
 
     const focusProjectInOverlay = (proj) => {
       clearNewProjectWatcher();
@@ -8261,7 +10617,13 @@
         return;
       }
       const st = store.getState();
-      const isOpen = Boolean(st && st.newProject && st.newProject.isOpen);
+      const rawList = (st && st.sidebarProjects && st.sidebarProjects.projects) || [];
+      const isOpen = Boolean((st && st.newProject && st.newProject.isOpen) || isNativeModalDialogOpen());
+      const nextSearchProj = readSearchProj();
+      const watchSig = `${isOpen ? 1 : 0}|${nextSearchProj}|${rawList.length}|${rawList.map((p) => (p && p.id) || '').join(',')}`;
+      if (watchSig === lastWatchSig) return;
+      lastWatchSig = watchSig;
+
       if (isOpen) {
         sawDialogOpen = true;
         if (closeGraceTimer) {
@@ -8275,7 +10637,6 @@
         focusProjectInOverlay(created);
         return;
       }
-      const nextSearchProj = readSearchProj();
       if (sawDialogOpen && !isOpen && nextSearchProj && nextSearchProj !== beforeSearchProj) {
         const selectedExisting = curProjects.find((p) => p.id === nextSearchProj);
         if (selectedExisting) {
@@ -8292,7 +10653,7 @@
 
     const maxTimer = later(() => {
       clearNewProjectWatcher();
-    }, 300000);
+    }, 60000);
 
     newProjectWatchCleanup = () => {
       if (closeGraceTimer) {
@@ -8322,7 +10683,7 @@
     if (hasNewProjectSlice) {
       armNewProjectCompletionWatcher(store, bindings);
       store.dispatch({ type: 'newProject/reset' });
-      store.dispatch({ type: 'newProject/setCurrentStep', payload: 'folderSelection' });
+      store.dispatch({ type: 'newProject/setStep', payload: 'folderSelection' });
       store.dispatch({ type: 'newProject/setIsOpen', payload: true });
       return;
     }
@@ -8388,7 +10749,24 @@
     }));
   }
 
-  function startNewChatInProject(project, initialPrompt = '', mentionEntries = [], mediaEntries = []) {
+  function showProjectsFloatingNotice(msg) {
+    if (disposed || !document.body || !msg) return;
+    const old = document.getElementById('ag-projects-float-toast');
+    if (old) old.remove();
+    const toast = document.createElement('div');
+    toast.id = 'ag-projects-float-toast';
+    toast.setAttribute('role', 'status');
+    toast.setAttribute('data-ag-i18n-ignore', '1');
+    toast.style.cssText =
+      'position:fixed;bottom:24px;right:24px;z-index:2147483000;max-width:360px;padding:10px 14px;border-radius:10px;background:rgba(30,30,30,0.92);color:#fff;font-size:13px;line-height:1.4;box-shadow:0 8px 24px rgba(0,0,0,0.28);pointer-events:none;';
+    toast.textContent = msg;
+    document.body.appendChild(toast);
+    later(() => {
+      if (toast.isConnected) toast.remove();
+    }, 4500);
+  }
+
+  function startNewChatInProject(project, initialPrompt = '', mentionEntries = [], mediaEntries = [], rollbackDraft = null) {
     const { store, bindings } = resolveProjectsStoreAndBindings();
     const prompt = String(initialPrompt || '').trim();
     const submitChunks = buildComposerSubmitChunks(prompt, mentionEntries);
@@ -8399,6 +10777,23 @@
         ? bindings.router.state.location.pathname
         : '';
     const wasOnHome = prevPath === '/';
+
+    const restoreComposerDraftOnFailure = () => {
+      if (!rollbackDraft || !project || !project.id) return;
+      if (rollbackDraft.raw) projectComposerDrafts.set(project.id, rollbackDraft.raw);
+      if (Array.isArray(rollbackDraft.mediaArr) && rollbackDraft.mediaArr.length) {
+        projectComposerMedia.set(project.id, rollbackDraft.mediaArr.slice());
+      }
+      if (Array.isArray(rollbackDraft.mentionEntries) && rollbackDraft.mentionEntries.length) {
+        const mMap = getProjectMentionMap(project.id, true);
+        for (const en of rollbackDraft.mentionEntries) {
+          if (en && en.token) mMap.set(en.token, en);
+        }
+      }
+      showProjectsFloatingNotice(
+        L('未能找到主输入框，消息与附件已保留在项目草稿中，请重试。', 'Composer unavailable — your draft and attachments were preserved.')
+      );
+    };
 
     if (store && typeof store.dispatch === 'function' && project && project.id) {
       try {
@@ -8434,6 +10829,7 @@
       const readyDom = Boolean(box && (wasOnHome || box !== prevInputBox || tries >= 16));
       if (!atHome || !projectMatched || !readyDom) {
         if (++tries < 35) later(trySubmit, 70);
+        else restoreComposerDraftOnFailure();
         return;
       }
       /* Give the newly mounted Home composer one extra tick so its project & workspace hooks settle */
@@ -8503,73 +10899,100 @@
           };
           try {
             await handleSubmit(submitChunks, resolvedMedia, clearEditor);
-          } catch {} finally {
+          } catch {
+            restoreComposerDraftOnFailure();
+          } finally {
             if (mediaList.length) clearEditor();
           }
         })();
         return;
       }
       if (++tries < 35) later(trySubmit, 70);
+      else restoreComposerDraftOnFailure();
     };
     later(trySubmit, 110);
   }
 
+  const projectsContextQueueByDir = new Map();
+
   async function saveProjectContextDelta(project, mutator) {
-    if (!project || !project.dirPath || projectsContextBusy || typeof window.__agProjectCall !== 'function') {
-      return { ok: false, error: 'busy_or_unavailable' };
+    if (!project || !project.dirPath || typeof window.__agProjectCall !== 'function') {
+      return { ok: false, error: 'unavailable' };
     }
-    projectsContextBusy = true;
-    try {
-      let cur = projectsContextMap[project.dirPath];
-      if (!cur || !cur.ok) {
-        cur = await window.__agProjectCall('readContext', { dirPath: project.dirPath }, 8000);
+    const dirKey = project.dirPath;
+    const prevTail = projectsContextQueueByDir.get(dirKey) || Promise.resolve();
+    const runTask = async () => {
+      if (disposed) return { ok: false, error: 'disposed' };
+      projectsContextBusy = true;
+      try {
+        let cur = projectsContextMap[dirKey];
+        if (!cur || !cur.ok) {
+          cur = await window.__agProjectCall('readContext', { dirPath: dirKey }, 8000);
+        }
+        /* Never submit a full replacement save if current context failed to load (prevents wiping attachments/instructions) */
+        if (!cur || !cur.ok) {
+          const errMsg = (cur && cur.error) || 'context_read_failed';
+          showProjectsFloatingNotice(
+            L(`读取项目上下文失败（${errMsg}），已中止保存以防丢失现有文件。`, `Failed to load project context (${errMsg}); save aborted to protect existing files.`)
+          );
+          return { ok: false, error: errMsg };
+        }
+        const existingFiles = (Array.isArray(cur.files) ? cur.files : []).map((f) => ({
+          action: 'keep',
+          relPath: f.relPath,
+          name: f.name,
+          absPath: f.absPath
+        }));
+        const existingFolders = (Array.isArray(cur.extraFolders) ? cur.extraFolders : []).map((f) => ({
+          name: f.name,
+          absPath: f.absPath
+        }));
+        const draft = {
+          instructions: cur.instructions || '',
+          files: existingFiles,
+          extraFolders: existingFolders
+        };
+        const updated =
+          typeof mutator === 'function'
+            ? mutator(draft)
+            : mutator && typeof mutator === 'object'
+              ? Object.assign({}, draft, mutator)
+              : null;
+        if (!updated) return { ok: true, skipped: true };
+        const saved = await window.__agProjectCall(
+          'saveContext',
+          {
+            dirPath: dirKey,
+            instructions: updated.instructions,
+            files: updated.files.map((x) =>
+              x.action === 'keep'
+                ? { action: 'keep', relPath: x.relPath, name: x.name }
+                : x.action === 'add'
+                  ? { action: 'add', sourcePath: x.sourcePath, name: x.name }
+                  : { action: 'addContent', name: x.name, base64: x.base64 }
+            ),
+            extraFolders: updated.extraFolders
+          },
+          30000
+        );
+        if (!disposed && saved && saved.ok) {
+          projectsContextMap[dirKey] = saved;
+          if (projectsViewOpen) renderProjectsView();
+          invalidateOverviewSnapshotCache();
+        }
+        return saved || { ok: false, error: 'save_failed' };
+      } finally {
+        projectsContextBusy = false;
       }
-      const existingFiles = (cur && Array.isArray(cur.files) ? cur.files : []).map((f) => ({
-        action: 'keep',
-        relPath: f.relPath,
-        name: f.name,
-        absPath: f.absPath
-      }));
-      const existingFolders = (cur && Array.isArray(cur.extraFolders) ? cur.extraFolders : []).map((f) => ({
-        name: f.name,
-        absPath: f.absPath
-      }));
-      const draft = {
-        instructions: (cur && cur.instructions) || '',
-        files: existingFiles,
-        extraFolders: existingFolders
-      };
-      const updated =
-        typeof mutator === 'function'
-          ? mutator(draft)
-          : mutator && typeof mutator === 'object'
-            ? Object.assign({}, draft, mutator)
-            : null;
-      if (!updated) return { ok: true, skipped: true };
-      const saved = await window.__agProjectCall(
-        'saveContext',
-        {
-          dirPath: project.dirPath,
-          instructions: updated.instructions,
-          files: updated.files.map((x) =>
-            x.action === 'keep'
-              ? { action: 'keep', relPath: x.relPath, name: x.name }
-              : x.action === 'add'
-                ? { action: 'add', sourcePath: x.sourcePath, name: x.name }
-                : { action: 'addContent', name: x.name, base64: x.base64 }
-          ),
-          extraFolders: updated.extraFolders
-        },
-        30000
-      );
-      if (!disposed && saved && saved.ok) {
-        projectsContextMap[project.dirPath] = saved;
-        if (projectsViewOpen) renderProjectsView();
+    };
+    const nextPromise = prevTail.catch(() => {}).then(runTask);
+    projectsContextQueueByDir.set(dirKey, nextPromise);
+    nextPromise.finally(() => {
+      if (projectsContextQueueByDir.get(dirKey) === nextPromise) {
+        projectsContextQueueByDir.delete(dirKey);
       }
-      return saved || { ok: false, error: 'save_failed' };
-    } finally {
-      projectsContextBusy = false;
-    }
+    });
+    return nextPromise;
   }
 
   async function saveFilesDeltaForProject(project, mutator) {
@@ -8611,19 +11034,58 @@
     );
   }
 
-  async function pickAndAddFilesToProject(project) {
-    if (!project || !project.dirPath || typeof window.__agProjectCall !== 'function') return;
-    const picked = await window.__agProjectCall('pickFiles', {}, 120000);
-    if (disposed || !picked || !picked.ok || !Array.isArray(picked.paths) || !picked.paths.length) return;
-    await saveFilesDeltaForProject(project, (ops) => {
-      const next = ops.slice();
-      for (const p of picked.paths) {
-        if (!next.some((x) => x.absPath === p || x.sourcePath === p)) {
-          next.push({ action: 'add', sourcePath: p, name: p.split(/[\\/]/).pop() || p });
+  function openInstantNativeFilePicker(project) {
+    if (!project || !project.dirPath || !document.body) return;
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none';
+    document.body.appendChild(input);
+    const cleanup = () => {
+      try {
+        input.remove();
+      } catch {}
+    };
+    input.addEventListener(
+      'change',
+      () => {
+        const files = input.files;
+        cleanup();
+        if (!disposed && files && files.length) {
+          addDroppedFilesToProject(project, files);
         }
+      },
+      { once: true }
+    );
+    input.addEventListener('cancel', cleanup, { once: true });
+    input.click();
+  }
+
+  async function pickAndAddFilesToProject(project) {
+    if (!project || !project.dirPath) return;
+    const en = window.electronNative;
+    if (en && typeof en.getPathForFile === 'function') {
+      openInstantNativeFilePicker(project);
+      return;
+    }
+    if (typeof window.__agProjectCall === 'function') {
+      const picked = await window.__agProjectCall('pickFiles', {}, 120000);
+      if (disposed) return;
+      if (picked && picked.ok) {
+        if (!Array.isArray(picked.paths) || !picked.paths.length) return;
+        await saveFilesDeltaForProject(project, (ops) => {
+          const next = ops.slice();
+          for (const p of picked.paths) {
+            if (!next.some((x) => x.absPath === p || x.sourcePath === p)) {
+              next.push({ action: 'add', sourcePath: p, name: p.split(/[\\/]/).pop() || p });
+            }
+          }
+          return next;
+        });
+        return;
       }
-      return next;
-    });
+    }
+    openInstantNativeFilePicker(project);
   }
 
   async function addDroppedFilesToProject(project, fileList) {
@@ -8656,7 +11118,15 @@
       }
     }
     if (!additions.length) return;
-    await saveFilesDeltaForProject(project, (ops) => ops.concat(additions));
+    await saveFilesDeltaForProject(project, (ops) => {
+      const next = ops.slice();
+      for (const item of additions) {
+        const p = item.sourcePath;
+        if (p && next.some((x) => x.absPath === p || x.sourcePath === p)) continue;
+        next.push(item);
+      }
+      return next;
+    });
   }
 
   async function removeFileFromProject(project, relPath) {
@@ -8724,7 +11194,7 @@
               ? `<span class="ag-pd-chat-pin" title="${escapeHtml(L('已置顶', 'Pinned'))}">${RECENT_PIN_SVG}</span>`
               : '';
             const timeTxt = c.lastSec ? formatProjectTimeAgo(c.lastSec) : '';
-            return `<button type="button" class="ag-pd-chat-row" data-ag-pd-chat="${escapeHtml(c.id)}">
+            return `<button type="button" class="ag-pd-chat-row" draggable="true" data-ag-pd-chat="${escapeHtml(c.id)}" data-ag-pd-chat-title="${escapeHtml(c.title)}">
               <div class="ag-pd-chat-main">
                 <span class="ag-pd-chat-title">${statusDot}${pinBadge}${escapeHtml(c.title)}</span>
               </div>
@@ -8737,11 +11207,12 @@
           'No conversations in this project yet. Start one above.'
         )}</div>`;
 
+    const agentsFilePath = hasLocalDir ? `${String(project.dirPath).replace(/[\\/]+$/, '')}/AGENTS.md` : '';
     const instBodyHtml = instructions
       ? `<div class="ag-pd-inst-preview">${escapeHtml(instructions)}</div>`
       : `<div class="ag-pd-card-muted">${L(
-          '添加项目指令，定制 AI 在本项目中的工作方式与背景约束',
-          'Add instructions to tailor responses in this project'
+          '编写项目指令，保存后直接生成或更新项目根目录下的 AGENTS.md',
+          'Write project instructions — saved directly to root AGENTS.md'
         )}</div>`;
 
     const filesBodyHtml = files.length
@@ -8750,7 +11221,7 @@
             const modeTag = f.inlined
               ? `<span class="ag-pm-tag ag-pm-tag-inline">${L('自动内联', 'Inline')}</span>`
               : `<span class="ag-pm-tag">${L('按需读取', 'On-demand')}</span>`;
-            return `<div class="ag-pd-file-row">
+            return `<div class="ag-pd-file-row" draggable="true" data-ag-pd-drag-file="${escapeHtml(f.absPath || '')}">
               <button type="button" class="ag-pd-file-name" data-ag-pd-reveal-file="${escapeHtml(f.absPath || '')}" title="${escapeHtml(f.absPath || f.name)}">${escapeHtml(f.name)}</button>
               <span class="ag-pd-file-meta">${modeTag}<span>${escapeHtml(f.sizeText || '')}</span></span>
               <button type="button" class="ag-pd-file-del" data-ag-pd-rm-file="${escapeHtml(f.relPath)}" aria-label="${escapeHtml(L('移除文件', 'Remove file'))}">×</button>
@@ -8772,7 +11243,8 @@
       if (f === 'weekly') {
         const dowsZh = ['日', '一', '二', '三', '四', '五', '六'];
         const dowsEn = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-        const idx = Math.min(6, Math.max(0, Number(t.dayOfWeek) || 1));
+        const rawDow = Number(t.dayOfWeek);
+        const idx = Number.isFinite(rawDow) ? Math.min(6, Math.max(0, rawDow)) : 1;
         return `${L(`每周${dowsZh[idx]}`, `Weekly ${dowsEn[idx]}`)} ${t.time || '09:00'}`;
       }
       return t.customCron || 'Cron';
@@ -8933,10 +11405,10 @@
             <div class="ag-pd-sidecard">
               <div class="ag-pd-section"${hasLocalDir ? ' data-ag-pd-inst-sec="true"' : ''}>
                 <div class="ag-pd-sec-hdr">
-                  <span class="ag-pd-sec-title">${L('项目指令', 'Instructions')}</span>
+                  <span class="ag-pd-sec-title">${L('项目指令', 'Instructions')} <span class="ag-pd-sec-file-tag"${agentsFilePath ? ` title="${escapeHtml(agentsFilePath)}"` : ''}>AGENTS.md</span></span>
                   ${
                     hasLocalDir
-                      ? `<button type="button" class="ag-pd-sec-btn" data-ag-pd-edit-inst="true" aria-label="${escapeHtml(L('编辑项目指令', 'Edit instructions'))}">${
+                      ? `<button type="button" class="ag-pd-sec-btn" data-ag-pd-edit-inst="true" aria-label="${escapeHtml(L('编辑 AGENTS.md', 'Edit AGENTS.md'))}">${
                           instructions ? SVG_PROJ_EDIT : SVG_PROJ_PLUS
                         }</button>`
                       : ''
@@ -9087,6 +11559,8 @@
       if (!raw && !mediaArr.length) return;
       const mMap = getProjectMentionMap(project.id, false);
       const mentionEntries = mMap ? [...mMap.values()] : [];
+      const rollbackDraft = { raw, mentionEntries: mentionEntries.slice(), mediaArr: mediaArr.slice() };
+      if (compInput) compInput.value = '';
       projectComposerDrafts.delete(project.id);
       projectComposerMedia.delete(project.id);
       if (mMap) mMap.clear();
@@ -9097,7 +11571,7 @@
             ? `[${L('关联文件夹', 'Linked folder')}: ${activeFolder.absPath}]\n${raw}`
             : `[${L('关联文件夹', 'Linked folder')}: ${activeFolder.absPath}]`
           : raw;
-      startNewChatInProject(project, finalPrompt, mentionEntries, mediaArr);
+      startNewChatInProject(project, finalPrompt, mentionEntries, mediaArr, rollbackDraft);
     };
     if (compInput && sendBtn) {
       if (compInput.value !== savedDraft) compInput.value = savedDraft;
@@ -9130,7 +11604,13 @@
         syncSend();
         updatePdMentionMenuForInput(project, compInput);
       });
-      compInput.addEventListener('click', () => {
+      compInput.addEventListener('click', (e) => {
+        if (e.metaKey || e.ctrlKey) {
+          if (openUrlAtTextareaCaret(compInput)) {
+            e.preventDefault();
+            return;
+          }
+        }
         updatePdMentionMenuForInput(project, compInput);
       });
       compInput.addEventListener('paste', (e) => {
@@ -9142,8 +11622,15 @@
       });
       if (compBox) {
         compBox.addEventListener('dragover', (e) => {
-          if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) {
+          const dt = e.dataTransfer;
+          if (
+            dt &&
+            (Array.from(dt.types || []).includes('Files') || hasDroppedContextPayload(dt))
+          ) {
             e.preventDefault();
+            try {
+              dt.dropEffect = 'copy';
+            } catch {}
             compBox.setAttribute('data-drag', 'true');
           }
         });
@@ -9154,6 +11641,13 @@
         });
         compBox.addEventListener('drop', (e) => {
           compBox.removeAttribute('data-drag');
+          const droppedMentions = extractDroppedContextMentions(e.dataTransfer);
+          if (droppedMentions.length > 0) {
+            e.preventDefault();
+            e.stopPropagation();
+            appendDroppedMentionsToPdComposer(project, compInput, droppedMentions);
+            return;
+          }
           const imgs = extractComposerImageFiles(e.dataTransfer);
           if (!imgs.length) return;
           e.preventDefault();
@@ -9197,9 +11691,36 @@
       sendBtn.addEventListener('click', dispatchPrompt);
     }
 
+    let pdLastDragEndTs = 0;
     el.querySelectorAll('[data-ag-pd-chat]').forEach((btn) => {
       btn.addEventListener('click', () => {
+        if (Date.now() - pdLastDragEndTs < 260) return;
         openConversationFromProject(btn.getAttribute('data-ag-pd-chat'));
+      });
+      btn.addEventListener('dragstart', (e) => {
+        const cid = btn.getAttribute('data-ag-pd-chat');
+        const title = btn.getAttribute('data-ag-pd-chat-title') || '';
+        attachConversationDragTransfer(e.dataTransfer, cid, title);
+        btn.setAttribute('data-dragging', 'true');
+      });
+      btn.addEventListener('dragend', () => {
+        pdLastDragEndTs = Date.now();
+        btn.removeAttribute('data-dragging');
+      });
+    });
+
+    el.querySelectorAll('[data-ag-pd-drag-file]').forEach((row) => {
+      row.addEventListener('dragstart', (e) => {
+        if (e.target && e.target.closest && e.target.closest('[data-ag-pd-rm-file]')) {
+          e.preventDefault();
+          return;
+        }
+        const abs = row.getAttribute('data-ag-pd-drag-file');
+        if (!abs) {
+          e.preventDefault();
+          return;
+        }
+        attachFileDragTransfer(e.dataTransfer, abs);
       });
     });
 
@@ -9278,10 +11799,40 @@
     });
 
     el.querySelectorAll('[data-ag-pd-del-sched]').forEach((b) => {
-      b.addEventListener('click', (e) => {
+      b.addEventListener('click', async (e) => {
         e.stopPropagation();
         const task = schedById.get(b.getAttribute('data-ag-pd-del-sched'));
-        if (task) deleteProjectScheduledTaskFromUi(project, task);
+        if (!task) return;
+        if (b.getAttribute('data-confirm') !== '1') {
+          b.setAttribute('data-confirm', '1');
+          b.textContent = task.externalSidecar ? L('确认删官方任务?', 'Delete native?') : L('确认?', 'Confirm?');
+          b.style.width = 'auto';
+          b.style.padding = '0 6px';
+          b.style.fontSize = '11px';
+          later(() => {
+            if (b.isConnected && b.getAttribute('data-confirm') === '1') {
+              b.removeAttribute('data-confirm');
+              b.textContent = '×';
+              b.style.width = '';
+              b.style.padding = '';
+              b.style.fontSize = '';
+            }
+          }, 3500);
+          return;
+        }
+        b.disabled = true;
+        const res = await deleteProjectScheduledTaskFromUi(project, task);
+        if (res && !res.ok && b.isConnected) {
+          b.disabled = false;
+          b.removeAttribute('data-confirm');
+          b.textContent = '×';
+          b.style.width = '';
+          b.style.padding = '';
+          b.style.fontSize = '';
+          showProjectsFloatingNotice(
+            L('删除定时任务失败：', 'Failed to delete task: ') + String(res.error || 'unknown')
+          );
+        }
       });
     });
 
@@ -9338,8 +11889,6 @@
       ? filtered
           .map((p) => {
             const ctx = p.dirPath ? projectsContextMap[p.dirPath] : null;
-            const hasInst = Boolean(ctx && ctx.instructions && ctx.instructions.trim());
-            const fileCount = ctx && Array.isArray(ctx.files) ? ctx.files.length : 0;
             const nativeProjMs = Number(projectsNativeMtimeMap[p.id] || 0);
             const ctxActivityMs = ctx ? Math.max(Number(ctx.lastModifiedMs || 0), Number(ctx.dirMtimeMs || 0)) : 0;
             const effectiveSec = p.lastSec || Math.floor(Math.max(nativeProjMs, ctxActivityMs) / 1000);
@@ -9348,13 +11897,6 @@
               ? `${p.chatCount} 个对话`
               : `${p.chatCount} ${p.chatCount === 1 ? 'chat' : 'chats'}`;
             const metaText = `${timeLabel} · ${chatLabel}`;
-            const badges = [];
-            if (hasInst) badges.push(`<span class="ag-proj-badge ag-proj-badge-accent">${L('已设指令', 'Instructions')}</span>`);
-            if (fileCount > 0) {
-              badges.push(
-                `<span class="ag-proj-badge">${FEAT.i18n ? `${fileCount} 个文件` : `${fileCount} ${fileCount === 1 ? 'file' : 'files'}`}</span>`
-              );
-            }
             const moreBtnHtml = !p.isBuiltin
               ? `<button type="button" class="ag-proj-card-more" data-ag-proj-menu="${escapeHtml(p.id)}" aria-label="${escapeHtml(L('项目操作', 'Project options'))}" title="${escapeHtml(L('更多操作', 'More options'))}">${RECENT_MORE_SVG}</button>`
               : '';
@@ -9366,14 +11908,13 @@
               </div>
               <div class="ag-proj-card-foot">
                 <span class="ag-proj-card-meta"${metaTitleAttr}>${escapeHtml(metaText)}</span>
-                ${badges.length ? `<div class="ag-proj-card-badges">${badges.join('')}</div>` : ''}
               </div>
             </article>`;
           })
           .join('')
       : `<div class="ag-proj-empty">${
           q
-            ? L(`没有匹配「${projectsSearchQuery}」的项目`, `No projects matching "${projectsSearchQuery}"`)
+            ? L(`没有匹配「${escapeHtml(projectsSearchQuery)}」的项目`, `No projects matching "${escapeHtml(projectsSearchQuery)}"`)
             : L('还没有本地项目文件夹，点击右上角「新建项目」添加一个吧。', 'No local project folders yet. Click "New project" to add one.')
         }</div>`;
 
@@ -9488,7 +12029,7 @@
       project,
       dirPath: project.dirPath,
       instructions: cached ? cached.instructions || '' : '',
-      hasOtherAgentsMd: Boolean(cached && cached.hasOtherAgentsMd),
+      hasAgentsMd: Boolean(cached && (cached.hasAgentsMd || (cached.instructions && cached.instructions.trim()))),
       userEdited: false,
       saving: false,
       error: ''
@@ -9501,12 +12042,12 @@
       if (disposed || projectsModalState !== modalRef) return;
       if (fresh && fresh.ok) {
         projectsContextMap[project.dirPath] = fresh;
-        const nextOther = Boolean(fresh.hasOtherAgentsMd);
-        const needRender = !modalRef.userEdited || modalRef.hasOtherAgentsMd !== nextOther;
+        const nextHasAgents = Boolean(fresh.hasAgentsMd || (fresh.instructions && fresh.instructions.trim()));
+        const needRender = !modalRef.userEdited || modalRef.hasAgentsMd !== nextHasAgents;
         if (!modalRef.userEdited) {
           modalRef.instructions = fresh.instructions || '';
         }
-        modalRef.hasOtherAgentsMd = nextOther;
+        modalRef.hasAgentsMd = nextHasAgents;
         if (needRender && !modalRef.userEdited) {
           renderProjectContextModal();
         }
@@ -9527,36 +12068,39 @@
     }
 
     const st = projectsModalState;
-    const noteHtml = st.hasOtherAgentsMd
-      ? `<div class="ag-pm-note">${L('检测到该目录已有 AGENTS.md，保存时仅更新 Anti-Claude 区块，保留你原有的全部规则。', 'Existing AGENTS.md detected — your custom rules outside the Anti-Claude block are preserved.')}</div>`
-      : '';
     const errHtml = st.error ? `<div class="ag-pm-error">${escapeHtml(st.error)}</div>` : '';
 
     projectsModalEl.innerHTML = `
-      <div class="ag-pm-dialog" role="dialog" aria-modal="true" aria-label="${escapeHtml(L('设置项目指令', 'Set project instructions'))}">
+      <div class="ag-pm-dialog" role="dialog" aria-modal="true" aria-label="${escapeHtml(L('编辑项目 AGENTS.md', 'Edit project AGENTS.md'))}">
         <div class="ag-pm-hdr">
           <div class="ag-pm-title-wrap">
             <span class="ag-pm-icon">${SVG_CLAUDE_PROJECTS_ICON}</span>
-            <h2 class="ag-pm-title">${escapeHtml(L('项目指令', 'Instructions'))} · ${escapeHtml(st.project.name)}</h2>
+            <h2 class="ag-pm-title">${escapeHtml(st.project.name)} · AGENTS.md</h2>
           </div>
           <button type="button" class="ag-pm-close" data-ag-pm-close="true" aria-label="${escapeHtml(L('关闭', 'Close'))}">×</button>
         </div>
         <p class="ag-pm-desc">${L(
-          '填写在这个项目文件夹下每场对话自动遵循的背景、角色与规范。保存后写入项目 AGENTS.md，100% 本地生效。',
-          'Define background context, style, and constraints applied automatically to every chat in this project (saved locally to AGENTS.md).'
+          '直接读写项目根目录下的 AGENTS.md 正文（右侧添加的「参考文件」与「关联文件夹」会自动维护在文件末尾，互不覆盖）。',
+          'Directly reads and writes root AGENTS.md for this project (attached context files and linked folders are maintained automatically at the end of the file).'
         )}</p>
         <div class="ag-pm-field">
-          <textarea id="ag-pm-instructions" class="ag-pm-textarea" rows="8" placeholder="${escapeHtml(
-            L('例如：本项目是某案件卷宗/法考科目/工程报价，回答时请遵循……', 'Tell the agent how to work in this project…')
+          <textarea id="ag-pm-instructions" class="ag-pm-textarea" rows="12" placeholder="${escapeHtml(
+            L('例如：填写本项目的架构约定、目录结构、测试命令或回复风格约束……', 'Write project rules, architecture notes, or constraints for AGENTS.md…')
           )}">${escapeHtml(st.instructions)}</textarea>
-          ${noteHtml}
         </div>
         ${errHtml}
-        <div class="ag-pm-footer">
-          <button type="button" class="ag-pm-secondary-btn" data-ag-pm-close="true">${L('取消', 'Cancel')}</button>
-          <button type="button" class="ag-pm-primary-btn" data-ag-pm-save="true" ${st.saving ? 'disabled' : ''}>${
-            st.saving ? L('保存中…', 'Saving…') : L('保存指令', 'Save instructions')
-          }</button>
+        <div class="ag-pm-footer${st.hasAgentsMd ? ' ag-pm-footer-split' : ''}">
+          ${
+            st.hasAgentsMd
+              ? `<button type="button" class="ag-pm-reveal-link" data-ag-pm-reveal-agents="true">${L('在 Finder 中定位 AGENTS.md', 'Reveal AGENTS.md in Finder')}</button>`
+              : ''
+          }
+          <div class="ag-pm-footer-actions">
+            <button type="button" class="ag-pm-secondary-btn" data-ag-pm-close="true">${L('取消', 'Cancel')}</button>
+            <button type="button" class="ag-pm-primary-btn" data-ag-pm-save="true" ${st.saving ? 'disabled' : ''}>${
+              st.saving ? L('保存中…', 'Saving…') : L('保存 AGENTS.md', 'Save AGENTS.md')
+            }</button>
+          </div>
         </div>
       </div>
     `;
@@ -9572,6 +12116,16 @@
       });
     }
 
+    const revealBtn = projectsModalEl.querySelector('[data-ag-pm-reveal-agents]');
+    if (revealBtn) {
+      revealBtn.addEventListener('click', () => {
+        if (st.dirPath && typeof window.__agProjectCall === 'function') {
+          const targetPath = `${String(st.dirPath).replace(/[\\/]+$/, '')}/AGENTS.md`;
+          window.__agProjectCall('revealFile', { dirPath: st.dirPath, targetPath }, 5000);
+        }
+      });
+    }
+
     projectsModalEl.querySelectorAll('[data-ag-pm-close]').forEach((b) => {
       b.addEventListener('click', () => closeProjectsModal());
     });
@@ -9579,32 +12133,34 @@
     const saveBtn = projectsModalEl.querySelector('[data-ag-pm-save]');
     if (saveBtn) {
       saveBtn.addEventListener('click', async () => {
-        if (!projectsModalState || projectsModalState.saving) return;
+        const modalRef = projectsModalState;
+        if (!modalRef || modalRef.saving) return;
         if (typeof window.__agProjectCall !== 'function') {
-          projectsModalState.error = L('本地写入桥接不可用，请重启 Anti-Claude 守护进程', 'Local write bridge unavailable');
+          modalRef.error = L('本地写入桥接不可用，请重启 Anti-Claude 守护进程', 'Local write bridge unavailable');
           renderProjectContextModal();
           return;
         }
-        projectsModalState.saving = true;
-        projectsModalState.error = '';
+        modalRef.saving = true;
+        modalRef.error = '';
         renderProjectContextModal();
         /* Submit only `instructions` so in-flight context loads can never overwrite existing attachments or folders */
         const res = await window.__agProjectCall(
           'saveContext',
           {
-            dirPath: projectsModalState.dirPath,
-            instructions: projectsModalState.instructions
+            dirPath: modalRef.dirPath,
+            instructions: modalRef.instructions
           },
           20000
         );
-        if (disposed || !projectsModalState) return;
+        if (disposed || projectsModalState !== modalRef) return;
         if (res && res.ok) {
-          projectsContextMap[projectsModalState.dirPath] = res;
+          projectsContextMap[modalRef.dirPath] = res;
           closeProjectsModal();
           if (projectsViewOpen) renderProjectsView();
+          invalidateOverviewSnapshotCache();
         } else {
-          projectsModalState.saving = false;
-          projectsModalState.error = L('保存失败：', 'Save failed: ') + String((res && res.error) || 'unknown');
+          modalRef.saving = false;
+          modalRef.error = L('保存失败：', 'Save failed: ') + String((res && res.error) || 'unknown');
           renderProjectContextModal();
         }
       });
@@ -9615,6 +12171,17 @@
     if (!project || !task) return;
     const raw = String(task.instructions || '').trim();
     if (!raw) return;
+    const taskModelId = String(task.model || '').trim();
+    if (taskModelId) {
+      const api = discoverModelSelectorApi() || buildReduxModelSelectorApi();
+      if (api) {
+        const allOpts = []
+          .concat(Array.isArray(api.modelOptions) ? api.modelOptions : [])
+          .concat(Array.isArray(api.customModels) ? api.customModels : []);
+        const matched = allOpts.find((o) => o && !o.disabled && o.modelId === taskModelId);
+        if (matched) applyModelSelectionOption(api, matched);
+      }
+    }
     const normProj = String(project.dirPath || '').replace(/\/+$/, '');
     const normTaskDir = String(task.folderPath || '').replace(/\/+$/, '');
     const finalPrompt =
@@ -9625,7 +12192,9 @@
   }
 
   async function deleteProjectScheduledTaskFromUi(project, task) {
-    if (!project || !project.dirPath || !task || typeof window.__agProjectCall !== 'function') return;
+    if (!project || !project.dirPath || !task || typeof window.__agProjectCall !== 'function') {
+      return { ok: false, error: 'unavailable' };
+    }
     const res = await window.__agProjectCall(
       'deleteScheduledTask',
       { dirPath: project.dirPath, taskId: task.id, sidecarId: task.sidecarId || '' },
@@ -9635,6 +12204,7 @@
       projectsContextMap[project.dirPath] = res;
       if (projectsViewOpen) renderProjectsView();
     }
+    return res || { ok: false, error: 'delete_failed' };
   }
 
   function openProjectScheduledModal(project, existingTask = null) {
@@ -9670,6 +12240,75 @@
     renderProjectScheduledModal();
   }
 
+  function buildScheduledTaskModelGroups(currentModelId) {
+    const api = discoverModelSelectorApi() || buildReduxModelSelectorApi();
+    const rawOpts = api && Array.isArray(api.modelOptions) ? api.modelOptions : [];
+    const customOpts = api && Array.isArray(api.customModels) ? api.customModels : [];
+    const seenIds = new Set();
+    const dynamicOpts = [];
+    for (const o of rawOpts.concat(customOpts)) {
+      if (!o || o.disabled || !o.label) continue;
+      const id = typeof o.modelId === 'string' ? o.modelId.trim() : '';
+      if (!id || seenIds.has(id)) continue;
+      seenIds.add(id);
+      dynamicOpts.push(o);
+    }
+
+    if (!dynamicOpts.length) {
+      const flatOptions = [
+        { value: 'gemini-4-neon-high', label: 'Gemini 4 Neon High' },
+        { value: 'gemini-4-argon-high', label: 'Gemini 4 Argon High' },
+        { value: 'gemini-4-carbon-high', label: 'Gemini 4 Carbon High' },
+        { value: 'gemini-4-hydrogen-low', label: 'Gemini 4 Hydrogen Low' }
+      ];
+      if (currentModelId && !flatOptions.some((m) => m.value === currentModelId)) {
+        flatOptions.push({ value: currentModelId, label: currentModelId });
+      }
+      return { groups: [], flatOptions, extraOptions: [] };
+    }
+
+    const buckets = { primary: new Map(), orch: new Map(), other: new Map() };
+    for (const o of dynamicOpts) {
+      const parsed = parseModelLabelEffort(o.label);
+      const isOrch = isOrchestratorModelOpt(o);
+      const famMap = buckets[isOrch ? 'orch' : /^gemini\b/i.test(parsed.baseName) ? 'primary' : 'other'];
+      let fam = famMap.get(parsed.baseName);
+      if (!fam) {
+        fam = { baseName: parsed.baseName, variants: [] };
+        famMap.set(parsed.baseName, fam);
+      }
+      fam.variants.push({
+        effort: parsed.effort,
+        opt: o,
+        label: parsed.effort ? `${parsed.baseName} · ${displayEffortLabel(parsed.effort)}` : parsed.baseName
+      });
+    }
+
+    const toOptions = (famList) => {
+      const out = [];
+      for (const fam of famList) {
+        sortFamilyVariants(fam.variants);
+        for (const v of fam.variants) out.push({ value: v.opt.modelId, label: v.label });
+      }
+      return out;
+    };
+
+    const primaryFams = Array.from(buckets.primary.values()).sort(
+      (a, b) => modelCoreRank(a.baseName) - modelCoreRank(b.baseName)
+    );
+    const groups = [
+      { label: L('主力模型', 'Primary models'), options: toOptions(primaryFams) },
+      { label: L('多智能体编排', 'Orchestrators'), options: toOptions(Array.from(buckets.orch.values())) },
+      { label: L('其他模型', 'Other models'), options: toOptions(Array.from(buckets.other.values())) }
+    ].filter((g) => g.options.length > 0);
+
+    const extraOptions =
+      currentModelId && !groups.some((g) => g.options.some((o) => o.value === currentModelId))
+        ? [{ value: currentModelId, label: currentModelId }]
+        : [];
+    return { groups, flatOptions: [], extraOptions };
+  }
+
   function renderProjectScheduledModal() {
     if (!projectsModalState || projectsModalState.kind !== 'scheduled') return;
     if (!projectsModalEl || !projectsModalEl.isConnected) {
@@ -9695,16 +12334,19 @@
       folderOptions.push({ absPath: st.folderPath, label: segs[segs.length - 1] || st.folderPath });
     }
 
-    const modelOptions = [
-      { value: '', label: L('默认模型', 'Default model') },
-      { value: 'gemini-4-neon-high', label: 'Gemini 4 Neon High' },
-      { value: 'gemini-4-argon-high', label: 'Gemini 4 Argon High' },
-      { value: 'gemini-4-carbon-high', label: 'Gemini 4 Carbon High' },
-      { value: 'gemini-4-hydrogen-low', label: 'Gemini 4 Hydrogen Low' }
-    ];
-    if (st.model && !modelOptions.some((m) => m.value === st.model)) {
-      modelOptions.push({ value: st.model, label: st.model });
-    }
+    const modelData = buildScheduledTaskModelGroups(st.model);
+    const renderSchedModelOpt = (m) =>
+      `<option value="${escapeHtml(m.value)}"${m.value === st.model ? ' selected' : ''}>${escapeHtml(m.label)}</option>`;
+    const modelOptionsHtml =
+      renderSchedModelOpt({ value: '', label: L('默认模型', 'Default model') }) +
+      modelData.flatOptions.map(renderSchedModelOpt).join('') +
+      modelData.groups
+        .map(
+          (grp) =>
+            `<optgroup label="${escapeHtml(grp.label)}">${grp.options.map(renderSchedModelOpt).join('')}</optgroup>`
+        )
+        .join('') +
+      modelData.extraOptions.map(renderSchedModelOpt).join('');
 
     const freqOptions = [
       { value: 'manual', label: L('手动', 'Manual') },
@@ -9796,12 +12438,7 @@
               </label>
               <label class="ag-sched-picker-wrap ag-sched-picker-model">
                 <select id="ag-sched-model" class="ag-sched-inline-select" aria-label="${escapeHtml(L('模型', 'Model'))}">
-                  ${modelOptions
-                    .map(
-                      (m) =>
-                        `<option value="${escapeHtml(m.value)}"${m.value === st.model ? ' selected' : ''}>${escapeHtml(m.label)}</option>`
-                    )
-                    .join('')}
+                  ${modelOptionsHtml}
                 </select>
               </label>
             </div>
@@ -9881,15 +12518,17 @@
     const folderSel = projectsModalEl.querySelector('#ag-sched-folder');
     if (folderSel) {
       folderSel.addEventListener('change', async () => {
-        if (!projectsModalState) return;
+        const modalRef = projectsModalState;
+        if (!modalRef) return;
         if (folderSel.value === '__add_folder__') {
           if (typeof window.__agProjectCall === 'function') {
             try {
               const picked = await window.__agProjectCall('pickFolder', {}, 120000);
-              if (!disposed && projectsModalState && picked && picked.ok && !picked.canceled && picked.folderPath) {
+              if (disposed || projectsModalState !== modalRef) return;
+              if (picked && picked.ok && !picked.canceled && picked.folderPath) {
                 const nextPath = picked.folderPath;
-                if (nextPath !== projectsModalState.dirPath) {
-                  const saveRes = await saveProjectContextDelta(projectsModalState.project, (draft) => {
+                if (nextPath !== modalRef.dirPath) {
+                  const saveRes = await saveProjectContextDelta(modalRef.project, (draft) => {
                     const nextExtra = draft.extraFolders.slice();
                     if (!nextExtra.some((f) => f.absPath === nextPath)) {
                       nextExtra.push({
@@ -9899,31 +12538,30 @@
                     }
                     return Object.assign({}, draft, { extraFolders: nextExtra });
                   });
-                  if (projectsModalState) {
-                    if (saveRes && saveRes.ok === false) {
-                      projectsModalState.error =
-                        L('关联文件夹保存失败：', 'Failed to link folder: ') + String(saveRes.error || 'unknown');
-                    } else {
-                      projectsModalState.folderPath = nextPath;
-                      projectsModalState.error = '';
-                    }
+                  if (disposed || projectsModalState !== modalRef) return;
+                  if (saveRes && saveRes.ok === false) {
+                    modalRef.error =
+                      L('关联文件夹保存失败：', 'Failed to link folder: ') + String(saveRes.error || 'unknown');
+                  } else {
+                    modalRef.folderPath = nextPath;
+                    modalRef.error = '';
                   }
-                } else if (projectsModalState) {
-                  projectsModalState.folderPath = nextPath;
-                  projectsModalState.error = '';
+                } else {
+                  modalRef.folderPath = nextPath;
+                  modalRef.error = '';
                 }
               }
             } catch (err) {
-              if (projectsModalState) {
-                projectsModalState.error =
+              if (!disposed && projectsModalState === modalRef) {
+                modalRef.error =
                   L('关联文件夹保存失败：', 'Failed to link folder: ') + String((err && err.message) || err);
               }
             }
           }
-          renderProjectScheduledModal();
+          if (!disposed && projectsModalState === modalRef) renderProjectScheduledModal();
           return;
         }
-        projectsModalState.folderPath = folderSel.value || projectsModalState.dirPath;
+        modalRef.folderPath = folderSel.value || modalRef.dirPath;
       });
     }
 
@@ -9975,58 +12613,75 @@
     const delBtn = projectsModalEl.querySelector('[data-ag-sched-del]');
     if (delBtn) {
       delBtn.addEventListener('click', async () => {
-        if (!projectsModalState || projectsModalState.saving) return;
-        projectsModalState.saving = true;
+        const modalRef = projectsModalState;
+        if (!modalRef || modalRef.saving) return;
+        if (!modalRef.confirmDelete) {
+          modalRef.confirmDelete = true;
+          delBtn.textContent = L('再次点击确认删除', 'Click again to confirm');
+          return;
+        }
+        modalRef.saving = true;
+        modalRef.error = '';
         renderProjectScheduledModal();
-        await deleteProjectScheduledTaskFromUi(projectsModalState.project, {
-          id: projectsModalState.editingId,
-          sidecarId: projectsModalState.sidecarId
+        const res = await deleteProjectScheduledTaskFromUi(modalRef.project, {
+          id: modalRef.editingId,
+          sidecarId: modalRef.sidecarId
         });
-        if (!disposed) closeProjectsModal();
+        if (disposed || projectsModalState !== modalRef) return;
+        if (res && res.ok) {
+          closeProjectsModal();
+        } else {
+          modalRef.saving = false;
+          modalRef.confirmDelete = false;
+          modalRef.error = L('删除失败：', 'Delete failed: ') + String((res && res.error) || 'unknown');
+          renderProjectScheduledModal();
+        }
       });
     }
 
     if (saveBtn) {
       saveBtn.addEventListener('click', async () => {
-        if (!projectsModalState || projectsModalState.saving) return;
+        const modalRef = projectsModalState;
+        if (!modalRef || modalRef.saving) return;
         if (typeof window.__agProjectCall !== 'function') {
-          projectsModalState.error = L('本地写入桥接不可用，请重启 Anti-Claude 守护进程', 'Local write bridge unavailable');
+          modalRef.error = L('本地写入桥接不可用，请重启 Anti-Claude 守护进程', 'Local write bridge unavailable');
           renderProjectScheduledModal();
           return;
         }
-        projectsModalState.saving = true;
-        projectsModalState.error = '';
+        modalRef.saving = true;
+        modalRef.error = '';
         renderProjectScheduledModal();
         const res = await window.__agProjectCall(
           'saveScheduledTask',
           {
-            dirPath: projectsModalState.dirPath,
+            dirPath: modalRef.dirPath,
             task: {
-              id: projectsModalState.editingId || undefined,
-              sidecarId: projectsModalState.sidecarId || undefined,
-              name: projectsModalState.name,
-              description: projectsModalState.description,
-              instructions: projectsModalState.instructions,
-              folderPath: projectsModalState.folderPath,
-              model: projectsModalState.model,
-              frequency: projectsModalState.frequency,
-              time: projectsModalState.time,
-              dayOfWeek: projectsModalState.dayOfWeek,
-              minute: projectsModalState.minute,
-              customCron: projectsModalState.customCron,
-              timezone: projectsModalState.timezone
+              id: modalRef.editingId || undefined,
+              sidecarId: modalRef.sidecarId || undefined,
+              name: modalRef.name,
+              description: modalRef.description,
+              instructions: modalRef.instructions,
+              folderPath: modalRef.folderPath,
+              model: modalRef.model,
+              frequency: modalRef.frequency,
+              time: modalRef.time,
+              dayOfWeek: modalRef.dayOfWeek,
+              minute: modalRef.minute,
+              customCron: modalRef.customCron,
+              timezone: modalRef.timezone
             }
           },
           20000
         );
-        if (disposed || !projectsModalState) return;
+        if (disposed || projectsModalState !== modalRef) return;
         if (res && res.ok) {
-          projectsContextMap[projectsModalState.dirPath] = res;
+          projectsContextMap[modalRef.dirPath] = res;
           closeProjectsModal();
           if (projectsViewOpen) renderProjectsView();
+          invalidateOverviewSnapshotCache();
         } else {
-          projectsModalState.saving = false;
-          projectsModalState.error = L('保存失败：', 'Save failed: ') + String((res && res.error) || 'unknown');
+          modalRef.saving = false;
+          modalRef.error = L('保存失败：', 'Save failed: ') + String((res && res.error) || 'unknown');
           renderProjectScheduledModal();
         }
       });
@@ -10035,6 +12690,7 @@
 
   function openProjectsView(targetProjectId) {
     projectsViewOpen = true;
+    projectsOpenedPathname = String((window.location && window.location.pathname) || '');
     activeProjectId = typeof targetProjectId === 'string' && targetProjectId ? targetProjectId : null;
     projectSelectedFolderPath = '';
     ensureProjectsSidebarObserver();
@@ -10164,6 +12820,74 @@
     const list = scrollBox && scrollBox.firstElementChild;
     if (!scrollBox || !sbParent || !list) return;
 
+    /* Guard against hiding native sidebar lists when Unified Recents failed to mount on a live React host */
+    const hasReactHost = Boolean(
+      document.getElementById('root') ||
+        Object.keys(list).some((k) => k.startsWith('__react')) ||
+        Object.keys(scrollBox).some((k) => k.startsWith('__react'))
+    );
+    if (hasReactHost && !document.getElementById('ag-claude-recent-section')) {
+      const bindings = findSidebarBindings();
+      if (bindings) {
+        syncRecentSection(
+          bindings,
+          bindings.store.getState(),
+          getActiveCascadeId(),
+          typeof document.hasFocus === 'function' ? document.hasFocus() : true
+        );
+      }
+      if (!document.getElementById('ag-claude-recent-section')) {
+        clearSidebarHideNativeProjects();
+        return;
+      }
+    }
+
+    const indexed = [];
+    for (const child of list.children) {
+      const rawIdx = child.getAttribute('data-index');
+      if (rawIdx === null || rawIdx === '') continue;
+      const idx = Number(rawIdx);
+      if (Number.isFinite(idx)) indexed.push({ idx, el: child });
+    }
+    if (!indexed.length) return;
+    indexed.sort((a, b) => a.idx - b.idx);
+
+    /* Sections that stay native above the cut: Pinned and (v2.34+) Coordinators, which the native list
+       renders BEFORE Pinned. Match by testid / data-title first so localized header text cannot misfire. */
+    const KEPT_HDR_RE = /^(pinned|置顶对话|coordinators|协调器|编排器)$/i;
+    const isKeptSectionHeader = (sh) =>
+      Boolean(
+        sh &&
+        (sh.querySelector('[data-testid="pinned-section-header"], [data-testid="coordinator-section-header"]') ||
+          KEPT_HDR_RE.test(String(sh.getAttribute('data-title') || '').trim()) ||
+          KEPT_HDR_RE.test(String(sh.textContent || '').trim()))
+      );
+    let cutItem = indexed.find((x) => Boolean(x.el.querySelector('[data-testid="sidebar-add-project-button"]')));
+    if (!cutItem) {
+      cutItem = indexed.find((x) => {
+        const sh = x.el.querySelector('[data-testid="section-header"]');
+        return Boolean(sh && !isKeptSectionHeader(sh));
+      });
+    }
+
+    if (cutItem) {
+      const pinnedH = cutItem.idx === 0 ? 0 : Math.max(0, Math.round(parseVirtualTranslateY(cutItem.el)));
+      list.dataset.agCutIdx = String(cutItem.idx);
+      list.dataset.agPinnedH = String(pinnedH);
+    }
+
+    const hasPinnedHdr = indexed.some((x) => {
+      const sh = x.el.querySelector('[data-testid="section-header"]');
+      return isKeptSectionHeader(sh);
+    });
+
+    if (list.dataset.agCutIdx === undefined && !hasPinnedHdr) {
+      /* Structure did not match any known section header — do NOT lock scrollTop or hide native list */
+      clearSidebarHideNativeProjects();
+      return;
+    }
+
+    /* Bind scroll lock & virtual-list observer only after confirming the native sidebar structure matches */
     if (sidebarHideScrollEl !== scrollBox) {
       if (sidebarHideScrollEl) sidebarHideScrollEl.removeEventListener('scroll', onSidebarHideScroll);
       sidebarHideScrollEl = scrollBox;
@@ -10201,38 +12925,8 @@
       } catch {}
     }
 
-    const indexed = [];
-    for (const child of list.children) {
-      const rawIdx = child.getAttribute('data-index');
-      if (rawIdx === null || rawIdx === '') continue;
-      const idx = Number(rawIdx);
-      if (Number.isFinite(idx)) indexed.push({ idx, el: child });
-    }
-    if (!indexed.length) return;
-    indexed.sort((a, b) => a.idx - b.idx);
-
-    const isPinnedHdrText = (txt) => /^(pinned|置顶对话)$/i.test(String(txt || '').trim());
-    let cutItem = indexed.find((x) => Boolean(x.el.querySelector('[data-testid="sidebar-add-project-button"]')));
-    if (!cutItem) {
-      cutItem = indexed.find((x) => {
-        const sh = x.el.querySelector('[data-testid="section-header"]');
-        return Boolean(sh && !isPinnedHdrText(sh.textContent));
-      });
-    }
-
-    if (cutItem) {
-      const pinnedH = cutItem.idx === 0 ? 0 : Math.max(0, Math.round(parseVirtualTranslateY(cutItem.el)));
-      list.dataset.agCutIdx = String(cutItem.idx);
-      list.dataset.agPinnedH = String(pinnedH);
-    }
-
     if (list.dataset.agCutIdx === undefined) {
       // Only pinned section exists in virtual list (no native Projects/Conversations headers rendered)
-      const hasPinnedHdr = indexed.some((x) => {
-        const sh = x.el.querySelector('[data-testid="section-header"]');
-        return Boolean(sh && isPinnedHdrText(sh.textContent));
-      });
-      if (!hasPinnedHdr) return;
       const last = indexed[indexed.length - 1];
       const estH = Math.max(0, Math.round(parseVirtualTranslateY(last.el) + ((last.el.getBoundingClientRect && last.el.getBoundingClientRect().height) || 33) + 12));
       sbParent.setAttribute('data-ag-sb-unified', estH > 0 ? 'pinned' : 'empty');
@@ -10244,15 +12938,35 @@
       return;
     }
 
-    const cutIdx = Number(list.dataset.agCutIdx);
-    const pinnedH = Number(list.dataset.agPinnedH) || 0;
+    let cutIdx = Number(list.dataset.agCutIdx);
+    let pinnedH = Number(list.dataset.agPinnedH) || 0;
+    /* If a newly pinned row pushed past the cached cutIdx while the cut header scrolled out, expand cutIdx safely */
+    if (!cutItem) {
+      let maxPinnedIdx = -1;
+      let maxPinnedBottom = pinnedH;
+      for (const { idx, el } of indexed) {
+        const rowEl = el.querySelector('[data-testid="conversation-row-sidebar"][data-pinned="true"]');
+        if (rowEl) {
+          if (idx > maxPinnedIdx) maxPinnedIdx = idx;
+          const b = Math.round(parseVirtualTranslateY(el) + ((el.getBoundingClientRect && el.getBoundingClientRect().height) || 33));
+          if (b > maxPinnedBottom) maxPinnedBottom = b;
+        }
+      }
+      if (maxPinnedIdx >= cutIdx) {
+        cutIdx = maxPinnedIdx + 1;
+        pinnedH = maxPinnedBottom;
+        list.dataset.agCutIdx = String(cutIdx);
+        list.dataset.agPinnedH = String(pinnedH);
+      }
+    }
     sbParent.setAttribute('data-ag-sb-unified', pinnedH > 0 ? 'pinned' : 'empty');
     sbParent.style.setProperty('--ag-sb-pinned-height', `${pinnedH}px`);
     list.style.removeProperty('--ag-sb-proj-shift');
 
     for (const { idx, el } of indexed) {
       el.removeAttribute('data-ag-sb-shift-up');
-      if (idx >= cutIdx) {
+      const isPinnedRow = Boolean(el.querySelector('[data-testid="conversation-row-sidebar"][data-pinned="true"]'));
+      if (idx >= cutIdx && !isPinnedRow) {
         el.setAttribute('data-ag-sb-hide-proj', '1');
       } else {
         el.removeAttribute('data-ag-sb-hide-proj');
@@ -10260,8 +12974,8 @@
     }
   }
 
-  function teardownProjectsWorkspace() {
-    closeProjectsView();
+  function teardownProjectsWorkspace(opts = {}) {
+    closeProjectsView({ forceCloseAllModals: Boolean(opts.forceCloseAllModals) });
     projectMgmtSvcRef = null;
     cascadeRpcSvcRef = null;
     projectComposerMentions.clear();
@@ -10269,6 +12983,7 @@
     pdMentionCache.rulesByKey.clear();
     pdMentionCache.pluginsByKey.clear();
     optimisticallyDeletedProjectIds.clear();
+    optimisticallyArchivedProjectIds.clear();
     optimisticProjectNames.clear();
     const btn = document.getElementById('ag-claude-projects-nav-btn');
     if (btn) btn.remove();
@@ -10287,7 +13002,17 @@
       document.removeEventListener('click', onProjectsGlobalClick, true);
       document.removeEventListener('keydown', onProjectsGlobalKeyDown, true);
       window.removeEventListener('resize', positionProjectsOverlay);
+      window.removeEventListener('popstate', onProjectsNavRouteChange);
       projectsDocListenerBound = false;
+    }
+  }
+
+  function onProjectsNavRouteChange() {
+    if (!projectsViewOpen) return;
+    const curPath = String((window.location && window.location.pathname) || '');
+    const curSearch = String((window.location && window.location.search) || '');
+    if (curPath !== projectsOpenedPathname || /(?:^|[?&])settingsOpen=true(?:&|$)/i.test(curSearch)) {
+      closeProjectsView();
     }
   }
 
@@ -10343,6 +13068,7 @@
   }
 
   function openAddSkillModal() {
+    ensureSharedModalEscBound();
     closeProjectsModal();
     projectsModalState = {
       kind: 'addSkill',
@@ -10515,37 +13241,39 @@
     }
     if (saveBtn) {
       saveBtn.addEventListener('click', async () => {
-        if (!projectsModalState || projectsModalState.saving) return;
+        const modalRef = projectsModalState;
+        if (!modalRef || modalRef.saving) return;
         if (typeof window.__agProjectCall !== 'function') {
-          projectsModalState.error = L('本地写入桥接不可用，请重启 Anti-Claude 守护进程', 'Local write bridge unavailable');
+          modalRef.error = L('本地写入桥接不可用，请重启 Anti-Claude 守护进程', 'Local write bridge unavailable');
           renderAddSkillModal();
           return;
         }
-        projectsModalState.saving = true;
-        projectsModalState.error = '';
-        projectsModalState.successMsg = '';
+        modalRef.saving = true;
+        modalRef.error = '';
+        modalRef.successMsg = '';
         renderAddSkillModal();
         const res = await window.__agProjectCall(
           'createLocalSkill',
           {
-            name: projectsModalState.name,
-            description: projectsModalState.description,
-            instructions: projectsModalState.instructions
+            name: modalRef.name,
+            description: modalRef.description,
+            instructions: modalRef.instructions
           },
           15000
         );
-        if (disposed || !projectsModalState) return;
-        projectsModalState.saving = false;
+        if (disposed || projectsModalState !== modalRef) return;
+        modalRef.saving = false;
         if (res && res.ok) {
-          projectsModalState.name = '';
-          projectsModalState.description = '';
-          projectsModalState.instructions = '';
-          projectsModalState.createdDir = res.dirPath || '';
-          projectsModalState.successMsg = L(`已创建技能「${res.folderName}」，重新进入页面或稍候即可在列表中看到。`, `Skill "${res.folderName}" created successfully.`);
+          modalRef.name = '';
+          modalRef.description = '';
+          modalRef.instructions = '';
+          modalRef.createdDir = res.dirPath || '';
+          modalRef.successMsg = L(`已创建技能「${res.folderName}」，重新进入页面或稍候即可在列表中看到。`, `Skill "${res.folderName}" created successfully.`);
+          invalidateOverviewSnapshotCache();
           renderAddSkillModal();
         } else {
           const code = (res && res.error) || 'unknown';
-          projectsModalState.error =
+          modalRef.error =
             code === 'skill_already_exists'
               ? L('同名技能目录已存在，请换一个名称。', 'A skill with this folder name already exists.')
               : L('创建失败：', 'Create failed: ') + String(code);
@@ -10557,32 +13285,34 @@
     const importBtn = projectsModalEl.querySelector('[data-ag-skill-import]');
     if (importBtn) {
       importBtn.addEventListener('click', async () => {
-        if (!projectsModalState || projectsModalState.saving) return;
+        const modalRef = projectsModalState;
+        if (!modalRef || modalRef.saving) return;
         if (typeof window.__agProjectCall !== 'function') {
-          projectsModalState.error = L('本地写入桥接不可用', 'Local write bridge unavailable');
+          modalRef.error = L('本地写入桥接不可用', 'Local write bridge unavailable');
           renderAddSkillModal();
           return;
         }
-        projectsModalState.saving = true;
-        projectsModalState.error = '';
-        projectsModalState.successMsg = '';
+        modalRef.saving = true;
+        modalRef.error = '';
+        modalRef.successMsg = '';
         renderAddSkillModal();
         const res = await window.__agProjectCall('importLocalSkill', {}, 120000);
-        if (disposed || !projectsModalState) return;
-        projectsModalState.saving = false;
+        if (disposed || projectsModalState !== modalRef) return;
+        modalRef.saving = false;
         if (res && res.ok && res.canceled) {
           renderAddSkillModal();
           return;
         }
         if (res && res.ok) {
-          projectsModalState.createdDir = res.dirPath || '';
-          projectsModalState.successMsg = res.alreadyInstalled
+          modalRef.createdDir = res.dirPath || '';
+          modalRef.successMsg = res.alreadyInstalled
             ? L(`「${res.folderName}」已在全局技能目录中。`, `"${res.folderName}" is already in the skills folder.`)
             : L(`已成功导入技能「${res.folderName}」。`, `Imported skill "${res.folderName}" successfully.`);
+          invalidateOverviewSnapshotCache();
           renderAddSkillModal();
         } else {
           const code = (res && res.error) || 'unknown';
-          projectsModalState.error =
+          modalRef.error =
             code === 'missing_skill_md'
               ? L('所选文件夹根目录未找到 SKILL.md，请选择包含 SKILL.md 的技能目录。', 'No SKILL.md found in the selected folder.')
               : L('导入失败：', 'Import failed: ') + String(code);
@@ -10593,6 +13323,7 @@
   }
 
   function openAddAgentModal() {
+    ensureSharedModalEscBound();
     closeProjectsModal();
     projectsModalState = {
       kind: 'addAgent',
@@ -10841,42 +13572,44 @@
 
     if (saveBtn) {
       saveBtn.addEventListener('click', async () => {
-        if (!projectsModalState || projectsModalState.saving) return;
+        const modalRef = projectsModalState;
+        if (!modalRef || modalRef.saving) return;
         if (typeof window.__agProjectCall !== 'function') {
-          projectsModalState.error = L('本地写入桥接不可用，请重启 Anti-Claude 守护进程', 'Local write bridge unavailable');
+          modalRef.error = L('本地写入桥接不可用，请重启 Anti-Claude 守护进程', 'Local write bridge unavailable');
           renderAddAgentModal();
           return;
         }
-        projectsModalState.saving = true;
-        projectsModalState.error = '';
-        projectsModalState.successMsg = '';
+        modalRef.saving = true;
+        modalRef.error = '';
+        modalRef.successMsg = '';
         renderAddAgentModal();
         const res = await window.__agProjectCall(
           'createLocalAgent',
           {
-            name: projectsModalState.name,
-            description: projectsModalState.description,
-            roleMode: projectsModalState.roleMode,
-            tools: projectsModalState.tools,
-            systemPrompt: projectsModalState.systemPrompt
+            name: modalRef.name,
+            description: modalRef.description,
+            roleMode: modalRef.roleMode,
+            tools: modalRef.tools,
+            systemPrompt: modalRef.systemPrompt
           },
           15000
         );
-        if (disposed || !projectsModalState) return;
-        projectsModalState.saving = false;
+        if (disposed || projectsModalState !== modalRef) return;
+        modalRef.saving = false;
         if (res && res.ok) {
-          projectsModalState.name = '';
-          projectsModalState.description = '';
-          projectsModalState.systemPrompt = '';
-          projectsModalState.createdPath = res.filePath || res.dirPath || '';
-          projectsModalState.successMsg = L(
+          modalRef.name = '';
+          modalRef.description = '';
+          modalRef.systemPrompt = '';
+          modalRef.createdPath = res.filePath || res.dirPath || '';
+          modalRef.successMsg = L(
             `已创建子 Agent「${res.name}」（~/.gemini/config/agents/${res.name}.md），稍候或重进页面即可看到。`,
             `Subagent "${res.name}" created in ~/.gemini/config/agents/${res.name}.md.`
           );
+          invalidateOverviewSnapshotCache();
           renderAddAgentModal();
         } else {
           const code = (res && res.error) || 'unknown';
-          projectsModalState.error =
+          modalRef.error =
             code === 'reserved_agent_name'
               ? L('该名称与系统内置 Agent（self / browser / research 等）冲突，请换一个名称。', 'Name conflicts with a built-in agent (self, browser, research, etc.).')
               : code === 'agent_already_exists'
@@ -10890,31 +13623,33 @@
     const importBtn = projectsModalEl.querySelector('[data-ag-agent-import]');
     if (importBtn) {
       importBtn.addEventListener('click', async () => {
-        if (!projectsModalState || projectsModalState.saving) return;
+        const modalRef = projectsModalState;
+        if (!modalRef || modalRef.saving) return;
         if (typeof window.__agProjectCall !== 'function') {
-          projectsModalState.error = L('本地写入桥接不可用', 'Local write bridge unavailable');
+          modalRef.error = L('本地写入桥接不可用', 'Local write bridge unavailable');
           renderAddAgentModal();
           return;
         }
-        projectsModalState.saving = true;
-        projectsModalState.error = '';
-        projectsModalState.successMsg = '';
+        modalRef.saving = true;
+        modalRef.error = '';
+        modalRef.successMsg = '';
         renderAddAgentModal();
         const res = await window.__agProjectCall('importLocalAgent', {}, 120000);
-        if (disposed || !projectsModalState) return;
-        projectsModalState.saving = false;
+        if (disposed || projectsModalState !== modalRef) return;
+        modalRef.saving = false;
         if (res && res.ok && res.canceled) {
           renderAddAgentModal();
           return;
         }
         if (res && res.ok) {
           const names = (res.imported || []).map((x) => x.name).join('、');
-          projectsModalState.createdPath = (res.imported && res.imported[0] && res.imported[0].filePath) || res.dirPath || '';
-          projectsModalState.successMsg = L(`已成功导入子 Agent：${names}`, `Imported subagent(s): ${names}`);
+          modalRef.createdPath = (res.imported && res.imported[0] && res.imported[0].filePath) || res.dirPath || '';
+          modalRef.successMsg = L(`已成功导入子 Agent：${names}`, `Imported subagent(s): ${names}`);
+          invalidateOverviewSnapshotCache();
           renderAddAgentModal();
         } else {
           const code = (res && res.error) || 'unknown';
-          projectsModalState.error =
+          modalRef.error =
             code === 'missing_md_file'
               ? L('请选择 .md 格式的子 Agent 定义文件。', 'Please select .md agent definition file(s).')
               : L('导入失败：', 'Import failed: ') + String(code);
@@ -11119,8 +13854,13 @@
     syncSidebarHideNativeProjects();
     syncCustomizationsEnhancement();
     if (!FEAT.projects) {
-      teardownProjectsWorkspace();
+      if (projectsViewOpen || projectsViewEl || projectsDocListenerBound || document.getElementById('ag-claude-projects-nav-btn')) {
+        teardownProjectsWorkspace();
+      }
       return;
+    }
+    if (projectsViewOpen) {
+      onProjectsNavRouteChange();
     }
     const autoBtn = document.querySelector('[data-testid="automations-button"]');
     if (!autoBtn || !autoBtn.parentElement) return;
@@ -11151,12 +13891,948 @@
       document.addEventListener('click', onProjectsGlobalClick, true);
       document.addEventListener('keydown', onProjectsGlobalKeyDown, true);
       window.addEventListener('resize', positionProjectsOverlay);
+      window.addEventListener('popstate', onProjectsNavRouteChange);
     }
     if (projectsViewOpen) {
       ensureProjectsSidebarObserver();
       positionProjectsOverlay();
     }
     syncSidebarHideNativeProjects();
+  }
+
+  /* ==========================================================================
+   * 11. Enhanced Right Overview Panel (`claudeUxOverviewPanel`)
+   *     - Re-styles native quick shortcuts into a 4-tile toolbar via CSS `order: 0`
+   *     - Keeps native Artifact section right below shortcuts (`order: 1`)
+   *     - Appends `#ag-claude-ov-sections` as last DOM child (`order: 2`, React-safe)
+   *     - Combines Environment, T3 Context/Cache breakdown + Compact, Google Blue
+   *       dual-window Used-% Quotas + time cursor, Side chats, and Connectors list
+   * ========================================================================== */
+  const OV_COLLAPSE_STORAGE_KEY = 'ag_claude_ov_collapse_v2';
+  const OV_DEFAULT_OPEN = {
+    environment: true,
+    context: true,
+    quota: true,
+    otherPools: true,
+    sidechats: true,
+    connectors: false,
+    invMemory: false,
+    invSkills: false,
+    invAgents: false,
+    connectorsExtra: false
+  };
+  let ovCollapseState = (() => {
+    try {
+      const raw = typeof localStorage === 'object' && localStorage ? localStorage.getItem(OV_COLLAPSE_STORAGE_KEY) : null;
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (parsed && typeof parsed === 'object') return Object.assign({}, OV_DEFAULT_OPEN, parsed);
+    } catch {}
+    return Object.assign({}, OV_DEFAULT_OPEN);
+  })();
+  function persistOvCollapseState() {
+    try {
+      if (typeof localStorage === 'object' && localStorage) {
+        localStorage.setItem(OV_COLLAPSE_STORAGE_KEY, JSON.stringify(ovCollapseState));
+      }
+    } catch {}
+  }
+
+  const ovSnapshotCache = new Map(); // dirKey -> { ts, data }
+  const ovSnapshotInFlight = new Map(); // dirKey -> Promise
+  let ovLastQuotaAutoTryTs = 0;
+  let ovQuotaSpinTimer = 0;
+  let ovRefreshSpinUntil = 0;
+  let ovMinuteTickerId = null;
+  let ovWorkspaceMemo = { ts: 0, key: '', value: null };
+  let ovCompactMemo = { ts: 0, key: '', status: 'idle' };
+
+  function invalidateOverviewSnapshotCache() {
+    ovSnapshotCache.clear();
+    ovWorkspaceMemo = { ts: 0, key: '', value: null };
+    if (!disposed && FEAT.overviewPanel) {
+      const sec = document.getElementById('ag-claude-ov-sections');
+      if (sec) sec.removeAttribute('data-render-sig');
+      renderOverviewPanel(true);
+    }
+  }
+
+  function fmtOvTokens(n) {
+    const v = Number(n) || 0;
+    if (!Number.isFinite(v) || v <= 0) return '0';
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(2).replace(/\.?0+$/, '')}M`;
+    if (v >= 1000) return fmtCompactTokens(v);
+    return String(Math.round(v));
+  }
+
+  function ovQuotaUsedColor(usedPct) {
+    if (usedPct >= 90) return '#DC2626';
+    if (usedPct >= 75) return '#D97706';
+    return 'var(--ag-ov-blue, #2F75C3)';
+  }
+
+  function localizeQuotaWindowTag(rawWin, fallbackName = '') {
+    const win = String(rawWin || '').trim().toLowerCase();
+    if (win === '5h') return L('5 小时', '5h');
+    if (win === 'weekly') return L('每周', 'Weekly');
+    if (win === 'daily') return L('每日', 'Daily');
+    return fallbackName || L('配额', 'Quota');
+  }
+
+  function readOverviewModelLabel() {
+    const inputBox = document.getElementById('antigravity.agentSidePanelInputBox');
+    const trigger = inputBox && inputBox.querySelector('button[data-testid="model-selector-trigger"]');
+    return ((trigger ? trigger.textContent : '') || '').trim();
+  }
+
+  function computeWindowElapsedPct(bucket, usedPct) {
+    const win = String(bucket?.window || '').trim().toLowerCase();
+    if (win === '5h' && usedPct === 0 && !bucket?.description) return null;
+    const secStr = bucket?.resetTime && bucket.resetTime.seconds !== undefined ? String(bucket.resetTime.seconds) : '';
+    const resetSec = secStr ? Number(secStr) : 0;
+    if (!resetSec || Number.isNaN(resetSec)) return null;
+    const totalSec = win === '5h' ? 5 * 3600 : win === 'daily' ? 86400 : win === 'weekly' ? 7 * 86400 : 0;
+    if (!totalSec) return null;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const remSec = Math.max(0, Math.min(totalSec, resetSec - nowSec));
+    const elapsedFrac = Math.max(0, Math.min(1, 1 - remSec / totalSec));
+    return Math.round(elapsedFrac * 100);
+  }
+
+  function resolveActiveOverviewWorkspace(force = false) {
+    const curCid = getActiveCascadeId();
+    const locSearch = String(window.location.search || '');
+    const memoKey = `${curCid}|${locSearch}`;
+    const now = Date.now();
+    if (!force && ovWorkspaceMemo.value && ovWorkspaceMemo.key === memoKey && now - ovWorkspaceMemo.ts < 400) {
+      return ovWorkspaceMemo.value;
+    }
+
+    let urlPid = '';
+    try {
+      urlPid = new URLSearchParams(locSearch).get('project') || '';
+    } catch {}
+    const { store } = resolveProjectsStoreAndBindings();
+    const state = store && typeof store.getState === 'function' ? store.getState() : null;
+    const summaries = (state && state.trajectorySummaries && state.trajectorySummaries.summaries) || {};
+    const sum = curCid ? summaries[curCid] : null;
+    const projects = typeof collectNativeProjects === 'function' ? collectNativeProjects() : [];
+    const norm = (p) => String(p || '').replace(/\/+$/, '').toLowerCase();
+
+    const pid = (sum && (sum.projectId || (sum.trajectoryMetadata && sum.trajectoryMetadata.projectId))) || urlPid || '';
+    let wsDir = '';
+    if (sum) {
+      const wsList = (sum.workspaces || []).concat((sum.trajectoryMetadata && sum.trajectoryMetadata.workspaces) || []);
+      for (const ws of wsList) {
+        const rawUri = ws && (ws.workspaceFolderAbsoluteUri || ws.uri || ws);
+        if (typeof rawUri === 'string' && rawUri.trim()) {
+          const decoded = decodeFileUriToPath(rawUri).replace(/\/+$/, '');
+          if (decoded) {
+            wsDir = decoded;
+            break;
+          }
+        }
+      }
+    }
+
+    let matchedProj = pid ? projects.find((p) => p.id === pid) : null;
+    if (!matchedProj && wsDir) {
+      matchedProj = projects.find((p) => norm(p.dirPath) === norm(wsDir)) || null;
+    }
+    const dirPath = (matchedProj && matchedProj.dirPath) || wsDir || '';
+    const project = matchedProj || (dirPath ? { id: '', name: dirPath.split(/[\\/]/).filter(Boolean).pop() || dirPath, dirPath } : null);
+    const result = { cid: curCid, dirPath, project, state, summaries };
+    ovWorkspaceMemo = { ts: now, key: memoKey, value: result };
+    return result;
+  }
+
+  function getOverviewCompactStatus(curCid, force = false) {
+    const key = `${curCid}|${manualCompactPending.cascadeId}:${manualCompactPending.startedAt}`;
+    const now = Date.now();
+    if (!force && ovCompactMemo.key === key && now - ovCompactMemo.ts < 350) {
+      return ovCompactMemo.status;
+    }
+    const status = detectCompactStatus(curCid);
+    ovCompactMemo = { ts: now, key, status };
+    return status;
+  }
+
+  function ensureOverviewSnapshot(dirPath, force = false) {
+    if (typeof window.__agProjectCall !== 'function') return null;
+    const key = String(dirPath || '').trim() || '__global__';
+    const now = Date.now();
+    const cached = ovSnapshotCache.get(key);
+    if (!force && cached && now - cached.ts < 15000) return cached.data;
+    if (!ovSnapshotInFlight.has(key)) {
+      const p = Promise.resolve(window.__agProjectCall('getOverviewSnapshot', { dirPath: dirPath || '' }, 6000))
+        .then((res) => {
+          if (disposed || !res || !res.ok) return;
+          ovSnapshotCache.set(key, { ts: Date.now(), data: res });
+          if (FEAT.overviewPanel) renderOverviewPanel(false);
+        })
+        .catch(() => {})
+        .finally(() => {
+          ovSnapshotInFlight.delete(key);
+        });
+      ovSnapshotInFlight.set(key, p);
+    }
+    return cached ? cached.data : null;
+  }
+
+  function collectMergedSidechats(curCid, stats, summaries) {
+    const byId = new Map();
+    if (stats && Array.isArray(stats.children)) {
+      for (const ch of stats.children) {
+        if (!ch || !ch.id) continue;
+        byId.set(ch.id, Object.assign({}, ch));
+      }
+    }
+    if (curCid && summaries && typeof summaries === 'object') {
+      for (const [id, sum] of Object.entries(summaries)) {
+        if (!sum || id === curCid) continue;
+        const parentId = sum.parentConversationId || (sum.trajectoryMetadata && sum.trajectoryMetadata.parentConversationId) || '';
+        if (parentId !== curCid) continue;
+        const title = String((sum.annotations && sum.annotations.title) || sum.summary || '').trim();
+        const agentName = String(sum.agentName || (sum.trajectoryMetadata && sum.trajectoryMetadata.agentName) || '').trim();
+        const status = sum.status ?? '';
+        const running = Boolean(
+          !sum.killed &&
+            (Boolean(sum.notFullyIdle) ||
+              status === 2 ||
+              status === 3 ||
+              status === 4 ||
+              /RUNNING|IN_PROGRESS|ACTIVE/i.test(String(status)))
+        );
+        const prev = byId.get(id) || { id, calls: 0, outTok: 0 };
+        byId.set(id, Object.assign({}, prev, {
+          title: title || prev.title || '',
+          agentName: agentName || prev.agentName || '',
+          running: running || Boolean(prev.running),
+          killed: Boolean(sum.killed || prev.killed)
+        }));
+      }
+    }
+    return Array.from(byId.values()).slice(0, 12);
+  }
+
+  function buildOvChevronSvg(isOpen) {
+    return `<svg class="ag-ov-chev" data-open="${isOpen ? 'true' : 'false'}" width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 4l4 4-4 4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  }
+
+  function onOverviewSectionsClick(e) {
+    if (disposed || !FEAT.overviewPanel) return;
+    const collapseBtn = e.target.closest('[data-ag-ov-collapse]');
+    if (collapseBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      const key = collapseBtn.getAttribute('data-ag-ov-collapse');
+      if (key) {
+        ovCollapseState[key] = !ovCollapseState[key];
+        persistOvCollapseState();
+        renderOverviewPanel(true);
+      }
+      return;
+    }
+
+    const actionEl = e.target.closest('[data-ag-ov-action]');
+    if (!actionEl) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const action = actionEl.getAttribute('data-ag-ov-action');
+    const ws = resolveActiveOverviewWorkspace(true);
+
+    if (action === 'finder') {
+      if (ws.dirPath && typeof window.__agProjectCall === 'function') {
+        window.__agProjectCall('revealFile', { targetPath: ws.dirPath, dirPath: ws.dirPath, openFolder: true }, 5000);
+      }
+    } else if (action === 'copy-path') {
+      if (ws.dirPath && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        navigator.clipboard.writeText(ws.dirPath).then(
+          () => showProjectsFloatingNotice(L('已复制工作区路径', 'Workspace path copied')),
+          () => {}
+        );
+      }
+    } else if (action === 'edit-rules') {
+      if (ws.project && ws.project.dirPath) {
+        openProjectInstructionsModal(ws.project);
+      } else {
+        const globalPath = actionEl.getAttribute('data-path') || '';
+        if (globalPath && typeof window.__agProjectCall === 'function') {
+          window.__agProjectCall('revealFile', { targetPath: globalPath, dirPath: '' }, 5000);
+        }
+      }
+    } else if (action === 'compact') {
+      if (!actionEl.disabled) {
+        ovCompactMemo = { ts: 0, key: '', status: 'idle' };
+        triggerConversationCompact();
+      }
+    } else if (action === 'refresh-quota') {
+      ovRefreshSpinUntil = Date.now() + 600;
+      const icon = actionEl.querySelector('svg');
+      if (icon) {
+        icon.classList.remove('ag-ov-spinning');
+        void icon.offsetWidth;
+        icon.classList.add('ag-ov-spinning');
+      }
+      cancelLater(ovQuotaSpinTimer);
+      ovQuotaSpinTimer = later(() => {
+        ovQuotaSpinTimer = 0;
+        ovRefreshSpinUntil = 0;
+        const curIcon = document.querySelector('#ag-claude-ov-sections [data-ag-ov-action="refresh-quota"] svg');
+        if (curIcon) curIcon.classList.remove('ag-ov-spinning');
+      }, 620);
+      discoverQuotaService(true);
+      fetchQuotaSummary(true);
+    } else if (action === 'sidechat') {
+      const cid = actionEl.getAttribute('data-cid') || '';
+      if (cid) openConversationFromProject(cid);
+    } else if (action === 'reveal-path') {
+      const targetPath = actionEl.getAttribute('data-path') || '';
+      if (targetPath && typeof window.__agProjectCall === 'function') {
+        window.__agProjectCall('revealFile', { targetPath, dirPath: ws.dirPath || '' }, 5000);
+      }
+    } else if (action === 'open-plugins') {
+      const pluginsBtn = document.querySelector('button[data-testid="overview-panel-row-plugins"]');
+      if (pluginsBtn) pluginsBtn.click();
+    } else if (action === 'open-skills-dir') {
+      if (typeof window.__agProjectCall === 'function') {
+        window.__agProjectCall('openSkillsDir', {}, 5000);
+      }
+    } else if (action === 'open-agents-dir') {
+      if (typeof window.__agProjectCall === 'function') {
+        window.__agProjectCall('openAgentsDir', {}, 5000);
+      }
+    } else if (action === 'toggle-connectors-more') {
+      ovCollapseState.connectorsExtra = !ovCollapseState.connectorsExtra;
+      persistOvCollapseState();
+      renderOverviewPanel(true);
+    }
+  }
+
+  function renderOverviewPanel(force = false) {
+    if (disposed || !FEAT.overviewPanel) return;
+    const sectionsEl = document.getElementById('ag-claude-ov-sections');
+    if (!sectionsEl) return;
+
+    const ws = resolveActiveOverviewWorkspace(force);
+    const snap = ensureOverviewSnapshot(ws.dirPath, false);
+    const curCid = ws.cid;
+    const rawM = window.__ag_last_metrics;
+    const hasCtx = Boolean(rawM && rawM.hasData && (!curCid || rawM.cascadeId === curCid) && rawM.stats);
+    const stats = hasCtx ? rawM.stats : null;
+    const compactStatus = getOverviewCompactStatus(curCid, force);
+    const paneRunning = isPaneCurrentlyRunning();
+    if (wasOvPaneGenerating && !paneRunning) {
+      scheduleAutoQuotaRefresh(500, 3000);
+    }
+    wasOvPaneGenerating = paneRunning;
+    const { preUsed, limitLabel, summaryLabel, summaryPct } = extractCompactLabels(latestCtxState, curCid);
+
+    const groups = cachedQuotaGroups || [];
+    const curModelLabel = readOverviewModelLabel();
+    const ovPrimaryIdx = groups.length > 0 ? detectDefaultGroupIndex(groups) : 0;
+    const minuteBucket = Math.floor(Date.now() / 60000);
+
+    const mergedChildren = collectMergedSidechats(curCid, stats, ws.summaries);
+    const snapSig = snap
+      ? `${snap.workspace?.dirPath}|${snap.workspace?.git?.branch}:${snap.workspace?.git?.added}:${snap.workspace?.git?.deleted}:${snap.workspace?.git?.changedFiles}|r${snap.rules?.length}|s${snap.skills?.total}|a${snap.agents?.total}|c${snap.connectors?.length}`
+      : 'nosnap';
+    const ctxSig = stats
+      ? `${stats.ctx}/${stats.limit}|${stats.cached}|${stats.uncached}|${stats.lastCacheRate}|${stats.sessionCacheRate}|${stats.turns}/${stats.calls}|${stats.totalThink}|${stats.totalResp}|${compactStatus}|${paneRunning ? 1 : 0}|${summaryLabel}`
+      : `noctx|${compactStatus}|${paneRunning ? 1 : 0}`;
+    const quotaSig = `${cachedUserTierName}|${ovPrimaryIdx}|${curModelLabel}|m${minuteBucket}|${groups
+      .map((g) => `${g.displayName}:${(g.buckets || []).map((b) => `${b.window}=${b.remaining?.value ?? b.remainingFraction}:${b.resetTime?.seconds ?? ''}`).join(',')}`)
+      .join(';')}`;
+    const subSig = mergedChildren.map((c) => `${c.id}:${c.running ? 1 : 0}:${c.title}:${c.calls}`).join('|');
+    const colSig = Object.keys(OV_DEFAULT_OPEN)
+      .map((k) => (ovCollapseState[k] ? '1' : '0'))
+      .join('');
+    const renderSig = `${FEAT.i18n ? 'zh' : 'en'}||${curCid}||${ws.dirPath}||${snapSig}||${ctxSig}||${quotaSig}||${subSig}||${colSig}`;
+
+    if (!force && sectionsEl.getAttribute('data-render-sig') === renderSig) return;
+    sectionsEl.setAttribute('data-render-sig', renderSig);
+
+    /* ---- 1. Environment Card ---- */
+    const git = snap && snap.workspace && snap.workspace.git ? snap.workspace.git : null;
+    const gitPillHtml = git
+      ? `<span class="ag-ov-git-pill">${escapeHtml(git.branch)}${
+          git.added > 0 || git.deleted > 0
+            ? ` · <span class="ag-ov-git-add">+${git.added}</span> <span class="ag-ov-git-del">-${git.deleted}</span>`
+            : git.changedFiles > 0
+              ? ` · <span class="ag-ov-muted">${git.changedFiles} ${L('变更', 'chg')}</span>`
+              : ''
+        }</span>`
+      : '';
+    const dirName = (ws.project && ws.project.name) || (snap && snap.workspace && snap.workspace.name) || '';
+    const shortDir = ws.dirPath ? formatShortHomePath(ws.dirPath) : '';
+    const folderRowHtml = ws.dirPath
+      ? `<button type="button" class="ag-ov-row-btn ag-ov-folder-btn" data-ag-ov-action="copy-path" title="${escapeHtml(ws.dirPath)}">
+          <span class="ag-ov-row-left">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M2 4.2a1 1 0 0 1 1-1h3.5l1.3 1.4H13a1 1 0 0 1 1 1v6.2a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4.2z"/></svg>
+            <span class="ag-ov-row-title">${escapeHtml(dirName)}</span>
+          </span>
+          <span class="ag-ov-mono-muted">${escapeHtml(shortDir)}</span>
+        </button>`
+      : `<div class="ag-ov-empty-inline ag-ov-env-pad">${L('未绑定项目目录', 'No workspace folder bound')}</div>`;
+
+    const rulesList = (snap && Array.isArray(snap.rules) && snap.rules) || [];
+    const hasGlobalRule = rulesList.some((r) => r.scope === 'global');
+    const hasProjRule = rulesList.some((r) => r.scope === 'project');
+    const hasPluginRule = rulesList.some((r) => r.scope === 'plugin');
+    const globalRulePath = (rulesList.find((r) => r.scope === 'global') || {}).path || '';
+    const scopeParts = [];
+    if (hasGlobalRule) scopeParts.push(L('全局', 'Global'));
+    if (hasProjRule) scopeParts.push(L('项目', 'Project'));
+    if (hasPluginRule) scopeParts.push(L('插件', 'Plugin'));
+    const ruleSummary = scopeParts.length
+      ? `${scopeParts.join(' + ')} · ${L(`${rulesList.length} 份`, String(rulesList.length))}`
+      : L('未配置', 'None');
+    const canEditRules = Boolean((ws.project && ws.project.dirPath) || globalRulePath);
+
+    const envCardHtml = `
+      <section class="ag-ov-card" data-ov-card="environment">
+        <div class="ag-ov-card-hdr">
+          <button type="button" class="ag-ov-hdr-toggle" data-ag-ov-collapse="environment">
+            ${buildOvChevronSvg(ovCollapseState.environment)}
+            <span>${L('工作环境', 'Environment')}</span>
+          </button>
+          ${
+            ws.dirPath
+              ? `<button type="button" class="ag-ov-hdr-action" data-ag-ov-action="finder">Finder ↗</button>`
+              : ''
+          }
+        </div>
+        ${
+          ovCollapseState.environment
+            ? `<div class="ag-ov-card-body ag-ov-env-body">
+                <div class="ag-ov-kv-row ag-ov-env-pad">
+                  <span class="ag-ov-row-left">
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><rect x="1.8" y="2.5" width="12.4" height="8.5" rx="1.4"/><path d="M5.5 13.5h5M8 11v2.5" stroke-linecap="round"/></svg>
+                    <span>${L('本机工作区', 'This computer')}</span>
+                  </span>
+                  ${gitPillHtml}
+                </div>
+                ${folderRowHtml}
+                <div class="ag-ov-rule-pill">
+                  <span class="ag-ov-row-left">
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><path d="M4 2h5.2l3.3 3.3V14H4V2z"/><path d="M9 2v3.5h3.5M6 8.5h4M6 11h3" stroke-linecap="round"/></svg>
+                    <span class="ag-ov-mono">AGENTS.md</span>
+                    <span class="ag-ov-muted ag-ov-trunc">${escapeHtml(ruleSummary)}</span>
+                  </span>
+                  ${
+                    canEditRules
+                      ? `<button type="button" class="ag-ov-mini-btn" data-ag-ov-action="edit-rules" data-path="${escapeHtml(globalRulePath)}">${ws.project && ws.project.dirPath ? L('编辑', 'Edit') : L('查看', 'Open')}</button>`
+                      : ''
+                  }
+                </div>
+              </div>`
+            : ''
+        }
+      </section>`;
+
+    /* ---- 2. Context Card (T3 Style) ---- */
+    let topPctText = hasCtx ? `${stats.pct}% ${L('已用', 'used')}` : L('暂无消耗', 'No data');
+    let topRatioText = hasCtx ? `${fmtOvTokens(stats.ctx)} / ${stats.limitStr}` : '';
+    let topPctLevel = '';
+    if (stats) {
+      if (stats.pct >= 90) topPctLevel = 'crit';
+      else if (stats.pct >= 75) topPctLevel = 'warn';
+    }
+
+    const limitTok = stats ? Math.max(1, Number(stats.limit) || 1) : 1;
+    const shareDenom = stats
+      ? Math.max(limitTok, Number(stats.ctx || 0), Number(stats.cached || 0) + Number(stats.uncached || 0))
+      : 1;
+    let cachedBarW = stats ? Math.min(100, (Number(stats.cached || 0) / shareDenom) * 100) : 0;
+    let uncachedBarW = stats ? Math.min(100 - cachedBarW, (Number(stats.uncached || 0) / shareDenom) * 100) : 0;
+    let compactBtnHtml = '';
+
+    if (compactStatus === 'compacting') {
+      topPctText = preUsed ? L(`正在压缩 ${preUsed}…`, `Compacting ${preUsed}…`) : L('正在压缩…', 'Compacting…');
+      topRatioText = '';
+      topPctLevel = '';
+      cachedBarW = 14;
+      uncachedBarW = 0;
+      compactBtnHtml = `<button type="button" class="ag-ov-compact-btn" data-ag-ov-action="compact" data-state="compacting" disabled>${SVG_COMPACT_ICON}<span>${L('压缩中…', 'Compacting…')}</span></button>`;
+    } else if (compactStatus === 'compacted') {
+      topPctText = summaryLabel && limitLabel ? `${summaryPct}% ${L('已用', 'used')}` : L('已完成压缩', 'Compacted');
+      topRatioText = summaryLabel && limitLabel ? `${summaryLabel} / ${limitLabel}` : L('下轮刷新', 'Next turn');
+      topPctLevel = '';
+      cachedBarW = summaryPct > 0 ? Math.max(2, summaryPct) : 2;
+      uncachedBarW = 0;
+      compactBtnHtml = `<button type="button" class="ag-ov-compact-btn" data-ag-ov-action="compact" data-state="compacted" disabled>${SVG_COMPACT_DONE}<span>${L('已压缩', 'Compacted')}</span></button>`;
+    } else if (!hasCtx) {
+      compactBtnHtml = `<button type="button" class="ag-ov-compact-btn" data-ag-ov-action="compact" data-state="empty" disabled>${SVG_COMPACT_ICON}<span>${L('压缩', 'Compact')}</span></button>`;
+    } else if (paneRunning) {
+      compactBtnHtml = `<button type="button" class="ag-ov-compact-btn" data-ag-ov-action="compact" data-state="busy" disabled title="${escapeHtml(L('请等待当前回复结束后压缩', 'Wait for response to finish'))}">${SVG_COMPACT_ICON}<span>${L('压缩', 'Compact')}</span></button>`;
+    } else {
+      const urgAttr = stats.pct >= 85 ? ' data-urgent="crit"' : stats.pct >= 70 ? ' data-urgent="warn"' : '';
+      compactBtnHtml = `<button type="button" class="ag-ov-compact-btn" data-ag-ov-action="compact" data-state="ready"${urgAttr} title="${escapeHtml(L('立即执行 /compact 压缩上下文', 'Run /compact'))}">${SVG_COMPACT_ICON}<span>${L('压缩', 'Compact')}</span></button>`;
+    }
+
+    const cachedPctStr = stats ? ((Number(stats.cached || 0) / shareDenom) * 100).toFixed(1) : '0.0';
+    const uncachedPctStr = stats ? ((Number(stats.uncached || 0) / shareDenom) * 100).toFixed(1) : '0.0';
+    const freePctVal = stats ? Math.max(0, 100 - Number(cachedPctStr) - Number(uncachedPctStr)) : 100;
+    const freePctStr = freePctVal.toFixed(1);
+
+    const ctxCardHtml = `
+      <section class="ag-ov-card" data-ov-card="context">
+        <div class="ag-ov-card-hdr">
+          <button type="button" class="ag-ov-hdr-toggle" data-ag-ov-collapse="context">
+            ${buildOvChevronSvg(ovCollapseState.context)}
+            <span>${L('上下文', 'Context')}</span>
+          </button>
+          <div class="ag-ov-ctx-hdr-meta">
+            <span class="ag-ov-ctx-pct" data-level="${topPctLevel}">${escapeHtml(topPctText)}</span>
+            ${topRatioText ? `<span class="ag-ov-muted">${escapeHtml(topRatioText)}</span>` : ''}
+          </div>
+        </div>
+        ${
+          ovCollapseState.context
+            ? `<div class="ag-ov-card-body">
+                <div class="ag-ov-stacked-bar">
+                  <div class="ag-ov-bar-cached" style="width:${cachedBarW.toFixed(2)}%"></div>
+                  <div class="ag-ov-bar-uncached" style="width:${uncachedBarW.toFixed(2)}%"></div>
+                </div>
+                ${
+                  stats
+                    ? `<div class="ag-ov-breakdown">
+                        <div class="ag-ov-bd-row">
+                          <span class="ag-ov-bd-lbl"><i class="ag-ov-dot ag-ov-dot-blue"></i><span>${L('缓存上下文', 'Cached context')}</span></span>
+                          <span class="ag-ov-bd-vals"><span>${escapeHtml(fmtOvTokens(stats.cached))}</span><span class="ag-ov-muted ag-ov-pct-w">${cachedPctStr}%</span></span>
+                        </div>
+                        <div class="ag-ov-bd-row">
+                          <span class="ag-ov-bd-lbl"><i class="ag-ov-dot ag-ov-dot-amber"></i><span>${L('新增上下文', 'Uncached context')}</span></span>
+                          <span class="ag-ov-bd-vals"><span>${escapeHtml(fmtOvTokens(stats.uncached))}</span><span class="ag-ov-muted ag-ov-pct-w">${uncachedPctStr}%</span></span>
+                        </div>
+                        <div class="ag-ov-bd-row">
+                          <span class="ag-ov-bd-lbl"><i class="ag-ov-dot ag-ov-dot-free"></i><span class="ag-ov-muted">${L('剩余空间', 'Free space')}</span></span>
+                          <span class="ag-ov-bd-vals ag-ov-muted"><span>${escapeHtml(fmtOvTokens(stats.remain))}</span><span class="ag-ov-pct-w">${freePctStr}%</span></span>
+                        </div>
+                      </div>
+                      <div class="ag-ov-submetrics">
+                        <div class="ag-ov-kv-row">
+                          <span class="ag-ov-muted">${L('缓存命中率', 'Prompt cache')}</span>
+                          <span><strong class="ag-ov-blue-txt">${stats.lastCacheRate}%</strong> <span class="ag-ov-muted">${L('· 累计', '· avg')} ${stats.sessionCacheRate}%</span></span>
+                        </div>
+                        <div class="ag-ov-kv-row">
+                          <span class="ag-ov-muted">${L('累计输出', 'Output split')}</span>
+                          <span>${L('思考', 'Think')} ${escapeHtml(fmtOvTokens(stats.totalThink))} · ${L('正文', 'Resp')} ${escapeHtml(fmtOvTokens(stats.totalResp))}</span>
+                        </div>
+                      </div>`
+                    : `<div class="ag-ov-empty-inline">${L('发送消息后将显示实时上下文与缓存拆解', 'Context and cache telemetry appear after the first turn')}</div>`
+                }
+                <div class="ag-ov-ctx-footer">
+                  <span class="ag-ov-muted">${stats ? `${stats.turns} ${L('轮', 'turns')} · ${stats.calls} ${L('次调用', 'calls')}` : ''}</span>
+                  ${compactBtnHtml}
+                </div>
+              </div>`
+            : ''
+        }
+      </section>`;
+
+    /* ---- 3. Quota Card (Google Blue + Used % aligned with elapsed time cursor) ---- */
+    const tierDisplay = cachedUserTierName ? cachedUserTierName.trim() : '';
+    const isQuotaSpinning = Date.now() < ovRefreshSpinUntil;
+    let quotaInnerHtml = '';
+    if (groups.length === 0) {
+      quotaInnerHtml = `<div class="ag-ov-empty-inline">${
+        quotaFetchInFlight ? L('正在读取实时套餐限额…', 'Loading plan quotas…') : L('点击右上角刷新读取实时配额', 'Click refresh to load plan quotas')
+      }</div>`;
+    } else {
+      const pIdx = ovPrimaryIdx >= 0 && ovPrimaryIdx < groups.length ? ovPrimaryIdx : 0;
+      const primaryGrp = groups[pIdx];
+      const pShort = localizeGroupShortName(primaryGrp.displayName);
+      const sortBuckets = (list) =>
+        (list || []).slice().sort((a, b) => {
+          const r = (w) => (w === '5h' ? 0 : w === 'daily' ? 1 : 2);
+          return r(String(a.window || '').toLowerCase()) - r(String(b.window || '').toLowerCase());
+        });
+      const primaryBuckets = sortBuckets(primaryGrp.buckets);
+
+      const fmtOvQuotaPct = formatQuotaUsedPctStr;
+
+      const primaryHtml = primaryBuckets
+        .map((b) => {
+          const rem =
+            b.remaining && b.remaining.case === 'remainingFraction' && typeof b.remaining.value === 'number'
+              ? b.remaining.value
+              : typeof b.remainingFraction === 'number'
+                ? b.remainingFraction
+                : 1;
+          const usedRaw = Math.max(0, Math.min(100, (1 - rem) * 100));
+          const usedPct = Math.round(usedRaw);
+          const usedPctStr = fmtOvQuotaPct(usedRaw);
+          const remPctStr = fmtOvQuotaPct(100 - usedRaw);
+          const winTag = localizeQuotaWindowTag(b.window, b.displayName || '');
+          const col = ovQuotaUsedColor(usedRaw);
+          const litCount = usedRaw <= 0 ? 0 : Math.min(20, Math.max(1, Math.round(usedRaw / 5)));
+          const segsHtml = Array.from({ length: 20 }, (_, i) =>
+            `<span class="ag-ov-seg" style="background:${i < litCount ? col : 'var(--ag-ov-track)'}"></span>`
+          ).join('');
+          const elapsedPct = computeWindowElapsedPct(b, usedRaw);
+          const cursorHtml =
+            elapsedPct !== null
+              ? `<div class="ag-ov-time-track" title="${escapeHtml(L(`窗口时间已流逝 ${elapsedPct}%`, `Window elapsed ${elapsedPct}%`))}">
+                  <div class="ag-ov-time-fill" style="width:${elapsedPct}%"></div>
+                  <span class="ag-ov-time-cursor" style="left:${elapsedPct}%"></span>
+                </div>`
+              : '';
+          const resetTxt = formatResetLabel(b, usedRaw);
+          return `<div class="ag-ov-quota-box" title="${escapeHtml(L(`已用 ${usedPctStr}% · 剩余 ${remPctStr}%`, `${usedPctStr}% used · ${remPctStr}% left`))}">
+            <div class="ag-ov-kv-row">
+              <span class="ag-ov-row-left">
+                <i class="ag-ov-qdot" style="background:${col}"></i>
+                <span class="ag-ov-qtitle">${escapeHtml(pShort)} · ${escapeHtml(winTag)}</span>
+              </span>
+              <span class="ag-ov-qpct">${usedPctStr}% ${L('已用', 'used')}</span>
+            </div>
+            <div class="ag-ov-seg-bar">${segsHtml}</div>
+            ${cursorHtml}
+            ${resetTxt ? `<div class="ag-ov-reset-txt">${escapeHtml(resetTxt)}</div>` : ''}
+          </div>`;
+        })
+        .join('');
+
+      const otherRows = [];
+      groups.forEach((g, idx) => {
+        if (idx === pIdx) return;
+        const gShort = localizeGroupShortName(g.displayName);
+        for (const b of sortBuckets(g.buckets)) {
+          const rem =
+            b.remaining && b.remaining.case === 'remainingFraction' && typeof b.remaining.value === 'number'
+              ? b.remaining.value
+              : typeof b.remainingFraction === 'number'
+                ? b.remainingFraction
+                : 1;
+          const usedRaw = Math.max(0, Math.min(100, (1 - rem) * 100));
+          const usedPctStr = fmtOvQuotaPct(usedRaw);
+          const remPctStr = fmtOvQuotaPct(100 - usedRaw);
+          const winTag = localizeQuotaWindowTag(b.window, b.displayName || '');
+          const col = ovQuotaUsedColor(usedRaw);
+          otherRows.push(`<div class="ag-ov-other-pool-row" title="${escapeHtml(L(`已用 ${usedPctStr}% · 剩余 ${remPctStr}%`, `${usedPctStr}% used · ${remPctStr}% left`))}">
+            <span class="ag-ov-muted ag-ov-trunc">${escapeHtml(gShort)}${winTag ? ` · ${escapeHtml(winTag)}` : ''}</span>
+            <span class="ag-ov-mini-meter-wrap">
+              <span class="ag-ov-mini-track"><span class="ag-ov-mini-fill" style="width:${usedRaw.toFixed(1)}%;background:${col}"></span></span>
+              <span class="ag-ov-mini-pct">${usedPctStr}%</span>
+            </span>
+          </div>`);
+        }
+      });
+
+      const otherHtml =
+        otherRows.length > 0
+          ? `<div class="ag-ov-other-pools">
+              <button type="button" class="ag-ov-sub-toggle" data-ag-ov-collapse="otherPools">
+                <span class="ag-ov-row-left">
+                  ${buildOvChevronSvg(ovCollapseState.otherPools)}
+                  <span class="ag-ov-muted">${L('其他模型池', 'Other model pools')}</span>
+                </span>
+                <span class="ag-ov-muted">${otherRows.length}</span>
+              </button>
+              ${ovCollapseState.otherPools ? `<div class="ag-ov-other-pools-list">${otherRows.join('')}</div>` : ''}
+            </div>`
+          : '';
+
+      quotaInnerHtml = `${primaryHtml}${otherHtml}`;
+    }
+
+    const quotaCardHtml = `
+      <section class="ag-ov-card" data-ov-card="quota">
+        <div class="ag-ov-card-hdr">
+          <button type="button" class="ag-ov-hdr-toggle" data-ag-ov-collapse="quota">
+            ${buildOvChevronSvg(ovCollapseState.quota)}
+            <span>Antigravity</span>
+            ${tierDisplay ? `<span class="ag-ov-tier-pill">${escapeHtml(tierDisplay)}</span>` : ''}
+          </button>
+          <div class="ag-ov-hdr-actions">
+            <button type="button" class="ag-ov-icon-btn" data-ag-ov-action="refresh-quota" title="${escapeHtml(L('刷新实时配额', 'Refresh quota'))}" aria-label="${escapeHtml(L('刷新配额', 'Refresh quota'))}">
+              <svg class="${isQuotaSpinning ? 'ag-ov-spinning' : ''}" width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M13.2 8a5.2 5.2 0 1 1-1.4-3.55" stroke-linecap="round"/><path d="M13.4 2.5v2.6h-2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+        </div>
+        ${ovCollapseState.quota ? `<div class="ag-ov-card-body ag-ov-quota-body">${quotaInnerHtml}</div>` : ''}
+      </section>`;
+
+    /* ---- 4. Side chats / Subagents (Rendered only when children exist) ---- */
+    const sidechatsCardHtml =
+      mergedChildren.length > 0
+        ? `<section class="ag-ov-card" data-ov-card="sidechats">
+            <div class="ag-ov-card-hdr">
+              <button type="button" class="ag-ov-hdr-toggle" data-ag-ov-collapse="sidechats">
+                ${buildOvChevronSvg(ovCollapseState.sidechats)}
+                <span>${L('子智能体', 'Side chats')}</span>
+              </button>
+              <span class="ag-ov-count-pill">${mergedChildren.length}</span>
+            </div>
+            ${
+              ovCollapseState.sidechats
+                ? `<div class="ag-ov-list-body">
+                    ${mergedChildren
+                      .map((ch) => {
+                        const label = ch.title || ch.agentName || ch.id.slice(0, 8);
+                        const statusHtml = ch.running
+                          ? `<span class="ag-ov-status-run">${L('运行中', 'Running')}</span>`
+                          : `<span class="ag-ov-muted">${L('已完成', 'Done')}</span>`;
+                        const iconHtml = ch.running
+                          ? `<i class="ag-ov-dot-live"></i>`
+                          : `<svg width="13" height="13" class="ag-ov-muted ag-ov-shrink0" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M3.5 8.2 6.5 11.2 12.5 4.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+                        return `<button type="button" class="ag-ov-row-btn" data-ag-ov-action="sidechat" data-cid="${escapeHtml(ch.id)}">
+                          <span class="ag-ov-row-left">${iconHtml}<span class="ag-ov-trunc">${escapeHtml(label)}</span></span>
+                          ${statusHtml}
+                        </button>`;
+                      })
+                      .join('')}
+                  </div>`
+                : ''
+            }
+          </section>`
+        : '';
+
+    /* ---- 5. Connectors & Inventory (Claude Code Style, Default Collapsed) ---- */
+    const skillsData = (snap && snap.skills) || { total: 0, userCount: 0, items: [] };
+    const agentsData = (snap && snap.agents) || { total: 0, items: [] };
+    const connList = (snap && Array.isArray(snap.connectors) && snap.connectors) || [];
+    const shownConns = ovCollapseState.connectorsExtra ? connList : connList.slice(0, 5);
+    const hiddenConnCount = Math.max(0, connList.length - 5);
+
+    const connectorsCardHtml = `
+      <section class="ag-ov-card" data-ov-card="connectors">
+        <div class="ag-ov-card-hdr">
+          <button type="button" class="ag-ov-hdr-toggle" data-ag-ov-collapse="connectors">
+            ${buildOvChevronSvg(ovCollapseState.connectors)}
+            <span>${L('连接器与能力', 'Connectors & Skills')}</span>
+          </button>
+          <span class="ag-ov-muted ag-ov-tabular">${L(`${connList.length} MCP · ${skillsData.total} 技能`, `${connList.length} MCP · ${skillsData.total} Skills`)}</span>
+        </div>
+        ${
+          ovCollapseState.connectors
+            ? `<div class="ag-ov-card-body ag-ov-conn-wrap">
+                <div class="ag-ov-inv-group">
+                  <button type="button" class="ag-ov-inv-toggle" data-ag-ov-collapse="invMemory">
+                    <span class="ag-ov-row-left">${buildOvChevronSvg(ovCollapseState.invMemory)}<span>${L('记忆与规则', 'Memory / Rules')}</span></span>
+                    <span class="ag-ov-muted ag-ov-tabular">${rulesList.length}</span>
+                  </button>
+                  ${
+                    ovCollapseState.invMemory
+                      ? `<div class="ag-ov-inv-items">
+                          ${
+                            rulesList.length > 0
+                              ? rulesList
+                                  .map(
+                                    (r) =>
+                                      `<button type="button" class="ag-ov-inv-link" data-ag-ov-action="${r.scope === 'project' ? 'edit-rules' : 'reveal-path'}" data-path="${escapeHtml(r.path)}">${escapeHtml(r.label)}</button>`
+                                  )
+                                  .join('')
+                              : `<div class="ag-ov-empty-inline">${L('暂无规则文件', 'No rule files')}</div>`
+                          }
+                        </div>`
+                      : ''
+                  }
+
+                  <button type="button" class="ag-ov-inv-toggle" data-ag-ov-collapse="invSkills">
+                    <span class="ag-ov-row-left">${buildOvChevronSvg(ovCollapseState.invSkills)}<span>${L('技能清单', 'Skills')}</span></span>
+                    <span class="ag-ov-muted ag-ov-tabular">${skillsData.total}</span>
+                  </button>
+                  ${
+                    ovCollapseState.invSkills
+                      ? `<div class="ag-ov-inv-items">
+                          ${skillsData.items
+                            .slice(0, 12)
+                            .map(
+                              (s) =>
+                                `<button type="button" class="ag-ov-inv-link" data-ag-ov-action="reveal-path" data-path="${escapeHtml(s.path)}" title="${escapeHtml(s.source)}">${escapeHtml(s.name)}</button>`
+                            )
+                            .join('')}
+                          ${
+                            skillsData.total > 12
+                              ? `<button type="button" class="ag-ov-inv-more" data-ag-ov-action="open-skills-dir">${L(`… 其余 ${skillsData.total - 12} 项（打开技能目录）`, `… ${skillsData.total - 12} more (open folder)`)}</button>`
+                              : ''
+                          }
+                        </div>`
+                      : ''
+                  }
+
+                  <button type="button" class="ag-ov-inv-toggle" data-ag-ov-collapse="invAgents">
+                    <span class="ag-ov-row-left">${buildOvChevronSvg(ovCollapseState.invAgents)}<span>${L('自定义子 Agent', 'Custom agents')}</span></span>
+                    <span class="ag-ov-muted ag-ov-tabular">${agentsData.total}</span>
+                  </button>
+                  ${
+                    ovCollapseState.invAgents
+                      ? `<div class="ag-ov-inv-items">
+                          ${
+                            agentsData.items.length > 0
+                              ? agentsData.items
+                                  .map(
+                                    (a) =>
+                                      `<button type="button" class="ag-ov-inv-link" data-ag-ov-action="reveal-path" data-path="${escapeHtml(a.path)}">${escapeHtml(a.name)}</button>`
+                                  )
+                                  .join('')
+                              : `<button type="button" class="ag-ov-inv-more" data-ag-ov-action="open-agents-dir">${L('暂无自定义 Agent · 打开目录', 'None yet · open folder')}</button>`
+                          }
+                        </div>`
+                      : ''
+                  }
+                </div>
+
+                <div class="ag-ov-conn-sub">
+                  <div class="ag-ov-conn-title">${L('已连接服务', 'Connectors')}</div>
+                  ${
+                    shownConns.length > 0
+                      ? shownConns
+                          .map((c) => {
+                            const letterMatch = String(c.name || c.id || 'M').match(/[A-Za-z0-9]/);
+                            const mono = letterMatch ? letterMatch[0].toUpperCase() : 'M';
+                            return `<button type="button" class="ag-ov-conn-row" data-ag-ov-action="open-plugins" title="${escapeHtml(L('打开扩展插件管理', 'Open Extensions & Plugins'))}">
+                              <span class="ag-ov-row-left">
+                                <span class="ag-ov-monogram">${escapeHtml(mono)}</span>
+                                <span class="ag-ov-trunc">${escapeHtml(c.name)}</span>
+                              </span>
+                              <i class="ag-ov-dot ag-ov-dot-green"></i>
+                            </button>`;
+                          })
+                          .join('')
+                      : `<div class="ag-ov-empty-inline">${L('暂无已配置的 MCP 连接器', 'No MCP connectors configured')}</div>`
+                  }
+                  ${
+                    hiddenConnCount > 0
+                      ? `<button type="button" class="ag-ov-show-more" data-ag-ov-action="toggle-connectors-more">${
+                          ovCollapseState.connectorsExtra ? L('收起', 'Show less') : L(`展开更多 (${hiddenConnCount})`, `Show more (${hiddenConnCount})`)
+                        }</button>`
+                      : ''
+                  }
+                </div>
+              </div>`
+            : ''
+        }
+      </section>`;
+
+    sectionsEl.innerHTML = `${envCardHtml}${ctxCardHtml}${quotaCardHtml}${sidechatsCardHtml}${connectorsCardHtml}`;
+  }
+
+  function isNativeArtifactOverviewBlock(el) {
+    if (!el || !el.querySelector) return false;
+    if (el.querySelector('[data-testid="artifact-row"], [data-testid*="artifact"]')) return true;
+    const hdrLbl = el.querySelector('span.agy-hover-label');
+    const txt = hdrLbl ? String(hdrLbl.textContent || '').trim() : '';
+    return /^(?:artifacts?|产物)$/i.test(txt);
+  }
+
+  const OV_LIVE_POLL_MS = 12000;
+
+  function onQuotaVisibilityOrFocus() {
+    if (disposed) return;
+    if (typeof document.visibilityState === 'string' && document.visibilityState === 'hidden') return;
+    if ((isOverviewPanelVisible() || quotaPopoverOpen) && Date.now() - lastForceQuotaFetchTs >= 5000) {
+      scheduleAutoQuotaRefresh(150, 4000);
+    }
+  }
+  window.addEventListener('focus', onQuotaVisibilityOrFocus);
+  document.addEventListener('visibilitychange', onQuotaVisibilityOrFocus);
+
+  function stopOverviewMinuteTicker() {
+    if (ovMinuteTickerId) {
+      clearInterval(ovMinuteTickerId);
+      ovMinuteTickerId = null;
+    }
+  }
+
+  function ensureOverviewMinuteTicker() {
+    if (ovMinuteTickerId || disposed) return;
+    ovMinuteTickerId = setInterval(() => {
+      if (disposed || !FEAT.overviewPanel || !isOverviewPanelVisible()) {
+        stopOverviewMinuteTicker();
+        return;
+      }
+      if (
+        (typeof document.visibilityState !== 'string' || document.visibilityState !== 'hidden') &&
+        Date.now() - lastForceQuotaFetchTs >= OV_LIVE_POLL_MS
+      ) {
+        if (discoverQuotaService(false)) fetchQuotaSummary(true);
+      }
+      renderOverviewPanel(false);
+    }, OV_LIVE_POLL_MS);
+    if (ovMinuteTickerId && typeof ovMinuteTickerId.unref === 'function') {
+      ovMinuteTickerId.unref();
+    }
+  }
+
+  function syncOverviewPanel(force = false) {
+    if (disposed || !FEAT.overviewPanel) {
+      teardownOverviewPanel();
+      return;
+    }
+    const panel = document.querySelector('[data-testid="overview-panel"]');
+    if (!panel || panel.hidden || panel.getAttribute('aria-hidden') === 'true') {
+      stopOverviewMinuteTicker();
+      return;
+    }
+
+    if (panel.getAttribute('data-ag-ov-enhanced') !== '1') {
+      panel.setAttribute('data-ag-ov-enhanced', '1');
+    }
+
+    const scrollBody =
+      Array.from(panel.children).find((ch) => ch.classList && ch.classList.contains('overflow-y-auto')) || panel.children[1];
+    if (!scrollBody) return;
+
+    let sectionsEl = document.getElementById('ag-claude-ov-sections');
+    if (sectionsEl && sectionsEl.parentElement !== scrollBody) {
+      sectionsEl.remove();
+      sectionsEl = null;
+    }
+
+    for (const child of Array.from(scrollBody.children)) {
+      if (child.id === 'ag-claude-ov-sections') continue;
+      if (child.querySelector && child.querySelector('button[data-testid^="overview-panel-row-"]')) {
+        if (child.getAttribute('data-ag-ov-shortcuts') !== '1') child.setAttribute('data-ag-ov-shortcuts', '1');
+        child.removeAttribute('data-ag-ov-native-artifact');
+        child.removeAttribute('data-ag-ov-native-tail');
+      } else if (isNativeArtifactOverviewBlock(child)) {
+        if (child.getAttribute('data-ag-ov-native-artifact') !== '1') child.setAttribute('data-ag-ov-native-artifact', '1');
+        child.removeAttribute('data-ag-ov-shortcuts');
+        child.removeAttribute('data-ag-ov-native-tail');
+      } else {
+        if (child.getAttribute('data-ag-ov-native-tail') !== '1') child.setAttribute('data-ag-ov-native-tail', '1');
+        child.removeAttribute('data-ag-ov-shortcuts');
+        child.removeAttribute('data-ag-ov-native-artifact');
+      }
+    }
+
+    if (!sectionsEl) {
+      sectionsEl = document.createElement('div');
+      sectionsEl.id = 'ag-claude-ov-sections';
+      sectionsEl.setAttribute('data-ag-i18n-ignore', '1');
+      sectionsEl.addEventListener('click', onOverviewSectionsClick);
+      scrollBody.appendChild(sectionsEl);
+    }
+
+    ensureOverviewMinuteTicker();
+
+    const now = Date.now();
+    if ((!cachedQuotaGroups || now - lastForceQuotaFetchTs >= OV_LIVE_POLL_MS) && now - ovLastQuotaAutoTryTs > 4000) {
+      ovLastQuotaAutoTryTs = now;
+      if (discoverQuotaService(false)) fetchQuotaSummary(true);
+    }
+
+    renderOverviewPanel(force);
+  }
+
+  function teardownOverviewPanel() {
+    stopOverviewMinuteTicker();
+    if (ovQuotaSpinTimer) {
+      cancelLater(ovQuotaSpinTimer);
+      ovQuotaSpinTimer = 0;
+    }
+    ovRefreshSpinUntil = 0;
+    ovSnapshotCache.clear();
+    ovWorkspaceMemo = { ts: 0, key: '', value: null };
+    ovCompactMemo = { ts: 0, key: '', status: 'idle' };
+    const sectionsEl = document.getElementById('ag-claude-ov-sections');
+    if (sectionsEl) sectionsEl.remove();
+    document.querySelectorAll('[data-ag-ov-enhanced]').forEach((el) => el.removeAttribute('data-ag-ov-enhanced'));
+    document.querySelectorAll('[data-ag-ov-shortcuts]').forEach((el) => el.removeAttribute('data-ag-ov-shortcuts'));
+    document.querySelectorAll('[data-ag-ov-native-artifact]').forEach((el) => el.removeAttribute('data-ag-ov-native-artifact'));
+    document.querySelectorAll('[data-ag-ov-native-tail]').forEach((el) => el.removeAttribute('data-ag-ov-native-tail'));
   }
 
   /* ---- scheduling: rAF-coalesced, throttled, and blind to our own DOM writes ---- */
@@ -11177,7 +14853,7 @@
   }
 
   const OWN_SEL =
-    '.ag-claude-todo-card, .ag-claude-todo-live-dock, #ag-auto-approval-nav, #ag-auto-approval-panel, #ag-auto-approval-badge, .ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, .ag-claude-inline-editor, .ag-claude-folder-badges, #ag-claude-recent-section, #ag-recent-row-menu, #ag-project-action-menu, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-settings-stats-wrap, .ag-settings-subhdr-chev, #ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal';
+    '.ag-claude-todo-card, .ag-claude-todo-live-dock, #ag-auto-approval-nav, #ag-auto-approval-panel, #ag-auto-approval-badge, .ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, .ag-claude-inline-editor, .ag-claude-folder-badges, #ag-claude-recent-section, #ag-recent-row-menu, #ag-project-action-menu, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-settings-stats-wrap, .ag-settings-subhdr-chev, #ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal, .ag-code-fold-toggle, .ag-code-fold-bar, #ag-claude-ov-sections';
   const CLASS_WATCH_SEL =
     'ul.contains-task-list, [id="antigravity.agentSidePanelInputBox"], [data-testid="tool-group-collapsible"], [data-testid="worked-for-collapsible"], [data-testid="progress-updates-collapsible"], [data-testid="ephemeral-tool-status"]';
 
@@ -11248,6 +14924,8 @@
       pendingBodyReadyCleanup();
       pendingBodyReadyCleanup = null;
     }
+    const staleThemeToggle = document.getElementById('ag-claude-topbar-theme');
+    if (staleThemeToggle) staleThemeToggle.remove();
     applyUiI18nState(FEAT.i18n);
     if (needsInitialPrefsSync) {
       persistUiPrefsToDaemon(localOverrideTs || Date.now());
@@ -11296,6 +14974,9 @@
     projectComposerDrafts.clear();
     observer.disconnect();
     stopUxI18nObserver();
+    try {
+      teardownCodeBlocks();
+    } catch {}
     for (const id of pendingRafs) cancelAnimationFrame(id);
     pendingRafs.clear();
     for (const id of pendingTimeouts) clearTimeout(id);
@@ -11317,15 +14998,27 @@
     document.removeEventListener('mousedown', onModelTriggerSwallowMouseClick, true);
     document.removeEventListener('click', onModelTriggerSwallowMouseClick, true);
     document.removeEventListener('keydown', onModelPopoverKeyDown, true);
+    document.removeEventListener('contextmenu', onNativeContextMenuCapture, true);
     document.removeEventListener('click', onRevertButtonClick, true);
     document.removeEventListener('keydown', onInlineEditDocKeyDown, true);
     document.removeEventListener('mouseenter', onMetricsPillMouseEnter, true);
     document.removeEventListener('mouseleave', onMetricsPillMouseLeave, true);
     document.removeEventListener('click', onMetricsPillClick, true);
+    document.removeEventListener('pointerdown', onPinnedRowPointerDown, true);
+    window.removeEventListener('pointermove', onPinnedRowPointerMove, true);
+    window.removeEventListener('pointerup', onPinnedRowPointerUp, true);
+    window.removeEventListener('pointercancel', onPinnedRowPointerCancel, true);
+    clearPinnedComposerDropHighlights();
     window.removeEventListener('resize', onWindowResizePopover);
     window.removeEventListener('focus', onWindowSidebarEvent);
     window.removeEventListener('blur', onWindowSidebarEvent);
     window.removeEventListener('popstate', onWindowSidebarEvent);
+    window.removeEventListener('focus', onQuotaVisibilityOrFocus);
+    document.removeEventListener('visibilitychange', onQuotaVisibilityOrFocus);
+    if (autoQuotaRefreshTimer) {
+      cancelLater(autoQuotaRefreshTimer);
+      autoQuotaRefreshTimer = 0;
+    }
     if (sidebarStoreUnsub) {
       sidebarStoreUnsub();
       sidebarStoreUnsub = null;
@@ -11336,7 +15029,24 @@
     removeRecentSection();
     clearSidebarHideNativeProjects();
     teardownCustomizationsEnhancement();
-    teardownProjectsWorkspace();
+    teardownOverviewPanel();
+    if (prefStoreUnsub) {
+      try {
+        prefStoreUnsub();
+      } catch {}
+      prefStoreUnsub = null;
+    }
+    cachedPrefStore = null;
+    cachedExecutorRoleBaseIds = null;
+    executorRolesFetchInFlight = false;
+    executorRolesLastTryTs = 0;
+    teardownProjectsWorkspace({ forceCloseAllModals: true });
+    if (sharedModalEscBound) {
+      document.removeEventListener('keydown', onSharedModalEscKeyDown, true);
+      sharedModalEscBound = false;
+    }
+    const floatToast = document.getElementById('ag-projects-float-toast');
+    if (floatToast) floatToast.remove();
     detachSettingsPanel();
     const ttEl = document.getElementById('ag-live-metrics-tooltip');
     if (ttEl) {
@@ -11361,7 +15071,7 @@
     }
     document
       .querySelectorAll(
-        '.ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, [data-ag-todo-mount], [data-ag-todo-dock], #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop'
+        '.ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, [data-ag-todo-mount], [data-ag-todo-dock], #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop'
       )
       .forEach((el) => el.remove());
     document
