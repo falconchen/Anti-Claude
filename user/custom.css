@@ -7524,10 +7524,11 @@ html body [class~="@container/titlebar"] [data-testid="breadcrumb-segment"] .tru
   line-height: 24px !important;
 }
 
-/* Sidebar project names: slightly heavier than conversation rows. */
+/* Sidebar project names: regular weight with system-managed smoothing. */
 html body .bg-sidebar button[data-testid="project-header"],
 html body .bg-sidebar button[data-testid="project-header"] span.truncate {
-  font-weight: 450 !important;
+  font-weight: 400 !important;
+  -webkit-font-smoothing: auto !important;
 }
 
 /* Preserve native virtual-row measurements while a resized Recents spacer is
