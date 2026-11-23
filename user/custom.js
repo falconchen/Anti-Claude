@@ -115,7 +115,8 @@
     hideSidebarProjects: effectiveModBool('claudeUxHideSidebarProjects', true),
     customizations: effectiveModBool('claudeUxCustomizations', true),
     codeFold: effectiveModBool('claudeUxCodeFold', true),
-    overviewPanel: effectiveModBool('claudeUxOverviewPanel', true)
+    overviewPanel: effectiveModBool('claudeUxOverviewPanel', true),
+    titleSync: effectiveModBool('titleSync', true)
   };
   const L = (zh, en) => (FEAT.i18n ? zh : en);
 
@@ -7976,6 +7977,14 @@
           'Enhanced Right Overview Panel',
           '在右侧「概览」面板整合紧凑导航、工作环境、实时上下文与缓存拆解、谷歌蓝双窗口配额、子智能体状态及 MCP / 技能清单',
           'Enhances the right Overview panel with compact shortcuts, workspace environment, live Context & cache breakdown, Google Blue dual-window quotas, subagents, and MCP/skills inventory'
+        ],
+        [
+          'titleSync',
+          'titleSync',
+          '外部改名标题热同步',
+          'Live External Title Sync',
+          '监听外部工具对 annotations/*.pbtxt 的标题改写（如 MCP 批量重命名历史空闲对话），通过原生 RPC 实时刷新侧边栏，无需重启 Antigravity',
+          'Watches external edits to annotations/*.pbtxt (such as MCP batch renames on idle chats) and syncs titles live via native RPC without restarting Antigravity'
         ]
       ]
     }
@@ -8222,6 +8231,10 @@
     } else if (featKey === 'overviewPanel') {
       if (!on) teardownOverviewPanel();
       else syncOverviewPanel(true);
+    } else if (featKey === 'titleSync') {
+      try {
+        window.__agTitleSync?.setEnabled(Boolean(on));
+      } catch {}
     }
     syncSidebarEnhancements();
     scheduleSync();
@@ -15039,6 +15052,13 @@
     };
   }
 
+  const onTitleSyncUpdated = () => {
+    if (disposed) return;
+    recentLastSig = '';
+    scheduleSidebarSync();
+  };
+  window.addEventListener('ag-title-sync-updated', onTitleSyncUpdated);
+
   function dispose() {
     if (disposed) return;
     disposed = true;
@@ -15089,6 +15109,7 @@
     window.removeEventListener('focus', onWindowSidebarEvent);
     window.removeEventListener('blur', onWindowSidebarEvent);
     window.removeEventListener('popstate', onWindowSidebarEvent);
+    window.removeEventListener('ag-title-sync-updated', onTitleSyncUpdated);
     window.removeEventListener('focus', onQuotaVisibilityOrFocus);
     document.removeEventListener('visibilitychange', onQuotaVisibilityOrFocus);
     if (autoQuotaRefreshTimer) {

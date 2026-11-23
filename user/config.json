@@ -26,6 +26,7 @@
     "claudeUxHideSidebarProjects": true,
     "claudeUxCustomizations": true,
     "autoApproval": false,
+    "titleSync": true,
     "claudeUxCodeFold": true,
     "claudeUxOverviewPanel": true
   },

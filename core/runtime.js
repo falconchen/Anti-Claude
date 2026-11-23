@@ -938,6 +938,14 @@
     }
   }
 
+  if (!IS_SWARM_PLUGIN_FRAME && MODULES.customJs && typeof boot.titleSyncJs === 'string' && boot.titleSyncJs.trim()) {
+    try {
+      new Function('ctx', boot.titleSyncJs)(window.__AG_PATCH_CTX__);
+    } catch (err) {
+      console.error('[Anti-Claude] Title sync module failed to initialize:', err);
+    }
+  }
+
   if (MODULES.customJs && boot.customJs && typeof boot.customJs === 'string' && boot.customJs.trim()) {
     try {
       const fn = new Function('ctx', 'boot', boot.customJs);

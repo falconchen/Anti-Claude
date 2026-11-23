@@ -12,6 +12,7 @@
 import crypto from 'node:crypto';
 import { listUserFonts, validUserFontName } from './user-fonts.mjs';
 import { AutoApprovalCoordinator, normalizeApprovalSettings } from './auto-approval.mjs';
+import { TitleSyncWatcher } from './title-sync.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -56,6 +57,7 @@ const CORE_BASE_CSS_FILE = path.join(__dirname, 'base.css');
 const CORE_I18N_FILE = path.join(__dirname, 'i18n.json');
 const CORE_RUNTIME_FILE = path.join(__dirname, 'runtime.js');
 const CORE_AUTO_APPROVAL_CLIENT_FILE = path.join(__dirname, 'auto-approval-client.js');
+const CORE_TITLE_SYNC_CLIENT_FILE = path.join(__dirname, 'title-sync-client.js');
 const PKG_FILE = path.join(REPO_ROOT, 'package.json');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -100,6 +102,7 @@ const ALLOWED_UI_MODULE_KEYS = new Set([
   'claudeUxHideSidebarProjects',
   'claudeUxCustomizations',
   'autoApproval',
+  'titleSync',
   'claudeUxCodeFold',
   'claudeUxOverviewPanel'
 ]);
@@ -218,11 +221,15 @@ export function claimPidFile({
     fs.writeFileSync(pidFile, `${process.pid}\n`, 'utf8');
     if (bindExit && !pidCleanupBound && pidFile === PID_FILE) {
       pidCleanupBound = true;
-      process.on('exit', () => removeOwnPidFile(PID_FILE));
+      process.on('exit', () => {
+        stopAllTitleSyncWatchers();
+        removeOwnPidFile(PID_FILE);
+      });
       for (const sig of ['SIGTERM', 'SIGINT']) {
         process.on(sig, () => {
           if (shuttingDown) return;
           shuttingDown = true;
+          stopAllTitleSyncWatchers();
           const finish = () => {
             removeOwnPidFile(PID_FILE);
             process.exit(0);
@@ -966,6 +973,7 @@ function rebuildBundleIfNeeded() {
     statSig(CORE_I18N_FILE),
     statSig(CORE_RUNTIME_FILE),
     statSig(CORE_AUTO_APPROVAL_CLIENT_FILE),
+    statSig(CORE_TITLE_SYNC_CLIENT_FILE),
     statSig(userConfigFile),
     statSig(UI_PREFS_FILE),
     statSig(userCssFile),
@@ -993,7 +1001,8 @@ function rebuildBundleIfNeeded() {
       metrics: true,
       zoomShortcuts: true,
       customCss: true,
-      customJs: true
+      customJs: true,
+      titleSync: true
     },
     rawCfg?.modules || {}
   );
@@ -1031,6 +1040,7 @@ function rebuildBundleIfNeeded() {
     customCss,
     customJs,
     autoApprovalJs: readTextOrEmpty(CORE_AUTO_APPROVAL_CLIENT_FILE),
+    titleSyncJs: readTextOrEmpty(CORE_TITLE_SYNC_CLIENT_FILE),
     dict: mergedDict
   };
 
@@ -3247,6 +3257,7 @@ async function handleProjectRpcRequest(rawPayload, callerEntry = null) {
     if (action === 'saveUiPrefs') {
       const res = saveUiPrefs(payload);
       rebuildBundleIfNeeded();
+      reconcileTitleSyncWatchers();
       if (callerEntry && callerEntry.hostConfirmed) {
         callerEntry.injectedBundleHash = cachedBundleHash;
         await callerEntry.updateNewDocScript().catch(() => {});
@@ -3363,6 +3374,90 @@ const attachedTargets = new Map();
 const skippedNonHostTargets = new Map();
 const targetThemeModes = new Map();
 const fallbackBackoffUntil = new Map();
+const titleSyncWatchers = new Map();
+
+function stopAllTitleSyncWatchers() {
+  for (const watcher of titleSyncWatchers.values()) {
+    try {
+      watcher.stop();
+    } catch {}
+  }
+  titleSyncWatchers.clear();
+}
+
+function pickTitleSyncTarget() {
+  let fallback = null;
+  for (const [, entry] of attachedTargets.entries()) {
+    if (!entry?.hostConfirmed || entry.type !== 'page') continue;
+    if (entry.ws?.readyState !== WebSocket.OPEN) continue;
+    if (entry.watchedCascadeId) return entry;
+    if (!fallback) fallback = entry;
+  }
+  return fallback;
+}
+
+export async function dispatchTitleSyncBatch(entries, watcher = null) {
+  if (!Array.isArray(entries) || entries.length === 0) return { ok: true, skipped: 'empty' };
+  if (!activeConfig.enabled || activeConfig.modules.customJs === false || activeConfig.modules.titleSync === false) {
+    watcher?.forget?.(entries.map((e) => e.id));
+    return { ok: true, skipped: 'disabled' };
+  }
+  const target = pickTitleSyncTarget();
+  if (!target) {
+    watcher?.forget?.(entries.map((e) => e.id));
+    return { ok: false, error: 'no_target' };
+  }
+  const expr = `window.__agTitleSync && typeof window.__agTitleSync.syncBatch === 'function' ? window.__agTitleSync.syncBatch(${JSON.stringify(entries)}) : { ok: false, error: 'module_unavailable' }`;
+  const params = { expression: expr, awaitPromise: true, returnByValue: true };
+  if (target.trustedContextId !== null) params.contextId = target.trustedContextId;
+  const res = await target.send('Runtime.evaluate', params, 30000).catch(() => null);
+  const val = res?.result?.result?.value;
+  if (!val || val.ok === false) {
+    watcher?.forget?.(entries.map((e) => e.id));
+    return { ok: false, error: val?.error || 'eval_failed' };
+  }
+  if (Array.isArray(val.failed) && val.failed.length > 0) {
+    watcher?.forget?.(val.failed);
+  }
+  return val;
+}
+
+function reconcileTitleSyncWatchers() {
+  if (
+    RUN_ONCE ||
+    !activeConfig.enabled ||
+    activeConfig.modules.customJs === false ||
+    activeConfig.modules.titleSync === false
+  ) {
+    stopAllTitleSyncWatchers();
+    return;
+  }
+  const desiredDirs = new Map(); // annotationsDir -> conversationsDir
+  for (const ep of activeConfig.endpoints || []) {
+    if (!ep?.conversationsDir) continue;
+    desiredDirs.set(path.join(path.dirname(ep.conversationsDir), 'annotations'), ep.conversationsDir);
+  }
+  for (const [dir, watcher] of titleSyncWatchers.entries()) {
+    if (!desiredDirs.has(dir)) {
+      try {
+        watcher.stop();
+      } catch {}
+      titleSyncWatchers.delete(dir);
+    }
+  }
+  for (const [dir, conversationsDir] of desiredDirs.entries()) {
+    let watcher = titleSyncWatchers.get(dir);
+    if (!watcher) {
+      watcher = new TitleSyncWatcher({
+        annotationsDir: dir,
+        conversationsDir,
+        onBatch: (entries) => dispatchTitleSyncBatch(entries, watcher)
+      });
+      titleSyncWatchers.set(dir, watcher);
+    }
+    if (!watcher.running) watcher.start();
+  }
+}
 
 export function isAllowedOrigin(rawUrl) {
   const s = String(rawUrl || '');
@@ -3908,6 +4003,7 @@ async function sync(opts = {}) {
   syncTickCount = (syncTickCount + 1) % 6000;
   try {
     const bundleChanged = rebuildBundleIfNeeded();
+    if (!readOnly) reconcileTitleSyncWatchers();
     if (!readOnly && !activeConfig.enabled) targetThemeModes.clear();
     const shouldHeartbeatCheck = !readOnly && (bundleChanged || syncTickCount % 6 === 1);
 
