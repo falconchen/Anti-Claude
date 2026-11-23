@@ -48,12 +48,17 @@
     smoothing: [['antialiased', '灰度抗锯齿（当前默认）', 'Grayscale (current default)'],
       ['auto', '系统自动', 'System automatic']]
   };
+  function validUserFontName(value) {
+    return typeof value === 'string' && value.length > 0 && value.length <= 200 &&
+      value === value.trim() && !/[\u0000-\u001f\u007f]/.test(value);
+  }
   function normalizeTypography(raw) {
     const out = {};
     for (const [key, options] of Object.entries(FONT_OPTIONS)) {
       const value = String(raw && raw[key] != null ? raw[key] : '');
-      if (options.some(([v]) => v === value)) out[key] = value;
+      if (options.some(([v]) => v === value) || (key === 'family' && value === 'user')) out[key] = value;
     }
+    if (validUserFontName(raw?.userFamily)) out.userFamily = raw.userFamily;
     return out;
   }
   const rawLocalModOverrides = loadLocalModuleOverrides();
@@ -83,6 +88,9 @@
     { family: 'system', size: '14', weight: 'default', smoothing: 'antialiased' },
     normalizeTypography(CFG_ROOT.typography), normalizeTypography(localModOverrides.typography)
   );
+  let userFontFamilies = [];
+  let userFontsRequest = null;
+  let userFontsStatus = 'idle';
   function effectiveModBool(key, defaultVal = true) {
     if (Object.prototype.hasOwnProperty.call(localModOverrides, key)) {
       return Boolean(localModOverrides[key]);
@@ -137,7 +145,9 @@
     }
     const cjk = currentCjkScale === '100' ? "'PingFang SC'" :
       currentCjkScale === '94.5' ? "'AG PingFang 945'" : "'AG PingFang 950'";
-    const family = currentTypography.family === 'anthropic-sans' ?
+    const family = currentTypography.family === 'user' && validUserFontName(currentTypography.userFamily) ?
+      `${JSON.stringify(currentTypography.userFamily)}, ${cjk}, system-ui, sans-serif` :
+      currentTypography.family === 'anthropic-sans' ?
       `${cjk}, 'Anthropic Sans', system-ui, sans-serif` :
       currentTypography.family === 'anthropic-serif' ?
       `${cjk}, 'Anthropic Serif', Georgia, serif` : '';
@@ -5760,6 +5770,51 @@
   let settingsStatsUnlinkedOpen = false;
   let settingsStatsBtnWrap = null;
 
+  function fontFamilySelectValue() {
+    return currentTypography.family === 'user' ? `user:${currentTypography.userFamily || ''}` : currentTypography.family;
+  }
+  function fontFamilyOptionsHtml() {
+    const selected = fontFamilySelectValue();
+    const base = FONT_OPTIONS.family.map(([value, zh, en]) =>
+      `<option value="${value}"${selected === value ? ' selected' : ''}>${escapeHtml(L(zh, en))}</option>`).join('');
+    const families = [...userFontFamilies];
+    if (currentTypography.family === 'user' && validUserFontName(currentTypography.userFamily) &&
+        !families.includes(currentTypography.userFamily)) families.unshift(currentTypography.userFamily);
+    return base + (families.length ? `<optgroup label="${escapeHtml(L('macOS 用户字体库', 'macOS User Fonts'))}">${families.map(name =>
+      `<option value="${escapeHtml(`user:${name}`)}"${selected === `user:${name}` ? ' selected' : ''}>${escapeHtml(name)}</option>`).join('')}</optgroup>` : '');
+  }
+  function updateUserFontControls(panel) {
+    const select = panel?.querySelector('[data-ag-font-option="family"]');
+    if (select) select.innerHTML = fontFamilyOptionsHtml();
+    const status = panel?.querySelector('[data-ag-font-status]');
+    if (status) status.textContent = userFontsStatus === 'loading' ? L('正在读取用户字体库…', 'Reading user fonts…') :
+      userFontsStatus === 'error' ? L('无法读取字体库，请重试（仅支持 macOS）。', 'Could not read fonts. Retry on macOS.') :
+      L(`已读取 ${userFontFamilies.length} 个用户字体家族`, `${userFontFamilies.length} user font families`);
+    const refresh = panel?.querySelector('[data-ag-refresh-fonts]');
+    if (refresh) refresh.disabled = userFontsStatus === 'loading';
+  }
+  async function loadUserFontOptions(panel, refresh = false) {
+    if (userFontsRequest) { updateUserFontControls(panel); return userFontsRequest; }
+    userFontsStatus = 'loading';
+    updateUserFontControls(panel);
+    userFontsRequest = Promise.resolve().then(async () => {
+      try {
+        if (typeof window.__agProjectCall !== 'function') throw new Error('bridge unavailable');
+        const result = await window.__agProjectCall('listUserFonts', { refresh }, 18000);
+        if (disposed) return;
+        if (!result?.ok || !Array.isArray(result.families)) throw new Error('scan failed');
+        userFontFamilies = [...new Set(result.families.filter(validUserFontName))];
+        userFontsStatus = 'ready';
+      } catch {
+        userFontsStatus = 'error';
+      } finally {
+        userFontsRequest = null;
+        if (!disposed) updateUserFontControls(settingsPanelEl || panel);
+      }
+    });
+    return userFontsRequest;
+  }
+
   function renderTypographyControls() {
     const labels = {
       family: L('字体方案', 'Font family'), size: L('正文字号', 'Body font size'),
@@ -5767,15 +5822,17 @@
     };
     return Object.entries(FONT_OPTIONS).map(([key, options]) => `
       <div class="ag-cux-settings-row ag-font-row">
-        <label class="ag-cux-settings-title" for="ag-font-${key}">${escapeHtml(labels[key])}</label>
+        <div><label class="ag-cux-settings-title" for="ag-font-${key}">${escapeHtml(labels[key])}</label>
+          ${key === 'family' ? `<div class="ag-cux-settings-desc" data-ag-font-status role="status" aria-live="polite"></div>
+            <button type="button" class="ag-font-refresh" data-ag-refresh-fonts>${escapeHtml(L('刷新字体库', 'Refresh fonts'))}</button>` : ''}</div>
         <select id="ag-font-${key}" class="ag-font-select" data-ag-font-option="${key}">
-          ${options.map(([value, zh, en]) => `<option value="${value}"${currentTypography[key] === value ? ' selected' : ''}>${escapeHtml(L(zh, en))}</option>`).join('')}
+          ${key === 'family' ? fontFamilyOptionsHtml() : options.map(([value, zh, en]) => `<option value="${value}"${currentTypography[key] === value ? ' selected' : ''}>${escapeHtml(L(zh, en))}</option>`).join('')}
         </select>
       </div>`).join('') + `
       <div class="ag-cux-settings-row ag-font-preview-row">
         <div class="ag-cux-settings-desc">${escapeHtml(L(
-          '字体方案用于界面与正文；字号和字重用于 AI 正文及思考／工具状态行，状态行比正文小 1px。Claude 字体需本机已安装，中文回退苹方；代码和输入框保留原设置。系统自动抗锯齿的效果取决于系统。',
-          'Font family applies to UI and prose. Size and weight apply to AI prose and thinking/tool status; status is 1px smaller. Claude fonts require a local installation; CJK falls back to PingFang. Code and input fonts stay unchanged. Automatic smoothing depends on the OS.'
+          '字体方案用于界面与正文；字号和字重用于 AI 正文及思考／工具状态行，状态行比正文小 1px。用户字体从 ~/Library/Fonts 读取，缺失字形回退苹方；移除字体后回退系统字体。代码和输入框保留原设置。系统自动抗锯齿的效果取决于系统。',
+          'Font family applies to UI and prose. Size and weight apply to AI prose and thinking/tool status; status is 1px smaller. Claude fonts require a local installation; User fonts come from ~/Library/Fonts; missing glyphs fall back to PingFang. Code and input fonts stay unchanged. Automatic smoothing depends on the OS.'
         ))}</div>
         <div id="ag-font-preview">${escapeHtml(L('字体预览：正在查询 WHOIS 信息，完成后立即汇总。0123456789', 'Font preview: Checking WHOIS details. 0123456789'))}</div>
       </div>`;
@@ -5848,15 +5905,24 @@
     panel.querySelectorAll('[data-ag-font-option]').forEach((select) => {
       select.addEventListener('change', () => {
         const key = select.getAttribute('data-ag-font-option');
-        const next = normalizeTypography({ [key]: select.value });
-        if (!next[key]) return;
-        currentTypography[key] = next[key];
+        if (key === 'family' && select.value.startsWith('user:')) {
+          const name = select.value.slice(5);
+          if (!validUserFontName(name) || !userFontFamilies.includes(name)) return;
+          currentTypography.family = 'user';
+          currentTypography.userFamily = name;
+        } else {
+          const next = normalizeTypography({ [key]: select.value });
+          if (!next[key]) return;
+          currentTypography[key] = next[key];
+        }
         localModOverrides.typography = { ...currentTypography };
         applyTypography();
         persistUiPrefsToDaemon();
         flashSettingsSavedToast();
       });
     });
+    panel.querySelector('[data-ag-refresh-fonts]')?.addEventListener('click', () => loadUserFontOptions(panel, true));
+    loadUserFontOptions(panel);
     panel.querySelectorAll('[data-ag-cux-switch]').forEach((sw) => {
       sw.addEventListener('click', () => {
         const modKey = sw.getAttribute('data-ag-cux-switch');

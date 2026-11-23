@@ -10,6 +10,7 @@
  */
 
 import crypto from 'node:crypto';
+import { listUserFonts, validUserFontName } from './user-fonts.mjs';
 import { AutoApprovalCoordinator, normalizeApprovalSettings } from './auto-approval.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -631,7 +632,7 @@ let activeConfig = {
 
 function sanitizeTypography(raw) {
   const allowed = {
-    family: ['system', 'anthropic-sans', 'anthropic-serif'],
+    family: ['system', 'anthropic-sans', 'anthropic-serif', 'user'],
     size: ['14', '15', '16', '17', '18'],
     weight: ['default', '400', '450', '500'], smoothing: ['antialiased', 'auto']
   };
@@ -639,6 +640,7 @@ function sanitizeTypography(raw) {
   for (const [key, values] of Object.entries(allowed)) {
     if (raw && values.includes(String(raw[key]))) out[key] = String(raw[key]);
   }
+  if (validUserFontName(raw?.userFamily)) out.userFamily = raw.userFamily;
   return out;
 }
 
@@ -2468,6 +2470,9 @@ async function handleProjectRpcRequest(rawPayload, callerEntry = null) {
         : action === 'autoApprovalCommit' ? coordinator.commit(callerEntry.id, payload, currentApprovalPolicy())
         : coordinator.result(callerEntry.id, payload);
       return { reqId, result };
+    }
+    if (action === 'listUserFonts') {
+      return { reqId, result: await listUserFonts({ refresh: payload.refresh === true }) };
     }
     if (action === 'saveUiPrefs') {
       const res = saveUiPrefs(payload);

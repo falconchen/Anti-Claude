@@ -21,7 +21,7 @@ const SRC = fs
   .readFileSync(path.join(REPO, 'user', 'custom.js'), 'utf8')
   .replace(
     /\}\)\(\);\s*$/,
-    'window.__t = { scheduleSync, syncStepStream, dispose, parseAndSlimMetricsPayload, cacheTierForRate, detectCompactStatus, triggerConversationCompact }; })();'
+    'window.__t = { scheduleSync, syncStepStream, dispose, parseAndSlimMetricsPayload, cacheTierForRate, detectCompactStatus, triggerConversationCompact, renderSettingsPanelContent, loadUserFontOptions }; })();'
   );
 
 function mount(html, { modules = {}, dict = null, config = {}, localPrefs = null } = {}) {
@@ -2324,4 +2324,45 @@ test('typography restores validated preferences and cleans styles on teardown', 
   assert.doesNotMatch(css, /evil|999|700|bad/);
   assert.match(css, /font-size: 14px/);
   bad.close();
+});
+
+
+test('user font picker loads families, escapes names, saves selection, refreshes and retries', { skip }, async () => {
+  const h = mount('<div id="font-test-panel"></div>');
+  let fail = false;
+  let calls = [];
+  const name = 'Example "Font" <Test>';
+  h.window.__agProjectCall = async (action, payload) => {
+    calls.push({ action, payload });
+    if (action === 'saveUiPrefs') return { ok: true };
+    if (fail) throw new Error('disconnected');
+    return { ok: true, families: [name, '霞鹜文楷', name, 'bad\nfont'] };
+  };
+  const panel = h.doc.getElementById('font-test-panel');
+  h.window.__t.renderSettingsPanelContent(panel);
+  await h.microtasks();
+  const select = panel.querySelector('[data-ag-font-option="family"]');
+  assert.equal(select.querySelectorAll('optgroup option').length, 2);
+  assert.equal(select.querySelector('optgroup option').textContent, name);
+  select.value = `user:${name}`;
+  select.dispatchEvent(new h.window.Event('change', { bubbles: true }));
+  const saved = JSON.parse(h.window.localStorage.getItem('ag_claude_ux_modules_v1')).typography;
+  assert.equal(saved.family, 'user');
+  assert.equal(saved.userFamily, name);
+  assert.match(h.doc.getElementById('ag-typography-style').textContent, /Example \\"Font\\" <Test>/);
+  assert.equal(calls.filter(c => c.action === 'saveUiPrefs').at(-1).payload.typography.userFamily, name);
+  fail = true;
+  panel.querySelector('[data-ag-refresh-fonts]').click();
+  await h.microtasks();
+  assert.match(panel.querySelector('[data-ag-font-status]').textContent, /Could not read/);
+  assert.equal(panel.querySelector('[data-ag-refresh-fonts]').disabled, false);
+  fail = false;
+  panel.querySelector('[data-ag-refresh-fonts]').click();
+  await h.microtasks();
+  assert.equal(calls.filter(c => c.action === 'listUserFonts').at(-1).payload.refresh, true);
+  assert.equal(select.value, `user:${name}`);
+  h.close();
+  const restored = mount('', { config: { typography: { family: 'user', userFamily: name } } });
+  assert.ok(restored.doc.getElementById('ag-typography-style').textContent.includes(JSON.stringify(name)));
+  restored.close();
 });

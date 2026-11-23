@@ -1798,6 +1798,16 @@ test('[Language Persistence Across Ephemeral Port Restarts] persists Chinese/Eng
       'en',
       'discards stale localStorage when OS reuses an older ephemeral port'
     );
+    const customFont = daemon.saveUiPrefs({ typography: { family: 'user', userFamily: '霞鹜文楷' } });
+    assert.equal(customFont.typography.family, 'user');
+    assert.equal(customFont.typography.userFamily, '霞鹜文楷');
+    const invalidFont = daemon.saveUiPrefs({ typography: { userFamily: 'bad\nfont' } });
+    assert.equal(invalidFont.typography.userFamily, '霞鹜文楷');
+    daemon.rebuildBundleIfNeeded();
+    const dom5 = openSimulatedWindow(61300);
+    try {
+      assert.ok(dom5.window.document.getElementById('ag-typography-style').textContent.includes('"霞鹜文楷"'));
+    } finally { dom5.window.close(); }
   } finally {
     if (dom1) dom1.window.close();
     if (dom2) dom2.window.close();
