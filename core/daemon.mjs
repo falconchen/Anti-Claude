@@ -13,6 +13,7 @@ import crypto from 'node:crypto';
 import { listUserFonts, validUserFontName } from './user-fonts.mjs';
 import { AutoApprovalCoordinator, normalizeApprovalSettings } from './auto-approval.mjs';
 import { TitleSyncWatcher } from './title-sync.mjs';
+import { moveConversationToProject } from './move-to-project.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -58,6 +59,7 @@ const CORE_I18N_FILE = path.join(__dirname, 'i18n.json');
 const CORE_RUNTIME_FILE = path.join(__dirname, 'runtime.js');
 const CORE_AUTO_APPROVAL_CLIENT_FILE = path.join(__dirname, 'auto-approval-client.js');
 const CORE_TITLE_SYNC_CLIENT_FILE = path.join(__dirname, 'title-sync-client.js');
+const CORE_MOVE_TO_PROJECT_CLIENT_FILE = path.join(__dirname, 'move-to-project-client.js');
 const PKG_FILE = path.join(REPO_ROOT, 'package.json');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -974,6 +976,7 @@ function rebuildBundleIfNeeded() {
     statSig(CORE_RUNTIME_FILE),
     statSig(CORE_AUTO_APPROVAL_CLIENT_FILE),
     statSig(CORE_TITLE_SYNC_CLIENT_FILE),
+    statSig(CORE_MOVE_TO_PROJECT_CLIENT_FILE),
     statSig(userConfigFile),
     statSig(UI_PREFS_FILE),
     statSig(userCssFile),
@@ -1041,6 +1044,7 @@ function rebuildBundleIfNeeded() {
     customJs,
     autoApprovalJs: readTextOrEmpty(CORE_AUTO_APPROVAL_CLIENT_FILE),
     titleSyncJs: readTextOrEmpty(CORE_TITLE_SYNC_CLIENT_FILE),
+    moveToProjectJs: readTextOrEmpty(CORE_MOVE_TO_PROJECT_CLIENT_FILE),
     dict: mergedDict
   };
 
@@ -3249,6 +3253,16 @@ async function handleProjectRpcRequest(rawPayload, callerEntry = null) {
       const result = action === 'autoApprovalPoll' ? coordinator.observe(callerEntry.id, payload, currentApprovalPolicy())
         : action === 'autoApprovalCommit' ? coordinator.commit(callerEntry.id, payload, currentApprovalPolicy())
         : coordinator.result(callerEntry.id, payload);
+      return { reqId, result };
+    }
+    if (action === 'moveConversationToProject') {
+      if (!callerEntry?.hostConfirmed || callerEntry.type !== 'page') return { reqId, result: { ok: false, error: 'unauthorized_context' } };
+      const convDir = callerEntry.endpoint?.conversationsDir || path.join(HOME, '.gemini', 'antigravity', 'conversations');
+      const antigravityDir = path.dirname(convDir);
+      const result = moveConversationToProject(
+        { conversationId: payload?.conversationId, projectId: payload?.projectId },
+        { antigravityDir, projectsDir: NATIVE_PROJECTS_DIR }
+      );
       return { reqId, result };
     }
     if (action === 'listUserFonts') {

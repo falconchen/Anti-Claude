@@ -749,7 +749,7 @@ const JSON_INVALID = Symbol('json_invalid');
 
 export function validateSourceRoot(root = __dirname) {
   const problems = [];
-  for (const rel of ['install.mjs', 'core/daemon.mjs', 'core/runtime.js', 'core/auto-approval.mjs', 'core/auto-approval-client.js', 'core/title-sync.mjs', 'core/title-sync-client.js', 'user/custom.js', 'cli/statusline.mjs']) {
+  for (const rel of ['install.mjs', 'core/daemon.mjs', 'core/runtime.js', 'core/auto-approval.mjs', 'core/auto-approval-client.js', 'core/title-sync.mjs', 'core/title-sync-client.js', 'core/move-to-project.mjs', 'core/move-to-project-client.js', 'user/custom.js', 'cli/statusline.mjs']) {
     const abs = path.join(root, rel);
     if (!fs.existsSync(abs)) {
       problems.push(`${rel}: missing`);

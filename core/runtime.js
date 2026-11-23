@@ -946,6 +946,14 @@
     }
   }
 
+  if (!IS_SWARM_PLUGIN_FRAME && MODULES.customJs && typeof boot.moveToProjectJs === 'string' && boot.moveToProjectJs.trim()) {
+    try {
+      new Function('ctx', boot.moveToProjectJs)(window.__AG_PATCH_CTX__);
+    } catch (err) {
+      console.error('[Anti-Claude] Move-to-project module failed to initialize:', err);
+    }
+  }
+
   if (MODULES.customJs && boot.customJs && typeof boot.customJs === 'string' && boot.customJs.trim()) {
     try {
       const fn = new Function('ctx', 'boot', boot.customJs);
