@@ -21,7 +21,7 @@ const SRC = fs
   .readFileSync(path.join(REPO, 'user', 'custom.js'), 'utf8')
   .replace(
     /\}\)\(\);\s*$/,
-    'window.__t = { scheduleSync, syncStepStream, dispose, parseAndSlimMetricsPayload, cacheTierForRate, detectCompactStatus, triggerConversationCompact, renderSettingsPanelContent, loadUserFontOptions, beginRecentReflow }; })();'
+    'window.__t = { scheduleSync, syncStepStream, dispose, parseAndSlimMetricsPayload, cacheTierForRate, detectCompactStatus, triggerConversationCompact, renderSettingsPanelContent, loadUserFontOptions, measureRecentSpacer }; })();'
   );
 
 function mount(html, { modules = {}, dict = null, config = {}, localPrefs = null } = {}) {
@@ -1962,7 +1962,7 @@ test('unified sidebar Recents: mixes project & standalone chats without 8-item c
   assert.match(rows[0].getAttribute('title') || '', /Project: 前端工程重构/, 'shows owning project name in tooltip');
 
   /* Inline hover Pin button */
-  rows[0].querySelector('[data-ag-recent-pin="c-1"]').click();
+  sec.querySelector('[data-ag-recent-pin="c-1"]').click();
   await h.microtasks();
   assert.deepEqual(
     JSON.parse(JSON.stringify(mutations[0])),
@@ -1971,7 +1971,7 @@ test('unified sidebar Recents: mixes project & standalone chats without 8-item c
   );
 
   /* More menu: jump straight to owning project detail */
-  rows[0].querySelector('[data-ag-recent-menu="c-1"]').click();
+  sec.querySelector('[data-ag-recent-menu="c-1"]').click();
   const menu = h.doc.getElementById('ag-recent-row-menu');
   assert.ok(menu, 'more menu opened');
   const projItem = menu.querySelector('[data-ag-rm-act="open-project"]');
@@ -1984,7 +1984,7 @@ test('unified sidebar Recents: mixes project & standalone chats without 8-item c
   assert.match(view.querySelector('.ag-pd-crumb-cur').textContent, /前端工程重构/);
 
   /* Inline rename via menu */
-  rows[0].querySelector('[data-ag-recent-menu="c-1"]').click();
+  sec.querySelector('[data-ag-recent-menu="c-1"]').click();
   h.doc.querySelector('#ag-recent-row-menu [data-ag-rm-act="rename"]').click();
   await settle(h);
   const renameInput = sec.querySelector('[data-ag-recent-rename-input="c-1"]');
@@ -2191,10 +2191,16 @@ test('20 recent shortcuts use the measured spacer between Pinned and Projects an
   const store = { getState: () => ({ trajectorySummaries: { summaries } }), subscribe: () => () => {} };
   list.__reactFiber$sb = { memoizedProps: { sidebarStore: store, sidebarRouter: { navigate() {} }, sidebarGroups: [] }, return: null };
   const sync = async () => { h.window.__t.scheduleSync(); await settle(h); };
+  const nativeRect = h.window.HTMLElement.prototype.getBoundingClientRect;
+  h.window.HTMLElement.prototype.getBoundingClientRect = function () {
+    if (this.id === 'ag-claude-recent-section') return { height: this.querySelectorAll('a.ag-recent-row').length ? 700 : 40 };
+    return nativeRect.call(this);
+  };
   await sync();
   const spacer = list.querySelector('[data-index="1"]');
   let section = h.doc.getElementById('ag-claude-recent-section');
   assert.equal(section.parentElement, spacer);
+  assert.equal(spacer.hasAttribute('data-ag-recent-reflow'), false, 'initial mounting does not hide native rows');
   assert.ok(section.querySelector('.ag-recent-hdr > svg.ag-recent-chevron[aria-hidden="true"]'));
   assert.equal(section.querySelector('.ag-recent-hdr').getAttribute('aria-expanded'), 'true');
   assert.equal(spacer.previousElementSibling.getAttribute('data-sidebar-section-drop-id'), 'pinned');
@@ -2204,6 +2210,9 @@ test('20 recent shortcuts use the measured spacer between Pinned and Projects an
   assert.equal(section.querySelector('[data-ag-recent-more]'), null);
   section.querySelector('[data-ag-recent-toggle]').click();
   assert.equal(section.querySelectorAll('a.ag-recent-row').length, 0);
+  assert.equal(spacer.hasAttribute('data-ag-recent-reflow'), false, 'collapse never hides native navigation');
+  sb.dispatchEvent(new h.window.Event('scroll'));
+  assert.equal(spacer.hasAttribute('data-ag-recent-reflow'), false, 'scroll immediately restores native visibility');
   assert.equal(section.querySelector('.ag-recent-hdr').getAttribute('aria-expanded'), 'false');
   assert.ok(section.querySelector('.ag-recent-hdr > svg.ag-recent-chevron'));
   section.querySelector('[data-ag-recent-toggle]').click();
@@ -2215,9 +2224,11 @@ test('20 recent shortcuts use the measured spacer between Pinned and Projects an
   const freshSpacer = h.doc.createElement('div');
   freshSpacer.setAttribute('data-index', '1');
   list.insertBefore(freshSpacer, list.querySelector('[data-index="2"]'));
-  await sync();
+  await h.microtasks();
   section = h.doc.getElementById('ag-claude-recent-section');
+  assert.ok(section, 'restores remounted spacer content before waiting for an animation frame');
   assert.equal(section.parentElement, freshSpacer);
+  assert.equal(freshSpacer.hasAttribute('data-ag-recent-reflow'), false, 'scroll remount does not start a visibility shield');
   assert.equal(section.querySelectorAll('a.ag-recent-row').length, 20);
   h.cleanups.forEach(fn => fn());
   assert.equal(h.doc.getElementById('ag-claude-recent-section'), null);
@@ -2368,28 +2379,48 @@ test('user font picker loads families, escapes names, saves selection, refreshes
 });
 
 
-test('recent spacer waits for native virtual offsets without changing their geometry', { skip }, async () => {
-  const h = mount('<div><div id="spacer" data-index="1"></div><div id="native" data-index="2" style="position:absolute;transform:translateY(40px)"></div></div>');
+test('recent spacer uses native measurement synchronously without hiding rows or retaining option overrides', { skip }, () => {
+  const h = mount('<div data-testid="conversation-list-sidebar"><div><div id="spacer" data-index="1"></div><div id="native" data-index="2" style="position:absolute;transform:translateY(40px)"></div></div></div>');
   const host = h.doc.getElementById('spacer');
   const row = h.doc.getElementById('native');
-  let top = 40;
-  host.getBoundingClientRect = () => ({ top: 20, bottom: 700, height: 680 });
-  row.getBoundingClientRect = () => ({ top, bottom: top + 24, height: 24 });
-  h.window.__t.beginRecentReflow(host);
-  h.flushFrames();
-  assert.equal(host.getAttribute('data-ag-recent-reflow'), 'true', 'old offsets remain shielded');
-  assert.equal(row.style.transform, 'translateY(40px)', 'never adjusts native positioning');
-  top = 700;
-  h.flushFrames();
-  assert.equal(host.hasAttribute('data-ag-recent-reflow'), false, 'reveals native rows after measurement catches up');
-  top = 40;
-  h.window.__t.beginRecentReflow(host);
-  host.remove();
-  h.flushFrames();
-  assert.equal(host.hasAttribute('data-ag-recent-reflow'), false, 'virtual unmount clears the shield');
-  h.doc.body.appendChild(host);
-  h.window.__t.beginRecentReflow(host);
-  h.window.__t.dispose();
-  assert.equal(host.hasAttribute('data-ag-recent-reflow'), false, 'teardown restores native visibility');
+  const sidebar = h.doc.querySelector('[data-testid="conversation-list-sidebar"]');
+  Object.defineProperty(host, 'offsetHeight', { value: 680 });
+  let measured = null;
+  let notification = null;
+  const originalMeasure = () => 16; // Native cached measurement before resize.
+  const originalNotify = (instance, sync) => { notification = sync; };
+  const v = {
+    scrollElement: sidebar, getVirtualItems: () => [],
+    options: { measureElement: originalMeasure, onChange: originalNotify },
+    measureElement(element) {
+      measured = this.options.measureElement(element, undefined, this);
+      this.options.onChange(this, false);
+    }
+  };
+  host.__reactFiber$measurement = { memoizedState: { memoizedState: v, next: null }, return: null };
+  assert.equal(h.window.__t.measureRecentSpacer(host), true);
+  assert.equal(measured, 680, 'uses current DOM size instead of stale native cache');
+  assert.equal(notification, true, 'native adapter commits positions synchronously');
+  assert.equal(v.options.measureElement, originalMeasure);
+  assert.equal(v.options.onChange, originalNotify);
+  assert.equal(row.style.transform, 'translateY(40px)', 'does not rewrite native positioning');
+  assert.equal(host.hasAttribute('data-ag-recent-reflow'), false);
+  let nativeSize = 16;
+  v.getVirtualItems = () => [{ index: 1, size: nativeSize }];
+  v.measureElement = () => {}; // Native measurement skipped while scrolling.
+  v.resizeItem = (index, height) => {
+    assert.equal(index, 1);
+    nativeSize = height;
+    v.options.onChange(v, false);
+  };
+  assert.equal(h.window.__t.measureRecentSpacer(host), true);
+  assert.equal(nativeSize, 680, 'scroll-time resize cannot retain the old expanded height');
+  assert.equal(notification, true);
+  v.measureElement = () => { throw new Error('upstream changed'); };
+  assert.equal(h.window.__t.measureRecentSpacer(host), false);
+  assert.equal(v.options.measureElement, originalMeasure, 'restores options even on failure');
+  assert.equal(v.options.onChange, originalNotify);
+  delete host.__reactFiber$measurement;
+  assert.equal(h.window.__t.measureRecentSpacer(host), false, 'missing native API leaves observer in control');
   h.close();
 });

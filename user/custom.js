@@ -6829,51 +6829,62 @@
     renderRecentRowMenu();
   }
 
-  let recentReflowHost = null;
-  let recentReflowRaf = 0;
-  let recentReflowTimer = 0;
-  function clearRecentReflow() {
-    if (recentReflowRaf) {
-      cancelAnimationFrame(recentReflowRaf);
-      pendingRafs.delete(recentReflowRaf);
-      recentReflowRaf = 0;
-    }
-    cancelLater(recentReflowTimer);
-    recentReflowTimer = 0;
-    recentReflowHost?.removeAttribute('data-ag-recent-reflow');
-    recentReflowHost = null;
-  }
-  function beginRecentReflow(host) {
-    clearRecentReflow();
-    if (!host?.isConnected || !host.hasAttribute('data-index')) return;
-    recentReflowHost = host;
-    host.setAttribute('data-ag-recent-reflow', 'true');
-    // ResizeObserver updates native absolute-row offsets asynchronously. Keep
-    // those rows measurable but unpainted until their new positions agree.
-    let stableFrames = 0;
-    const check = () => {
-      recentReflowRaf = 0;
-      if (!host.isConnected) { clearRecentReflow(); return; }
-      let bottom = host.getBoundingClientRect().bottom;
-      let aligned = true;
-      for (let row = host.nextElementSibling; row; row = row.nextElementSibling) {
-        if (!row.hasAttribute('data-index') || row.style.position !== 'absolute') continue;
-        const rect = row.getBoundingClientRect();
-        if (!rect.height) continue;
-        if (Math.abs(rect.top - bottom) > 1) { aligned = false; break; }
-        bottom = rect.bottom;
+  function measureRecentSpacer(host) {
+    const sidebar = host?.closest('[data-testid="conversation-list-sidebar"]');
+    if (!sidebar || !host.isConnected) return false;
+    const seen = new Set();
+    for (let node = host; node && node !== sidebar.parentElement; node = node.parentElement) {
+      const key = Object.keys(node).find(k => k.startsWith('__reactFiber$'));
+      let fiber = key && node[key];
+      for (let depth = 0; fiber && depth < 24; depth++, fiber = fiber.return) {
+        if (seen.has(fiber)) break;
+        seen.add(fiber);
+        let hook = fiber.memoizedState;
+        for (let index = 0; hook && index < 64; index++, hook = hook.next) {
+          for (const candidate of [hook.memoizedState, hook.memoizedState?.current]) {
+            if (!candidate || candidate.scrollElement !== sidebar ||
+                typeof candidate.measureElement !== 'function' ||
+                typeof candidate.getVirtualItems !== 'function' ||
+                typeof candidate.options?.measureElement !== 'function' ||
+                typeof candidate.options?.onChange !== 'function') continue;
+            const options = candidate.options;
+            const measure = options.measureElement;
+            const notify = options.onChange;
+            try {
+              const height = host.offsetHeight;
+              // The native measure option otherwise reuses its old cached size
+              // until ResizeObserver delivers an entry. Supply the current size
+              // through the same measurement API, and commit its row positions
+              // synchronously. Never write native transforms or hide navigation.
+              options.measureElement = (element, entry, instance) =>
+                element === host ? height : measure(element, entry, instance);
+              options.onChange = instance => notify(instance, true);
+              candidate.measureElement(host);
+              // Native measureElement intentionally skips ordinary scroll-time
+              // measurements. An explicit content resize must still replace the
+              // stale size; supply the same DOM measurement to its resize API.
+              const index = Number(host.getAttribute(options.indexAttribute || 'data-index'));
+              const item = candidate.getVirtualItems().find(item => item.index === index);
+              if (Number.isInteger(index) && index >= 0 &&
+                  (!item || Math.abs(item.size - height) > 0.5) &&
+                  typeof candidate.resizeItem === 'function') {
+                candidate.resizeItem(index, height);
+              }
+              return true;
+            } catch {
+              return false; // Leave the native observer in control if APIs drift.
+            } finally {
+              options.measureElement = measure;
+              options.onChange = notify;
+            }
+          }
+        }
       }
-      stableFrames = aligned ? stableFrames + 1 : 0;
-      if (stableFrames >= 2) { clearRecentReflow(); return; }
-      recentReflowRaf = frame(check);
-    };
-    // Never leave native navigation hidden if the upstream virtualizer changes.
-    recentReflowTimer = later(clearRecentReflow, 500);
-    recentReflowRaf = frame(check);
+    }
+    return false;
   }
 
   function removeRecentSection() {
-    clearRecentReflow();
     closeRecentRowMenu();
     recentRenamingId = '';
     const el = document.getElementById('ag-claude-recent-section');
@@ -7180,7 +7191,7 @@
     const previousHeight = sec.getBoundingClientRect().height;
     sec.innerHTML = `${headerHtml}${rowsHtml}`;
     if (!isUnified && shortcutHost && Math.abs(sec.getBoundingClientRect().height - previousHeight) > 0.5) {
-      beginRecentReflow(shortcutHost);
+      measureRecentSpacer(shortcutHost);
     }
   }
 
@@ -14923,6 +14934,7 @@
     if (disposed) return;
     let needSync = false;
     let sawChildList = false;
+    let sawSidebarVirtualRows = false;
     for (const m of mutations) {
       if (m.type === 'attributes') {
         const t = m.target;
@@ -14941,10 +14953,26 @@
           if (!isOwnNode(t) && t.closest && t.closest(CLASS_WATCH_SEL)) needSync = true;
         }
       } else if (m.type === 'childList') {
+        // Native virtual rows can be replaced on every scroll frame. Restore
+        // the injected spacer content in this microtask, before it is painted
+        // or ResizeObserver measures an empty replacement row.
+        if (m.target?.matches?.('[data-testid="conversation-list-sidebar"]') ||
+            m.target?.parentElement?.matches?.('[data-testid="conversation-list-sidebar"]')) {
+          sawSidebarVirtualRows = true;
+        }
         if (!isOwnChildListMutation(m)) {
           needSync = true;
           sawChildList = true;
         }
+      }
+    }
+    if (sawSidebarVirtualRows && FEAT.recentSection && !FEAT.hideSidebarProjects) {
+      const bindings = findSidebarBindings();
+      const host = bindings && getRecentShortcutHost(bindings.sidebar);
+      const section = document.getElementById('ag-claude-recent-section');
+      if (host && (!section || section.parentElement !== host)) {
+        syncRecentSection(bindings, bindings.store.getState(), getActiveCascadeId(),
+          typeof document.hasFocus === 'function' ? document.hasFocus() : true);
       }
     }
     /* Synchronously translate & reconcile Settings in the microtask BEFORE Frame 0 paints so nothing ever flashes */
