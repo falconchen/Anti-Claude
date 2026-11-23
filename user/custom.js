@@ -6829,7 +6829,51 @@
     renderRecentRowMenu();
   }
 
+  let recentReflowHost = null;
+  let recentReflowRaf = 0;
+  let recentReflowTimer = 0;
+  function clearRecentReflow() {
+    if (recentReflowRaf) {
+      cancelAnimationFrame(recentReflowRaf);
+      pendingRafs.delete(recentReflowRaf);
+      recentReflowRaf = 0;
+    }
+    cancelLater(recentReflowTimer);
+    recentReflowTimer = 0;
+    recentReflowHost?.removeAttribute('data-ag-recent-reflow');
+    recentReflowHost = null;
+  }
+  function beginRecentReflow(host) {
+    clearRecentReflow();
+    if (!host?.isConnected || !host.hasAttribute('data-index')) return;
+    recentReflowHost = host;
+    host.setAttribute('data-ag-recent-reflow', 'true');
+    // ResizeObserver updates native absolute-row offsets asynchronously. Keep
+    // those rows measurable but unpainted until their new positions agree.
+    let stableFrames = 0;
+    const check = () => {
+      recentReflowRaf = 0;
+      if (!host.isConnected) { clearRecentReflow(); return; }
+      let bottom = host.getBoundingClientRect().bottom;
+      let aligned = true;
+      for (let row = host.nextElementSibling; row; row = row.nextElementSibling) {
+        if (!row.hasAttribute('data-index') || row.style.position !== 'absolute') continue;
+        const rect = row.getBoundingClientRect();
+        if (!rect.height) continue;
+        if (Math.abs(rect.top - bottom) > 1) { aligned = false; break; }
+        bottom = rect.bottom;
+      }
+      stableFrames = aligned ? stableFrames + 1 : 0;
+      if (stableFrames >= 2) { clearRecentReflow(); return; }
+      recentReflowRaf = frame(check);
+    };
+    // Never leave native navigation hidden if the upstream virtualizer changes.
+    recentReflowTimer = later(clearRecentReflow, 500);
+    recentReflowRaf = frame(check);
+  }
+
   function removeRecentSection() {
+    clearRecentReflow();
     closeRecentRowMenu();
     recentRenamingId = '';
     const el = document.getElementById('ag-claude-recent-section');
@@ -7133,7 +7177,11 @@
             .join('')}</div>` + moreHtml
         : `<div class="ag-recent-empty">${escapeHtml(L('暂无最近对话', 'No recent conversations'))}</div>`;
 
+    const previousHeight = sec.getBoundingClientRect().height;
     sec.innerHTML = `${headerHtml}${rowsHtml}`;
+    if (!isUnified && shortcutHost && Math.abs(sec.getBoundingClientRect().height - previousHeight) > 0.5) {
+      beginRecentReflow(shortcutHost);
+    }
   }
 
   function scheduleSidebarSync() {

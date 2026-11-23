@@ -21,7 +21,7 @@ const SRC = fs
   .readFileSync(path.join(REPO, 'user', 'custom.js'), 'utf8')
   .replace(
     /\}\)\(\);\s*$/,
-    'window.__t = { scheduleSync, syncStepStream, dispose, parseAndSlimMetricsPayload, cacheTierForRate, detectCompactStatus, triggerConversationCompact, renderSettingsPanelContent, loadUserFontOptions }; })();'
+    'window.__t = { scheduleSync, syncStepStream, dispose, parseAndSlimMetricsPayload, cacheTierForRate, detectCompactStatus, triggerConversationCompact, renderSettingsPanelContent, loadUserFontOptions, beginRecentReflow }; })();'
   );
 
 function mount(html, { modules = {}, dict = null, config = {}, localPrefs = null } = {}) {
@@ -2365,4 +2365,31 @@ test('user font picker loads families, escapes names, saves selection, refreshes
   const restored = mount('', { config: { typography: { family: 'user', userFamily: name } } });
   assert.ok(restored.doc.getElementById('ag-typography-style').textContent.includes(JSON.stringify(name)));
   restored.close();
+});
+
+
+test('recent spacer waits for native virtual offsets without changing their geometry', { skip }, async () => {
+  const h = mount('<div><div id="spacer" data-index="1"></div><div id="native" data-index="2" style="position:absolute;transform:translateY(40px)"></div></div>');
+  const host = h.doc.getElementById('spacer');
+  const row = h.doc.getElementById('native');
+  let top = 40;
+  host.getBoundingClientRect = () => ({ top: 20, bottom: 700, height: 680 });
+  row.getBoundingClientRect = () => ({ top, bottom: top + 24, height: 24 });
+  h.window.__t.beginRecentReflow(host);
+  h.flushFrames();
+  assert.equal(host.getAttribute('data-ag-recent-reflow'), 'true', 'old offsets remain shielded');
+  assert.equal(row.style.transform, 'translateY(40px)', 'never adjusts native positioning');
+  top = 700;
+  h.flushFrames();
+  assert.equal(host.hasAttribute('data-ag-recent-reflow'), false, 'reveals native rows after measurement catches up');
+  top = 40;
+  h.window.__t.beginRecentReflow(host);
+  host.remove();
+  h.flushFrames();
+  assert.equal(host.hasAttribute('data-ag-recent-reflow'), false, 'virtual unmount clears the shield');
+  h.doc.body.appendChild(host);
+  h.window.__t.beginRecentReflow(host);
+  h.window.__t.dispose();
+  assert.equal(host.hasAttribute('data-ag-recent-reflow'), false, 'teardown restores native visibility');
+  h.close();
 });

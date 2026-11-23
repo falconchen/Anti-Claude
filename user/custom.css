@@ -7529,3 +7529,10 @@ html body .bg-sidebar button[data-testid="project-header"],
 html body .bg-sidebar button[data-testid="project-header"] span.truncate {
   font-weight: 450 !important;
 }
+
+/* Preserve native virtual-row measurements while a resized Recents spacer is
+   waiting for ResizeObserver / React to commit the corresponding row offsets. */
+[data-testid="conversation-list-sidebar"] > div > [data-ag-recent-reflow="true"] ~ [data-index] {
+  visibility: hidden !important;
+  pointer-events: none !important;
+}
