@@ -4,4 +4,6 @@ node_modules/
 *.tmp
 .tmp/
 .env
+LOCAL-INSTALL.md
+AGY-MODEL-INVESTIGATION.md
 
