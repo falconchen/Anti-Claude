@@ -35,6 +35,27 @@
       return {};
     }
   }
+  const FONT_OPTIONS = {
+    family: [
+      ['system', '系统字体（当前默认）', 'System (current default)'],
+      ['anthropic-sans', 'Claude · Anthropic Sans', 'Claude · Anthropic Sans'],
+      ['anthropic-serif', 'Claude · Anthropic Serif', 'Claude · Anthropic Serif']
+    ],
+    size: ['14', '15', '16', '17', '18'].map(v => [v, `${v}px`, `${v}px`]),
+    weight: [['default', '跟随应用（当前约 350）', 'Follow app (currently ~350)'],
+      ['400', '400 · 常规', '400 · Regular'], ['450', '450 · 适中', '450 · Balanced'],
+      ['500', '500 · 中等', '500 · Medium']],
+    smoothing: [['antialiased', '灰度抗锯齿（当前默认）', 'Grayscale (current default)'],
+      ['auto', '系统自动', 'System automatic']]
+  };
+  function normalizeTypography(raw) {
+    const out = {};
+    for (const [key, options] of Object.entries(FONT_OPTIONS)) {
+      const value = String(raw && raw[key] != null ? raw[key] : '');
+      if (options.some(([v]) => v === value)) out[key] = value;
+    }
+    return out;
+  }
   const rawLocalModOverrides = loadLocalModuleOverrides();
   const localOverrideTs = Number(rawLocalModOverrides._ts) > 0 ? Number(rawLocalModOverrides._ts) : 0;
   /* Trust localStorage overrides when daemon has never saved ui-prefs yet (migrates pre-existing in-session toggles)
@@ -58,6 +79,10 @@
     normalizeCjkScale(localModOverrides.cjkFontScale) ||
     normalizeCjkScale(CFG_ROOT.cjkFontScale) ||
     '95';
+  let currentTypography = Object.assign(
+    { family: 'system', size: '14', weight: 'default', smoothing: 'antialiased' },
+    normalizeTypography(CFG_ROOT.typography), normalizeTypography(localModOverrides.typography)
+  );
   function effectiveModBool(key, defaultVal = true) {
     if (Object.prototype.hasOwnProperty.call(localModOverrides, key)) {
       return Boolean(localModOverrides[key]);
@@ -102,6 +127,33 @@
     docRoot.setAttribute('data-ag-ux-lang', FEAT.i18n ? 'zh' : 'en');
     docRoot.setAttribute('data-ag-cjk-scale', currentCjkScale);
   }
+
+  function applyTypography() {
+    let style = document.getElementById('ag-typography-style');
+    if (!style) {
+      style = document.createElement('style');
+      style.id = 'ag-typography-style';
+      (document.head || docRoot).appendChild(style);
+    }
+    const cjk = currentCjkScale === '100' ? "'PingFang SC'" :
+      currentCjkScale === '94.5' ? "'AG PingFang 945'" : "'AG PingFang 950'";
+    const family = currentTypography.family === 'anthropic-sans' ?
+      `${cjk}, 'Anthropic Sans', system-ui, sans-serif` :
+      currentTypography.family === 'anthropic-serif' ?
+      `${cjk}, 'Anthropic Serif', Georgia, serif` : '';
+    const prose = ':is([data-testid="planner-response-text"], [data-markdown-root], .prose, .markdown) :is(p, li, blockquote)';
+    const status = ':is([data-testid="worked-for-collapsible"], [data-testid="thinking-collapsible-trigger"], [data-testid="tool-group-collapsible"], [data-testid="ephemeral-tool-status"], [data-step-rows="true"] button)';
+    style.textContent = `
+      ${family ? `html:root { --ag-sans-stack: ${family} !important; }` : ''}
+      html body ${prose} { font-size: ${currentTypography.size}px !important; }
+      html body ${status} { font-size: ${Number(currentTypography.size) - 1}px !important; }
+      ${currentTypography.weight !== 'default' ? `html body ${prose}, html body ${status} { font-weight: ${currentTypography.weight} !important; }` : ''}
+      html body, html body * { -webkit-font-smoothing: ${currentTypography.smoothing} !important; }
+      #ag-font-preview { font-family: var(--font-sans) !important; font-size: ${currentTypography.size}px !important;
+        font-weight: ${currentTypography.weight === 'default' ? 'inherit' : currentTypography.weight} !important; line-height: 1.65; }
+    `;
+  }
+  applyTypography();
 
   const userToggled = new WeakSet();
   const autoExpandCount = new WeakMap();
@@ -5708,6 +5760,27 @@
   let settingsStatsUnlinkedOpen = false;
   let settingsStatsBtnWrap = null;
 
+  function renderTypographyControls() {
+    const labels = {
+      family: L('字体方案', 'Font family'), size: L('正文字号', 'Body font size'),
+      weight: L('正文与状态行字重', 'Body & status weight'), smoothing: L('字体抗锯齿', 'Font smoothing')
+    };
+    return Object.entries(FONT_OPTIONS).map(([key, options]) => `
+      <div class="ag-cux-settings-row ag-font-row">
+        <label class="ag-cux-settings-title" for="ag-font-${key}">${escapeHtml(labels[key])}</label>
+        <select id="ag-font-${key}" class="ag-font-select" data-ag-font-option="${key}">
+          ${options.map(([value, zh, en]) => `<option value="${value}"${currentTypography[key] === value ? ' selected' : ''}>${escapeHtml(L(zh, en))}</option>`).join('')}
+        </select>
+      </div>`).join('') + `
+      <div class="ag-cux-settings-row ag-font-preview-row">
+        <div class="ag-cux-settings-desc">${escapeHtml(L(
+          '字体方案用于界面与正文；字号和字重用于 AI 正文及思考／工具状态行，状态行比正文小 1px。Claude 字体需本机已安装，中文回退苹方；代码和输入框保留原设置。系统自动抗锯齿的效果取决于系统。',
+          'Font family applies to UI and prose. Size and weight apply to AI prose and thinking/tool status; status is 1px smaller. Claude fonts require a local installation; CJK falls back to PingFang. Code and input fonts stay unchanged. Automatic smoothing depends on the OS.'
+        ))}</div>
+        <div id="ag-font-preview">${escapeHtml(L('字体预览：正在查询 WHOIS 信息，完成后立即汇总。0123456789', 'Font preview: Checking WHOIS details. 0123456789'))}</div>
+      </div>`;
+  }
+
   function renderSettingsPanelContent(panel) {
     if (!panel) return;
     panel.setAttribute('aria-label', L('界面增强设置', 'UI Enhancements Settings'));
@@ -5740,6 +5813,7 @@
                 </div>`
                 )
                 .join('')}
+              ${grp.id === 'lang-typo' ? renderTypographyControls() : ''}
               ${
                 grp.id === 'lang-typo'
                   ? `
@@ -5771,6 +5845,18 @@
         ).join('')}
       </div>
     `;
+    panel.querySelectorAll('[data-ag-font-option]').forEach((select) => {
+      select.addEventListener('change', () => {
+        const key = select.getAttribute('data-ag-font-option');
+        const next = normalizeTypography({ [key]: select.value });
+        if (!next[key]) return;
+        currentTypography[key] = next[key];
+        localModOverrides.typography = { ...currentTypography };
+        applyTypography();
+        persistUiPrefsToDaemon();
+        flashSettingsSavedToast();
+      });
+    });
     panel.querySelectorAll('[data-ag-cux-switch]').forEach((sw) => {
       sw.addEventListener('click', () => {
         const modKey = sw.getAttribute('data-ag-cux-switch');
@@ -5873,6 +5959,7 @@
       updatedAt,
       modules: modulesPayload,
       cjkFontScale: currentCjkScale,
+      typography: { ...currentTypography },
       uiState: {
         recentCollapsed: Boolean(recentCollapsed),
         unifiedRecentCollapsed: Boolean(unifiedRecentCollapsed)
@@ -5903,6 +5990,7 @@
     if (docRoot) {
       docRoot.setAttribute('data-ag-cjk-scale', next);
     }
+    applyTypography();
     syncSettingsSwitchesUi();
     flashSettingsSavedToast();
   }
@@ -11222,6 +11310,7 @@
         el.removeAttribute('data-ag-model-open');
         el.removeAttribute('data-ag-inline-stream');
       });
+    document.getElementById('ag-typography-style')?.remove();
     restoreInlinePillBoundaries();
     restoreLegacySidebarCjkNodes();
     clearSidebarHideNativeProjects();

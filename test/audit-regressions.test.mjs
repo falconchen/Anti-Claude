@@ -1752,7 +1752,7 @@ test('[Language Persistence Across Ephemeral Port Restarts] persists Chinese/Eng
   let dom4 = null;
   try {
     /* 1. Boot on port 51016 with legacy unsynced localStorage { i18n: true } -> auto-migrates to ui-prefs.json */
-    dom1 = openSimulatedWindow(51016, { i18n: true, cjkFontScale: '94.5' });
+    dom1 = openSimulatedWindow(51016, { i18n: true, cjkFontScale: '94.5', typography: { family: 'anthropic-sans', size: '16', weight: '400', smoothing: 'auto' } });
     await new Promise((r) => setTimeout(r, 30));
     assert.equal(dom1.window.document.documentElement.getAttribute('data-ag-ux-lang'), 'zh');
     assert.equal(dom1.window.document.documentElement.getAttribute('data-ag-cjk-scale'), '94.5');
@@ -1760,6 +1760,7 @@ test('[Language Persistence Across Ephemeral Port Restarts] persists Chinese/Eng
     const saved1 = JSON.parse(fs.readFileSync(uiPrefsPath, 'utf8'));
     assert.equal(saved1.modules.i18n, true);
     assert.equal(saved1.cjkFontScale, '94.5');
+    assert.deepEqual(saved1.typography, { family: 'anthropic-sans', size: '16', weight: '400', smoothing: 'auto' });
 
     /* 2. Simulate Antigravity restart on a brand-new ephemeral port 58432 (empty localStorage) -> stays Chinese! */
     dom2 = openSimulatedWindow(58432);
@@ -1769,6 +1770,11 @@ test('[Language Persistence Across Ephemeral Port Restarts] persists Chinese/Eng
       'new random port restart keeps Chinese mode without resetting to English'
     );
     assert.equal(dom2.window.document.documentElement.getAttribute('data-ag-cjk-scale'), '94.5');
+
+    assert.match(dom2.window.document.getElementById('ag-typography-style').textContent, /Anthropic Sans/);
+    assert.match(dom2.window.document.getElementById('ag-typography-style').textContent, /font-size: 16px/);
+    const sanitized = daemon.saveUiPrefs({ typography: { family: 'injected;', size: '200', weight: '500' } });
+    assert.deepEqual(sanitized.typography, { family: 'anthropic-sans', size: '16', weight: '500', smoothing: 'auto' });
 
     /* 3. User opens UI Enhancements on port 58432 and switches i18n OFF (back to English) */
     const navBtn = dom2.window.document.querySelector('button[data-testid="settings-nav-item-ClaudeUX"]');

@@ -301,3 +301,19 @@ body:not([data-has-browser-hole="true"]):not([data-has-drawer-browser-hole="true
 :is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-live-metrics-tooltip .ag-tt-val {
   color: var(--foreground, #FAF9F5) !important;
 }
+
+/* Claude Desktop variable fonts installed by the local font installer. */
+@font-face {
+  font-family: 'Anthropic Sans';
+  src: local('AnthropicSansVariable-TextLight');
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Anthropic Serif';
+  src: local('AnthropicSerifVariable-TextLight');
+  font-weight: 300 800;
+  font-style: normal;
+  font-display: swap;
+}

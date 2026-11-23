@@ -6307,3 +6307,19 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) [data-testid="settings-sid
 :is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-recent-row-menu .ag-rm-submenu { background-color: #292927 !important; }
 
 #ag-recent-row-menu[data-submenu-side="left"] .ag-rm-submenu { left: auto !important; right: 100% !important; }
+
+/* Native selects keep keyboard navigation and match both application themes. */
+.ag-font-row { flex-wrap: wrap !important; }
+.ag-font-select {
+  max-width: 100%;
+  min-height: 34px;
+  padding: 5px 10px;
+  border: 1px solid var(--border, #ccc);
+  border-radius: 6px;
+  background: var(--card, #fff);
+  color: var(--foreground, #141413);
+  font-family: var(--font-sans);
+  font-size: 13px;
+}
+.ag-font-select:focus-visible { outline: 2px solid var(--foreground); outline-offset: 2px; }
+.ag-font-preview-row { flex-direction: column !important; align-items: stretch !important; }

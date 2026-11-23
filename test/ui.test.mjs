@@ -24,7 +24,7 @@ const SRC = fs
     'window.__t = { scheduleSync, syncStepStream, dispose, parseAndSlimMetricsPayload, cacheTierForRate, detectCompactStatus, triggerConversationCompact }; })();'
   );
 
-function mount(html, { modules = {}, dict = null } = {}) {
+function mount(html, { modules = {}, dict = null, config = {}, localPrefs = null } = {}) {
   const dom = new JSDOM(`<!doctype html><body>${html}</body>`, {
     runScripts: 'outside-only',
     url: 'http://127.0.0.1/c/abcd-1234',
@@ -40,7 +40,8 @@ function mount(html, { modules = {}, dict = null } = {}) {
   };
   window.cancelAnimationFrame = (id) => queue.delete(id);
   const cleanups = [];
-  window.ctx = { modules, dict: dict || undefined, onCleanup: (fn) => cleanups.push(fn) };
+  if (localPrefs) window.localStorage.setItem('ag_claude_ux_modules_v1', JSON.stringify(localPrefs));
+  window.ctx = { config, modules, dict: dict || undefined, onCleanup: (fn) => cleanups.push(fn) };
   window.eval(SRC);
   const flushFrames = () => {
     for (let i = 0; i < 10 && queue.size; i++) {
@@ -857,6 +858,31 @@ test('native Settings -> UI Enhancements panel: defaults to English and live-tog
   assert.equal(scale100.getAttribute('aria-checked'), 'true');
   assert.equal(scale945.getAttribute('aria-checked'), 'false');
   assert.match(h.window.localStorage.getItem('ag_claude_ux_modules_v1') || '', /"cjkFontScale":"100"/);
+
+  const selectFont = (key, value) => {
+    const select = panel.querySelector(`[data-ag-font-option="${key}"]`);
+    assert.ok(select, `renders ${key} font control`);
+    select.value = value;
+    select.dispatchEvent(new h.window.Event('change', { bubbles: true }));
+  };
+  selectFont('family', 'anthropic-serif');
+  selectFont('size', '16');
+  selectFont('weight', '400');
+  selectFont('smoothing', 'auto');
+  const fontCss = h.doc.getElementById('ag-typography-style').textContent;
+  assert.match(fontCss, /Anthropic Serif/);
+  assert.match(fontCss, /font-size: 16px/);
+  assert.match(fontCss, /font-size: 15px/);
+  assert.match(fontCss, /font-weight: 400/);
+  assert.match(fontCss, /-webkit-font-smoothing: auto/);
+  assert.deepEqual(JSON.parse(h.window.localStorage.getItem('ag_claude_ux_modules_v1')).typography,
+    { family: 'anthropic-serif', size: '16', weight: '400', smoothing: 'auto' });
+  scale945.click();
+  assert.match(h.doc.getElementById('ag-typography-style').textContent, /AG PingFang 945/);
+  selectFont('family', 'system');
+  selectFont('weight', 'default');
+  assert.doesNotMatch(h.doc.getElementById('ag-typography-style').textContent, /--ag-sans-stack:/);
+  assert.doesNotMatch(h.doc.getElementById('ag-typography-style').textContent, /font-weight: 400/);
 
   const projectsSwitch = panel.querySelector('[data-ag-cux-switch="claudeUxProjects"]');
   assert.equal(projectsSwitch.getAttribute('aria-checked'), 'true');
@@ -2278,4 +2304,24 @@ test('compact recent shortcuts expose archive, pin toggle and full conversation 
   assert.equal(h.doc.getElementById('ag-claude-recent-section'), null);
   assert.ok(mutations.every(m => m.id === 'c1' && m.merge === true));
   h.cleanups.forEach(fn => fn()); h.close();
+});
+
+
+test('typography restores validated preferences and cleans styles on teardown', { skip }, () => {
+  const h = mount('<p>Example</p>', {
+    config: { typography: { family: 'anthropic-sans', size: '16', weight: '400' }, uiPrefsUpdatedAt: 100 },
+    localPrefs: { _ts: 1, typography: { family: 'anthropic-serif', size: '18' } }
+  });
+  const style = h.doc.getElementById('ag-typography-style');
+  assert.match(style.textContent, /Anthropic Sans/);
+  assert.match(style.textContent, /font-size: 16px/);
+  assert.doesNotMatch(style.textContent, /Anthropic Serif/);
+  h.window.__t.dispose();
+  assert.equal(h.doc.getElementById('ag-typography-style'), null);
+  h.close();
+  const bad = mount('', { config: { typography: { family: 'evil; color:red', size: '999', weight: '700', smoothing: 'bad' } } });
+  const css = bad.doc.getElementById('ag-typography-style').textContent;
+  assert.doesNotMatch(css, /evil|999|700|bad/);
+  assert.match(css, /font-size: 14px/);
+  bad.close();
 });

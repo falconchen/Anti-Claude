@@ -629,6 +629,19 @@ let activeConfig = {
   endpoints: []
 };
 
+function sanitizeTypography(raw) {
+  const allowed = {
+    family: ['system', 'anthropic-sans', 'anthropic-serif'],
+    size: ['14', '15', '16', '17', '18'],
+    weight: ['default', '400', '450', '500'], smoothing: ['antialiased', 'auto']
+  };
+  const out = {};
+  for (const [key, values] of Object.entries(allowed)) {
+    if (raw && values.includes(String(raw[key]))) out[key] = String(raw[key]);
+  }
+  return out;
+}
+
 function sanitizeUiPrefs(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const modules = {};
@@ -651,7 +664,7 @@ function sanitizeUiPrefs(raw) {
     }
   }
   const updatedAt = Number(raw.updatedAt) > 0 ? Math.floor(Number(raw.updatedAt)) : 0;
-  return { modules, cjkFontScale, uiState, updatedAt,
+  return { modules, cjkFontScale, typography: sanitizeTypography(raw.typography), uiState, updatedAt,
     ...(raw.autoApproval && typeof raw.autoApproval === 'object' ? { autoApproval: normalizeApprovalSettings(raw.autoApproval) } : {}) };
 }
 
@@ -692,6 +705,9 @@ function resolveEffectiveUserConfig(userConfigFile, rawCfg) {
   if (prefs.cjkFontScale && (!manualConfigNewer || !baseObj.cjkFontScale)) {
     out.cjkFontScale = prefs.cjkFontScale;
   }
+  out.typography = manualConfigNewer
+    ? Object.assign({}, prefs.typography, sanitizeTypography(baseObj.typography))
+    : Object.assign({}, sanitizeTypography(baseObj.typography), prefs.typography);
   return out;
 }
 
@@ -717,6 +733,7 @@ export function saveUiPrefs(payload) {
     ...(incoming.cjkFontScale || cur.cjkFontScale
       ? { cjkFontScale: incoming.cjkFontScale || cur.cjkFontScale }
       : {}),
+    typography: Object.assign({}, cur.typography, incoming.typography),
     uiState: Object.assign({}, cur.uiState, incoming.uiState)
   };
   fs.mkdirSync(STATE_DIR, { recursive: true });
@@ -727,6 +744,7 @@ export function saveUiPrefs(payload) {
     modules: next.modules,
     autoApproval: next.autoApproval,
     cjkFontScale: next.cjkFontScale || null,
+    typography: next.typography,
     uiState: next.uiState
   };
 }
