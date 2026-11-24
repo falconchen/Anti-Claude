@@ -27,6 +27,7 @@
     "claudeUxCustomizations": true,
     "autoApproval": false,
     "titleSync": true,
+    "branchChat": true,
     "claudeUxCodeFold": true,
     "claudeUxOverviewPanel": true
   },

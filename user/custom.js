@@ -116,7 +116,8 @@
     customizations: effectiveModBool('claudeUxCustomizations', true),
     codeFold: effectiveModBool('claudeUxCodeFold', true),
     overviewPanel: effectiveModBool('claudeUxOverviewPanel', true),
-    titleSync: effectiveModBool('titleSync', true)
+    titleSync: effectiveModBool('titleSync', true),
+    branchChat: effectiveModBool('branchChat', true)
   };
   const L = (zh, en) => (FEAT.i18n ? zh : en);
 
@@ -7285,9 +7286,9 @@
    *       text nodes & title/placeholder/aria-label attributes with zero page reload.
    * ========================================================================== */
   const UX_I18N_BASE_EXCLUDE =
-    'code, pre, kbd, samp, textarea, input, style, script, noscript, [contenteditable="true"], [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, [data-testid="skill-scope-item-pill"], bdi.context-scope-mention, .monaco-editor, .monaco-diff-editor, .xterm, [class*="onyx-key"], .prose, .markdown, [class*="chat-message"], [class*="group/file-title"], [data-testid="conversation-row-sidebar"] a[href^="/c/"], [data-testid="conversation-row-sidebar"] span.truncate, [data-testid="conversation-navigator-turn"], .msg-body, #raw, #swarm-title, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, #ag-project-action-menu, [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]';
+    'code, pre, kbd, samp, textarea, input, style, script, noscript, [contenteditable="true"], [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, [data-testid="skill-scope-item-pill"], bdi.context-scope-mention, .monaco-editor, .monaco-diff-editor, .xterm, [class*="onyx-key"], .prose, .markdown, [class*="chat-message"], [class*="group/file-title"], [data-testid="conversation-row-sidebar"] a[href^="/c/"], [data-testid="conversation-row-sidebar"] span.truncate, [data-testid="conversation-navigator-turn"], .msg-body, #raw, #swarm-title, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, #ag-branch-popover, #ag-branch-chat-toast, [data-ag-branch-more], #ag-project-action-menu, [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]';
   const UX_I18N_ATTR_EXCLUDE =
-    'code, pre, kbd, samp, style, script, noscript, [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, [data-testid="skill-scope-item-pill"], bdi.context-scope-mention, .monaco-editor, .monaco-diff-editor, .xterm, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, #ag-project-action-menu, [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]';
+    'code, pre, kbd, samp, style, script, noscript, [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, [data-testid="skill-scope-item-pill"], bdi.context-scope-mention, .monaco-editor, .monaco-diff-editor, .xterm, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, #ag-branch-popover, #ag-branch-chat-toast, [data-ag-branch-more], #ag-project-action-menu, [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]';
   let uxI18nObserver = null;
   let uxI18nFlushTimer = 0;
   let uxI18nDirtyRoots = new Set();
@@ -7805,7 +7806,7 @@
     if (!el || !el.closest) return;
     if (
       el.closest(
-        'input, textarea, [contenteditable="true"], .monaco-editor, .monaco-diff-editor, .xterm, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, #ag-project-action-menu, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop'
+        'input, textarea, [contenteditable="true"], .monaco-editor, .monaco-diff-editor, .xterm, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, #ag-branch-popover, #ag-branch-chat-toast, #ag-project-action-menu, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop'
       )
     ) {
       return;
@@ -7951,6 +7952,14 @@
           'In-Bubble Undo & Edit',
           '点击撤回时在原气泡直接展开编辑框，支持变更文件还原预览与原附件保留',
           'Expands an inline editor inside the user bubble with file-revert preview and attachment preservation'
+        ],
+        [
+          'branchChat',
+          'branchChat',
+          '从回复分支到新聊天',
+          'Branch Chat from Reply',
+          '在助手回复底部工具栏新增「...」→「分支到新聊天」菜单，在当前工作区与同一项目下基于该回复创建新分支对话（官方开放原生按钮时自动退让）',
+          'Adds a "..." -> "Branch in new chat" menu to assistant reply toolbars in the same workspace and project (auto-yields if native fork UI is enabled)'
         ],
         [
           'claudeUxFolderStatus',
@@ -8213,6 +8222,9 @@
       refreshProjectsLanguageUi();
       syncCustomizationsEnhancement();
       renderOverviewPanel(true);
+      try {
+        window.__agBranchChat?.refreshLanguage?.();
+      } catch {}
     } else if (featKey === 'projects') {
       if (!on) teardownProjectsWorkspace();
       else syncProjectsWorkspace();
@@ -8256,6 +8268,10 @@
     } else if (featKey === 'titleSync') {
       try {
         window.__agTitleSync?.setEnabled(Boolean(on));
+      } catch {}
+    } else if (featKey === 'branchChat') {
+      try {
+        window.__agBranchChat?.setEnabled(Boolean(on));
       } catch {}
     }
     syncSidebarEnhancements();
@@ -10549,7 +10565,7 @@
         !el ||
         !el.isConnected ||
         el.closest(
-          '#ag-claude-project-modal, #ag-claude-projects-view, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, #ag-claude-quota-popover, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, #ag-project-action-menu'
+          '#ag-claude-project-modal, #ag-claude-projects-view, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, #ag-claude-quota-popover, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, #ag-branch-popover, #ag-branch-chat-toast, #ag-project-action-menu'
         )
       ) {
         continue;
@@ -14947,7 +14963,7 @@
   }
 
   const OWN_SEL =
-    '.ag-claude-todo-card, .ag-claude-todo-live-dock, #ag-auto-approval-nav, #ag-auto-approval-panel, #ag-auto-approval-badge, .ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, .ag-claude-inline-editor, .ag-claude-folder-badges, #ag-claude-recent-section, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, #ag-project-action-menu, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-settings-stats-wrap, .ag-settings-subhdr-chev, #ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal, .ag-code-fold-toggle, .ag-code-fold-bar, #ag-claude-ov-sections';
+    '.ag-claude-todo-card, .ag-claude-todo-live-dock, #ag-auto-approval-nav, #ag-auto-approval-panel, #ag-auto-approval-badge, .ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, .ag-claude-inline-editor, .ag-claude-folder-badges, #ag-claude-recent-section, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, [data-ag-branch-more], #ag-branch-popover, #ag-branch-chat-toast, #ag-project-action-menu, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-settings-stats-wrap, .ag-settings-subhdr-chev, #ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal, .ag-code-fold-toggle, .ag-code-fold-bar, #ag-claude-ov-sections';
   const CLASS_WATCH_SEL =
     'ul.contains-task-list, [id="antigravity.agentSidePanelInputBox"], [data-testid="tool-group-collapsible"], [data-testid="worked-for-collapsible"], [data-testid="progress-updates-collapsible"], [data-testid="ephemeral-tool-status"]';
 
@@ -15038,6 +15054,9 @@
     const staleThemeToggle = document.getElementById('ag-claude-topbar-theme');
     if (staleThemeToggle) staleThemeToggle.remove();
     applyUiI18nState(FEAT.i18n);
+    try {
+      window.__agBranchChat?.setEnabled?.(Boolean(FEAT.branchChat));
+    } catch {}
     if (needsInitialPrefsSync) {
       persistUiPrefsToDaemon(localOverrideTs || Date.now());
     }

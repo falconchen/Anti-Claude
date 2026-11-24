@@ -60,6 +60,7 @@ const CORE_RUNTIME_FILE = path.join(__dirname, 'runtime.js');
 const CORE_AUTO_APPROVAL_CLIENT_FILE = path.join(__dirname, 'auto-approval-client.js');
 const CORE_TITLE_SYNC_CLIENT_FILE = path.join(__dirname, 'title-sync-client.js');
 const CORE_MOVE_TO_PROJECT_CLIENT_FILE = path.join(__dirname, 'move-to-project-client.js');
+const CORE_BRANCH_CHAT_CLIENT_FILE = path.join(__dirname, 'branch-chat-client.js');
 const PKG_FILE = path.join(REPO_ROOT, 'package.json');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -105,6 +106,7 @@ const ALLOWED_UI_MODULE_KEYS = new Set([
   'claudeUxCustomizations',
   'autoApproval',
   'titleSync',
+  'branchChat',
   'claudeUxCodeFold',
   'claudeUxOverviewPanel'
 ]);
@@ -977,6 +979,7 @@ function rebuildBundleIfNeeded() {
     statSig(CORE_AUTO_APPROVAL_CLIENT_FILE),
     statSig(CORE_TITLE_SYNC_CLIENT_FILE),
     statSig(CORE_MOVE_TO_PROJECT_CLIENT_FILE),
+    statSig(CORE_BRANCH_CHAT_CLIENT_FILE),
     statSig(userConfigFile),
     statSig(UI_PREFS_FILE),
     statSig(userCssFile),
@@ -1005,7 +1008,8 @@ function rebuildBundleIfNeeded() {
       zoomShortcuts: true,
       customCss: true,
       customJs: true,
-      titleSync: true
+      titleSync: true,
+      branchChat: true
     },
     rawCfg?.modules || {}
   );
@@ -1045,6 +1049,7 @@ function rebuildBundleIfNeeded() {
     autoApprovalJs: readTextOrEmpty(CORE_AUTO_APPROVAL_CLIENT_FILE),
     titleSyncJs: readTextOrEmpty(CORE_TITLE_SYNC_CLIENT_FILE),
     moveToProjectJs: readTextOrEmpty(CORE_MOVE_TO_PROJECT_CLIENT_FILE),
+    branchChatJs: readTextOrEmpty(CORE_BRANCH_CHAT_CLIENT_FILE),
     dict: mergedDict
   };
 
@@ -1231,6 +1236,7 @@ function parseGenMetadataRow(r) {
 }
 
 const lineageCacheByDir = new Map();
+const branchedCacheByDir = new Map();
 const childScalarCache = new Map();
 const metricsPayloadCache = new Map();
 
@@ -1326,6 +1332,65 @@ function getDescendantIds(cascadeId, conversationsDir) {
     }
   }
   return queue.sort();
+}
+
+export function listBranchedConversations(conversationsDir) {
+  if (!DatabaseSync || !conversationsDir) return [];
+  let dirState = branchedCacheByDir.get(conversationsDir);
+  if (!dirState) {
+    dirState = { dirMtimeMs: -1, files: new Map() };
+    branchedCacheByDir.set(conversationsDir, dirState);
+  }
+  const st = fs.statSync(conversationsDir, { throwIfNoEntry: false });
+  if (!st || !st.isDirectory()) return [];
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(conversationsDir);
+  } catch {
+    return [];
+  }
+
+  const seen = new Set();
+  for (const name of entries) {
+    const m = name.match(DB_FILE_RE);
+    if (!m) continue;
+    const uuid = m[1];
+    seen.add(uuid);
+    const dbPath = path.join(conversationsDir, name);
+    const info = getDbStatByPath(dbPath);
+    if (!info) continue;
+    const existing = dirState.files.get(uuid);
+    if (existing && existing.sig === info.sig) continue;
+    try {
+      const branched = withReadOnlyDb(dbPath, 20, (db) => {
+        const rows = db.prepare('SELECT data FROM parent_references LIMIT 8').all();
+        const selfLower = uuid.toLowerCase();
+        for (const r of rows) {
+          if (!r?.data) continue;
+          const fields = parseProto(r.data);
+          const refCid = readUtf8(fields.get(6)).trim();
+          if (refCid && UUID_RE.test(refCid) && refCid.toLowerCase() !== selfLower) {
+            return true;
+          }
+        }
+        return false;
+      });
+      dirState.files.set(uuid, { sig: info.sig, branched });
+    } catch {
+      dirState.files.set(uuid, { sig: info.sig, branched: existing ? existing.branched : false });
+    }
+  }
+  for (const id of Array.from(dirState.files.keys())) {
+    if (!seen.has(id)) dirState.files.delete(id);
+  }
+  dirState.dirMtimeMs = st.mtimeMs;
+
+  const out = [];
+  for (const [id, rec] of dirState.files.entries()) {
+    if (rec?.branched) out.push(id);
+  }
+  return out.sort();
 }
 
 function readChildMetrics(childId, conversationsDir) {
@@ -3264,6 +3329,12 @@ async function handleProjectRpcRequest(rawPayload, callerEntry = null) {
         { antigravityDir, projectsDir: NATIVE_PROJECTS_DIR }
       );
       return { reqId, result };
+    }
+    if (action === 'listBranchedConversations') {
+      if (!callerEntry?.hostConfirmed || callerEntry.type !== 'page') return { reqId, result: { ok: false, error: 'unauthorized_context' } };
+      const convDir = callerEntry.endpoint?.conversationsDir || path.join(HOME, '.gemini', 'antigravity', 'conversations');
+      const ids = listBranchedConversations(convDir);
+      return { reqId, result: { ok: true, ids } };
     }
     if (action === 'listUserFonts') {
       return { reqId, result: await listUserFonts({ refresh: payload.refresh === true }) };

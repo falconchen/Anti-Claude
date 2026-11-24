@@ -7652,3 +7652,188 @@ html[data-ag-theme-mode="dark"] #ag-move-project-toast:not([data-kind="error"]) 
   background: #faf9f5;
   color: #141413;
 }
+
+/* ==========================================================================
+ * 13. Branch Chat from Reply (`branch-chat-client.js`)
+ * ========================================================================== */
+[data-ag-branch-more].ag-branch-more-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--secondary-foreground, #73726c);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+
+[data-ag-branch-more].ag-branch-more-btn:hover,
+[data-ag-branch-more].ag-branch-more-btn[data-open="true"] {
+  background-color: rgba(31, 30, 29, 0.065);
+  color: var(--foreground, #141413);
+}
+
+html[data-ag-theme-mode="dark"] [data-ag-branch-more].ag-branch-more-btn:hover,
+html[data-ag-theme-mode="dark"] [data-ag-branch-more].ag-branch-more-btn[data-open="true"] {
+  background-color: rgba(255, 255, 255, 0.09);
+  color: var(--foreground, #faf9f5);
+}
+
+[data-ag-branch-more].ag-branch-more-btn[data-busy="true"] {
+  opacity: 0.72;
+  cursor: wait;
+}
+
+@keyframes ag-branch-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.ag-branch-spinner {
+  animation: ag-branch-spin 780ms linear infinite;
+}
+
+#ag-branch-popover {
+  position: fixed;
+  z-index: 2147483645;
+  padding: 5px;
+  border-radius: 999px;
+  border: 1px solid rgba(31, 30, 29, 0.09);
+  background: #ffffff;
+  color: #1f1e1d;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.05);
+  font-family: var(--font-sans, system-ui, -apple-system, sans-serif);
+}
+
+html[data-ag-theme-mode="dark"] #ag-branch-popover {
+  background: #2b2b29;
+  color: #faf9f5;
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+#ag-branch-popover .ag-branch-menu-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 450;
+  line-height: 1.25;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 110ms ease;
+}
+
+#ag-branch-popover .ag-branch-menu-item:hover {
+  background: rgba(31, 30, 29, 0.06);
+}
+
+html[data-ag-theme-mode="dark"] #ag-branch-popover .ag-branch-menu-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+#ag-branch-popover .ag-branch-menu-ico {
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+#ag-branch-chat-toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 2147483646;
+  padding: 8px 14px;
+  border-radius: 9px;
+  font-family: var(--font-sans, system-ui, -apple-system, sans-serif);
+  font-size: 13px;
+  font-weight: 500;
+  background: #141413;
+  color: #faf9f5;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+#ag-branch-chat-toast[data-visible="true"] {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+#ag-branch-chat-toast[data-kind="error"] {
+  background: #dc2626;
+  color: #ffffff;
+}
+
+html[data-ag-theme-mode="dark"] #ag-branch-chat-toast:not([data-kind="error"]) {
+  background: #faf9f5;
+  color: #141413;
+}
+
+/* Branched conversation icon: hangs in the left gutter on list rows so all titles stay vertically aligned */
+[data-ag-branch-gutter="1"] {
+  position: relative !important;
+}
+
+[data-ag-branch-gutter="1"]::before {
+  content: "";
+  position: absolute;
+  left: var(--ag-branch-ico-left, 10px);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 13px;
+  height: 13px;
+  pointer-events: none;
+  background-color: var(--secondary-foreground, #73726c);
+  opacity: 0.72;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h6.5'/%3E%3Cpath d='M10.5 12 19 5'/%3E%3Cpath d='M14.5 5H19v4.5'/%3E%3Cpath d='M10.5 12 19 19'/%3E%3Cpath d='M14.5 19H19v-4.5'/%3E%3C/svg%3E") no-repeat center / contain;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h6.5'/%3E%3Cpath d='M10.5 12 19 5'/%3E%3Cpath d='M14.5 5H19v4.5'/%3E%3Cpath d='M10.5 12 19 19'/%3E%3Cpath d='M14.5 19H19v-4.5'/%3E%3C/svg%3E") no-repeat center / contain;
+}
+
+[data-ag-branch-gutter="1"][data-ag-branch-gutter-compact="1"]::before {
+  width: 12px;
+  height: 12px;
+}
+
+html[data-ag-theme-mode="dark"] [data-ag-branch-gutter="1"]::before {
+  background-color: var(--secondary-foreground, #a8a7a1);
+}
+
+/* Inline prefix icon for titlebar breadcrumb and narrow fallback containers */
+[data-ag-branch-title="1"]::before {
+  content: "";
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  margin-right: 5px;
+  vertical-align: -2px;
+  flex-shrink: 0;
+  background-color: currentColor;
+  opacity: 0.68;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h6.5'/%3E%3Cpath d='M10.5 12 19 5'/%3E%3Cpath d='M14.5 5H19v4.5'/%3E%3Cpath d='M10.5 12 19 19'/%3E%3Cpath d='M14.5 19H19v-4.5'/%3E%3C/svg%3E") no-repeat center / contain;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.15' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h6.5'/%3E%3Cpath d='M10.5 12 19 5'/%3E%3Cpath d='M14.5 5H19v4.5'/%3E%3Cpath d='M10.5 12 19 19'/%3E%3Cpath d='M14.5 19H19v-4.5'/%3E%3C/svg%3E") no-repeat center / contain;
+}
+
+#ag-claude-projects-view .ag-pd-chat-title[data-ag-branch-title="1"]::before {
+  margin-right: 0;
+  vertical-align: 0;
+}
+
+[data-testid="breadcrumb-segment"] [data-ag-branch-title="1"]::before,
+[data-testid="breadcrumb-segment"][data-ag-branch-title="1"]::before {
+  width: 15px;
+  height: 15px;
+  margin-right: 6px;
+  vertical-align: -2.5px;
+}
