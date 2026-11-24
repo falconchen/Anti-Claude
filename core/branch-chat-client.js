@@ -458,6 +458,129 @@
     return 'none';
   }
 
+  function formatBranchError(rawMsg) {
+    const raw = String(rawMsg || '').trim();
+    const cleaned = raw
+      .replace(/^\[[a-z0-9_]+\]\s*/i, '')
+      .replace(/^(?:internal|failed_precondition|invalid_argument|unimplemented)\s*:\s*/i, '')
+      .replace(/^failed to create forked conversation\s*:\s*/i, '')
+      .trim();
+
+    if (/invoked subagents/i.test(cleaned)) {
+      return {
+        code: 'has_subagents',
+        durationMs: 5200,
+        message: L(
+          '该对话曾调用过子代理（Subagent），Antigravity 后端暂不支持分支此类对话',
+          'Antigravity does not support branching conversations that have invoked subagents'
+        )
+      };
+    }
+    if (/non-terminal status/i.test(cleaned)) {
+      return {
+        code: 'running_task',
+        durationMs: 5200,
+        message: L(
+          '对话中仍有运行中的后台任务，无法从此节点分支（请先停止任务或从更早的回复分支）',
+          'Cannot branch here while a background task is running (stop it or branch from an earlier reply)'
+        )
+      };
+    }
+    if (/subagent conversation/i.test(cleaned)) {
+      return {
+        code: 'subagent_conversation',
+        durationMs: 4200,
+        message: L(
+          '子代理对话不支持直接分支，请从主对话发起分支',
+          'Cannot branch a subagent conversation; branch from the parent chat instead'
+        )
+      };
+    }
+    if (/battle mode/i.test(cleaned)) {
+      return {
+        code: 'battle_mode',
+        durationMs: 4200,
+        message: L(
+          '对比模式（Battle Mode）对话不支持分支，请先结束对比后再试',
+          'Cannot branch a Battle Mode conversation; end the battle first'
+        )
+      };
+    }
+    if (/executable agent/i.test(cleaned)) {
+      return {
+        code: 'executable_agent',
+        durationMs: 4200,
+        message: L(
+          '该对话由可执行代理驱动，Antigravity 后端暂不支持分支',
+          'Antigravity does not support branching conversations driven by an executable agent'
+        )
+      };
+    }
+    if (/end of a turn|user message|turn boundary/i.test(cleaned)) {
+      return {
+        code: 'not_turn_boundary',
+        durationMs: 4200,
+        message: L(
+          '只能从已完成回复的末尾创建分支，请等待当前轮次结束',
+          'Can only branch from the end of a completed reply'
+        )
+      };
+    }
+    if (/shared workspace/i.test(cleaned)) {
+      return {
+        code: 'shared_workspace',
+        durationMs: 4200,
+        message: L(
+          '当前共享工作区不支持直接分支对话',
+          'Cannot branch into this shared workspace'
+        )
+      };
+    }
+    if (/out of bounds/i.test(cleaned)) {
+      return {
+        code: 'step_out_of_bounds',
+        durationMs: 4200,
+        message: L(
+          '该回复节点已失效，请刷新对话后重试',
+          'This reply checkpoint is out of date; refresh and try again'
+        )
+      };
+    }
+    if (/resolve a workspace/i.test(cleaned)) {
+      return {
+        code: 'workspace_unresolved',
+        durationMs: 4200,
+        message: L(
+          '无法解析当前对话的工作区路径，分支失败',
+          'Could not resolve the workspace for this chat'
+        )
+      };
+    }
+    if (/forking is not supported in this environment/i.test(cleaned)) {
+      return {
+        code: 'unsupported_env',
+        durationMs: 4200,
+        message: L(
+          '当前运行环境暂不支持对话分支',
+          'Branching is not supported in this environment'
+        )
+      };
+    }
+    if (cleaned && cleaned !== 'fork_failed' && cleaned !== 'empty_new_cascade_id') {
+      const brief = cleaned.length > 140 ? `${cleaned.slice(0, 139)}…` : cleaned;
+      return {
+        code: 'fork_failed',
+        durationMs: 4800,
+        message: L(`分支对话失败：${brief}`, `Failed to branch chat: ${brief}`)
+      };
+    }
+    return {
+      code: 'fork_failed',
+      durationMs: 3200,
+      message: L('分支对话失败，请稍后重试', 'Failed to branch chat')
+    };
+  }
+
   function showToast(text, kind = 'ok', durationMs = 2400) {
     try {
       let el = document.getElementById('ag-branch-chat-toast');
@@ -633,10 +756,11 @@
         warnings: Array.isArray(res?.warnings) ? res.warnings : []
       };
     } catch (err) {
-      const msg = String(err?.message || err || 'fork_failed');
+      const msg = String(err?.rawMessage || err?.message || err || 'fork_failed').trim() || 'fork_failed';
+      const friendly = formatBranchError(msg);
       stats.lastError = msg;
-      showToast(L('分支对话失败，请稍后重试', 'Failed to branch chat'), 'error');
-      return { ok: false, error: msg };
+      showToast(friendly.message, 'error', friendly.durationMs);
+      return { ok: false, error: msg, errorCode: friendly.code, userMessage: friendly.message };
     } finally {
       forking = false;
       setTriggerBusy(triggerBtn, false);

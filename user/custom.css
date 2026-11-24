@@ -7752,11 +7752,13 @@ html[data-ag-theme-mode="dark"] #ag-branch-popover .ag-branch-menu-item:hover {
   right: 20px;
   bottom: 20px;
   z-index: 2147483646;
-  padding: 8px 14px;
+  max-width: min(440px, calc(100vw - 40px));
+  padding: 9px 14px;
   border-radius: 9px;
   font-family: var(--font-sans, system-ui, -apple-system, sans-serif);
   font-size: 13px;
   font-weight: 500;
+  line-height: 1.45;
   background: #141413;
   color: #faf9f5;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);

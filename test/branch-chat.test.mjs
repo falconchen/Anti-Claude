@@ -817,3 +817,63 @@ test('decorates branched conversation titles in sidebar, recents, project detail
     h.close();
   }
 });
+
+test('shows actionable localized toast messages for known backend fork errors and strips gRPC prefix on fallback', async () => {
+  let nextErr = null;
+  const h = createHarness({
+    lang: 'zh',
+    forkConversation: async () => {
+      throw nextErr;
+    }
+  });
+
+  try {
+    const { tb } = h.addToolbar({ steps: [makeStep(52)], isLatest: true });
+
+    // 1. Running background task (non-terminal status) — zh
+    nextErr = new Error(
+      '[failed_precondition] cannot fork conversation "ce3431ea-51de-4629-9fc3-1556ccb12d60" at step 52: a fork must be taken at a turn boundary, but step 50 has non-terminal status CORTEX_STEP_STATUS_RUNNING'
+    );
+    const r1 = await h.window.__agBranchChat.branchFromToolbar(tb);
+    assert.equal(r1.ok, false);
+    assert.equal(r1.errorCode, 'running_task');
+    assert.match(r1.userMessage, /后台任务/);
+    assert.equal(h.doc.getElementById('ag-branch-chat-toast').textContent, r1.userMessage);
+    assert.equal(h.doc.getElementById('ag-branch-chat-toast').getAttribute('data-kind'), 'error');
+
+    // 2. Running background task — en
+    h.doc.documentElement.setAttribute('data-ag-ux-lang', 'en');
+    const r2 = await h.window.__agBranchChat.branchFromToolbar(tb);
+    assert.equal(r2.errorCode, 'running_task');
+    assert.match(r2.userMessage, /background task is running/i);
+
+    // 3. Subagent conversation
+    h.doc.documentElement.setAttribute('data-ag-ux-lang', 'zh');
+    nextErr = new Error('cannot fork a subagent conversation; fork the parent conversation instead');
+    const r3 = await h.window.__agBranchChat.branchFromToolbar(tb);
+    assert.equal(r3.errorCode, 'subagent_conversation');
+    assert.match(r3.userMessage, /子代理对话/);
+
+    // 4. Not at turn boundary
+    nextErr = new Error('cannot fork conversation "x" at step 1: that step is a user message');
+    const r4 = await h.window.__agBranchChat.branchFromToolbar(tb);
+    assert.equal(r4.errorCode, 'not_turn_boundary');
+    assert.match(r4.userMessage, /回复的末尾/);
+
+    // 5. Conversation that invoked subagents (real Antigravity backend restriction)
+    nextErr = new Error(
+      'internal: failed to create forked conversation: forking is not supported for conversations that have invoked subagents'
+    );
+    const r5 = await h.window.__agBranchChat.branchFromToolbar(tb);
+    assert.equal(r5.errorCode, 'has_subagents');
+    assert.match(r5.userMessage, /子代理（Subagent）/);
+
+    // 6. Unknown backend error preserves concise reason without gRPC/wrapper prefixes
+    nextErr = new Error('internal: failed to create forked conversation: disk quota exceeded while cloning artifacts');
+    const r6 = await h.window.__agBranchChat.branchFromToolbar(tb);
+    assert.equal(r6.errorCode, 'fork_failed');
+    assert.equal(r6.userMessage, '分支对话失败：disk quota exceeded while cloning artifacts');
+  } finally {
+    h.close();
+  }
+});
