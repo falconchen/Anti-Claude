@@ -117,7 +117,8 @@
     codeFold: effectiveModBool('claudeUxCodeFold', true),
     overviewPanel: effectiveModBool('claudeUxOverviewPanel', true),
     titleSync: effectiveModBool('titleSync', true),
-    branchChat: effectiveModBool('branchChat', true)
+    branchChat: effectiveModBool('branchChat', true),
+    decisionsLog: effectiveModBool('decisionsLog', true)
   };
   const L = (zh, en) => (FEAT.i18n ? zh : en);
 
@@ -6695,6 +6696,19 @@
           if (FEAT.projects) openProjectsView(cur.projectId);
           return;
         }
+        if (act === 'open-conv-decisions') {
+          closeRecentRowMenu();
+          if (typeof window.__agDecisions?.open === 'function') {
+            window.__agDecisions.open({
+              conversationId: cur.id,
+              conversationTitle: cur.title || '',
+              projectId: '',
+              projectName: '',
+              status: 'all'
+            });
+          }
+          return;
+        }
         if (act === 'pin') {
           closeRecentRowMenu();
           toggleRecentPin(cur.id, bindings);
@@ -6800,11 +6814,15 @@
           ? `<div class="ag-rm-meta">${RECENT_FOLDER_SVG}<span class="ag-rm-label">${escapeHtml(st.projectName)}</span></div><div class="ag-rm-sep"></div>`
           : '';
     const delLabel = st.confirmDelete ? L('确认删除？', 'Confirm delete?') : L('删除', 'Delete');
+    const decisionsRowHtml = FEAT.decisionsLog
+      ? `<button type="button" class="ag-rm-item" data-ag-rm-act="open-conv-decisions">${PROJECT_DECISIONS_ICON_SVG}<span class="ag-rm-label">${escapeHtml(L('对话决策记录', 'Conversation Decisions'))}</span></button>`
+      : '';
     menu.innerHTML =
       projPart +
       `<button type="button" class="ag-rm-item" data-ag-rm-act="rename"${canMutate ? '' : ' disabled'}>${RECENT_RENAME_SVG}<span class="ag-rm-label">${escapeHtml(L('重命名', 'Rename'))}</span></button>` +
       `<button type="button" class="ag-rm-item" data-ag-rm-act="pin"${canMutate ? '' : ' disabled'}>${pinned ? RECENT_UNPIN_SVG : RECENT_PIN_SVG}<span class="ag-rm-label">${escapeHtml(pinned ? L('取消置顶', 'Unpin') : L('置顶对话', 'Pin'))}</span></button>` +
       `<button type="button" class="ag-rm-item" data-ag-rm-act="mark-read"${canMutate ? '' : ' disabled'}>${RECENT_UNREAD_SVG}<span class="ag-rm-label">${escapeHtml(unread ? L('标为已读', 'Mark Read') : L('标为未读', 'Mark Unread'))}</span></button>` +
+      decisionsRowHtml +
       moveToProjectHtml +
       `<div class="ag-rm-sep"></div>` + copyHtml + splitHtml + `<div class="ag-rm-sep"></div>` +
       `<button type="button" class="ag-rm-item" data-ag-rm-act="archive"${canMutate ? '' : ' disabled'}>${RECENT_ARCHIVE_SVG}<span class="ag-rm-label">${escapeHtml(L('归档', 'Archive'))}</span></button>` +
@@ -7769,6 +7787,8 @@
   /* ---- Native Sidebar Project Pin-to-Top (Context Menu & Options `⋮` Menu) ---- */
   const PROJECT_PIN_ICON_SVG =
     '<svg class="shrink-0 text-secondary-foreground ag-proj-pin-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>';
+  const PROJECT_DECISIONS_ICON_SVG =
+    '<svg class="shrink-0 text-secondary-foreground ag-proj-pin-ico" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/></svg>';
   let lastProjectOptionsTrigger = { projectId: '', label: '', ts: 0 };
   let projectPinToastTimer = 0;
 
@@ -8062,6 +8082,40 @@
         if (ev.key === 'Enter' || ev.key === ' ') triggerPin(ev);
       });
       firstAnchor.parentElement.insertBefore(item, firstAnchor);
+
+      if (FEAT.decisionsLog && !menu.querySelector('[data-ag-project-decisions-item]')) {
+        const decItem = document.createElement('div');
+        decItem.setAttribute('role', 'menuitem');
+        decItem.setAttribute('tabindex', '0');
+        decItem.setAttribute('data-ag-project-decisions-item', projCtx.projectId);
+        decItem.setAttribute('data-ag-i18n-ignore', '1');
+        decItem.className = `${firstAnchor.className || ''} ag-proj-pin-native-item`.trim();
+        decItem.innerHTML = `${PROJECT_DECISIONS_ICON_SVG}<span class="truncate">${escapeHtml(L('项目决策记录', 'Project Decisions'))}</span>`;
+        const triggerDecisions = (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          dismissNativeProjectOptionsMenu();
+          if (typeof window.__agDecisions?.open === 'function') {
+            window.__agDecisions.open({
+              projectId: projCtx.projectId,
+              projectName: projCtx.label,
+              conversationId: '',
+              conversationTitle: '',
+              status: 'all'
+            });
+          }
+        };
+        decItem.addEventListener('pointerenter', () => {
+          menu.querySelectorAll('[role="menuitem"][data-highlighted]').forEach((el) => {
+            if (el !== decItem) el.removeAttribute('data-highlighted');
+          });
+        });
+        decItem.addEventListener('click', triggerDecisions);
+        decItem.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter' || ev.key === ' ') triggerDecisions(ev);
+        });
+        firstAnchor.parentElement.insertBefore(decItem, firstAnchor);
+      }
     }
   }
 
@@ -8132,7 +8186,17 @@
       return;
     }
     const projCtx = resolveProjectHeaderContextFromElement(el);
-    if (!FEAT.i18n && !projCtx) return;
+    const convRowEl = !projCtx ? el.closest('[data-testid="conversation-row-sidebar"][data-cascade-id]') : null;
+    const convCtx = (() => {
+      if (!convRowEl) return null;
+      const cid = (convRowEl.getAttribute('data-cascade-id') || '').trim();
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cid)) return null;
+      const titleEl = convRowEl.querySelector('.flex-col > span, a[href] span');
+      const linkEl = convRowEl.querySelector('a[href]');
+      const title = (titleEl?.textContent || linkEl?.getAttribute('aria-label') || '').trim();
+      return { id: cid, title };
+    })();
+    if (!FEAT.i18n && !projCtx && !(FEAT.decisionsLog && convCtx)) return;
     if (el.closest('.prose, .markdown, [data-markdown-root], [data-testid="user-message-content"]')) {
       try {
         const sel = window.getSelection && window.getSelection();
@@ -8142,6 +8206,26 @@
     const resolved = resolveNativeContextMenuFromTarget(el, e);
     if (!resolved) return;
     let menuItems = resolved.items;
+    const isNativeConvMenu =
+      Boolean(convCtx) &&
+      Array.isArray(menuItems) &&
+      menuItems.some((it) => {
+        if (!it || typeof it !== 'object') return false;
+        const id = String(it.id || '').toLowerCase();
+        const label = String(it.label || '').trim();
+        return (
+          id === 'rename' ||
+          id === 'pin' ||
+          id === 'archive' ||
+          id === 'delete' ||
+          id === 'mark-read' ||
+          id === 'mark-unread' ||
+          label === 'Rename' ||
+          label === 'Archive' ||
+          label === 'Delete'
+        );
+      });
+
     if (projCtx && isNativeProjectContextItems(menuItems)) {
       const alreadyTop = isProjectPinnedAtTop(projCtx.projectId);
       const pinEntry = {
@@ -8153,7 +8237,43 @@
           pinProjectToTop(projCtx.projectId, projCtx.label);
         }
       };
-      menuItems = [pinEntry, ...menuItems.filter((it) => it && it.id !== 'ag-pin-project-top')];
+      const injected = [pinEntry];
+      if (FEAT.decisionsLog) {
+        injected.push({
+          id: 'ag-open-project-decisions',
+          label: L('项目决策记录', 'Project Decisions'),
+          _agSkipTranslate: true,
+          onClick: () => {
+            window.__agDecisions?.open?.({
+              projectId: projCtx.projectId,
+              projectName: projCtx.label,
+              conversationId: '',
+              conversationTitle: '',
+              status: 'all'
+            });
+          }
+        });
+      }
+      menuItems = [
+        ...injected,
+        ...menuItems.filter((it) => it && it.id !== 'ag-pin-project-top' && it.id !== 'ag-open-project-decisions')
+      ];
+    } else if (FEAT.decisionsLog && isNativeConvMenu) {
+      const decEntry = {
+        id: 'ag-open-conv-decisions',
+        label: L('对话决策记录', 'Conversation Decisions'),
+        _agSkipTranslate: true,
+        onClick: () => {
+          window.__agDecisions?.open?.({
+            conversationId: convCtx.id,
+            conversationTitle: convCtx.title,
+            projectId: '',
+            projectName: '',
+            status: 'all'
+          });
+        }
+      };
+      menuItems = [decEntry, ...menuItems.filter((it) => it && it.id !== 'ag-open-conv-decisions')];
     } else if (!FEAT.i18n) {
       return;
     }
@@ -8354,6 +8474,14 @@
           'Live External Title Sync',
           '监听外部工具对 annotations/*.pbtxt 的标题改写（如 MCP 批量重命名历史空闲对话），通过原生 RPC 实时刷新侧边栏，无需重启 Antigravity',
           'Watches external edits to annotations/*.pbtxt (such as MCP batch renames on idle chats) and syncs titles live via native RPC without restarting Antigravity'
+        ],
+        [
+          'decisionsLog',
+          'decisionsLog',
+          '对话决策记录与变更追踪',
+          'Decision Log & Revision Tracker',
+          '自动索引所有 ask_question 的备选方案与选择，双轨同步到 SQLite 和项目 .anti-claude/decisions.md，支持标记拿捏不定、变更对比与一键引用复盘',
+          'Archives all ask_question options & choices to SQLite + project .anti-claude/decisions.md with status tags, revision history, and AI revisit prompts'
         ]
       ]
     }
@@ -8611,6 +8739,11 @@
       try {
         window.__agBranchChat?.setEnabled(Boolean(on));
       } catch {}
+    } else if (featKey === 'decisionsLog') {
+      try {
+        window.__agDecisions?.setEnabled(Boolean(on));
+      } catch {}
+      if (FEAT.overviewPanel) renderOverviewPanel(true);
     }
     syncSidebarEnhancements();
     scheduleSync();
@@ -10569,6 +10702,19 @@
         const act = btn.getAttribute('data-ag-pm-act');
         const cur = projectMenuState;
         const proj = cur.project;
+        if (act === 'decisions') {
+          closeProjectActionMenu();
+          if (typeof window.__agDecisions?.open === 'function') {
+            window.__agDecisions.open({
+              projectId: proj.id,
+              projectName: proj.name || '',
+              conversationId: '',
+              conversationTitle: '',
+              status: 'all'
+            });
+          }
+          return;
+        }
         if (act === 'rename') {
           closeProjectActionMenu();
           openRenameProjectModal(proj);
@@ -10617,6 +10763,9 @@
       : L('删除项目', 'Delete project');
 
     let itemsHtml = '';
+    if (FEAT.decisionsLog) {
+      itemsHtml += `<button type="button" class="ag-rm-item" data-ag-pm-act="decisions">${PROJECT_DECISIONS_ICON_SVG}<span class="ag-rm-label">${escapeHtml(L('项目决策记录', 'Project Decisions'))}</span></button>`;
+    }
     itemsHtml += `<button type="button" class="ag-rm-item" data-ag-pm-act="rename"${canUpdate ? '' : ' disabled'}>${RECENT_RENAME_SVG}<span class="ag-rm-label">${escapeHtml(L('重命名项目', 'Rename project'))}</span></button>`;
     if (proj.dirPath) {
       itemsHtml += `<button type="button" class="ag-rm-item" data-ag-pm-act="reveal"${canReveal ? '' : ' disabled'}>${RECENT_FOLDER_SVG}<span class="ag-rm-label">${escapeHtml(revealLabel)}</span></button>`;
@@ -13451,8 +13600,13 @@
       document.removeEventListener('keydown', onProjectsGlobalKeyDown, true);
       window.removeEventListener('resize', positionProjectsOverlay);
       window.removeEventListener('popstate', onProjectsNavRouteChange);
+      window.removeEventListener('ag-decisions-view-opened', onDecisionsViewOpened);
       projectsDocListenerBound = false;
     }
+  }
+
+  function onDecisionsViewOpened() {
+    if (projectsViewOpen) closeProjectsView();
   }
 
   function onProjectsNavRouteChange() {
@@ -14340,6 +14494,7 @@
       document.addEventListener('keydown', onProjectsGlobalKeyDown, true);
       window.addEventListener('resize', positionProjectsOverlay);
       window.addEventListener('popstate', onProjectsNavRouteChange);
+      window.addEventListener('ag-decisions-view-opened', onDecisionsViewOpened);
     }
     if (projectsViewOpen) {
       ensureProjectsSidebarObserver();
@@ -14653,6 +14808,18 @@
       ovCollapseState.connectorsExtra = !ovCollapseState.connectorsExtra;
       persistOvCollapseState();
       renderOverviewPanel(true);
+    } else if (action === 'open-decisions') {
+      const mode = actionEl.getAttribute('data-mode') || 'project';
+      if (typeof window.__agDecisions?.open === 'function') {
+        if (mode === 'chat' && ws.cid) {
+          window.__agDecisions.open({ conversationId: ws.cid, projectId: '' });
+        } else {
+          window.__agDecisions.open({
+            projectId: (ws.project && ws.project.id) || (ws.dirPath ? `ws:${ws.dirPath}` : ''),
+            conversationId: ''
+          });
+        }
+      }
     }
   }
 
@@ -14772,6 +14939,18 @@
                       : ''
                   }
                 </div>
+                ${
+                  FEAT.decisionsLog
+                    ? `<div class="ag-ov-rule-pill">
+                        <span class="ag-ov-row-left">
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3h5v5"/><path d="M8 3H3v5"/><path d="M12 22v-8.3a4 4 0 0 0-1.172-2.872L3 3"/><path d="m15 9 6-6"/></svg>
+                          <span class="ag-ov-mono">decisions.md</span>
+                          <span class="ag-ov-muted ag-ov-trunc">${L('决策记录与复盘', 'Decision Log')}</span>
+                        </span>
+                        <button type="button" class="ag-ov-mini-btn" data-ag-ov-action="open-decisions" data-mode="${ws.project?.id || ws.dirPath ? 'project' : 'chat'}">${L('查看', 'Open')}</button>
+                      </div>`
+                    : ''
+                }
               </div>`
             : ''
         }

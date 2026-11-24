@@ -962,6 +962,14 @@
     }
   }
 
+  if (!IS_SWARM_PLUGIN_FRAME && MODULES.customJs && typeof boot.decisionsJs === 'string' && boot.decisionsJs.trim()) {
+    try {
+      new Function('ctx', boot.decisionsJs)(window.__AG_PATCH_CTX__);
+    } catch (err) {
+      console.error('[Anti-Claude] Decisions module failed to initialize:', err);
+    }
+  }
+
   if (MODULES.customJs && boot.customJs && typeof boot.customJs === 'string' && boot.customJs.trim()) {
     try {
       const fn = new Function('ctx', 'boot', boot.customJs);

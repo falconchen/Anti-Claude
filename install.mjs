@@ -39,6 +39,9 @@ const GEMINI_DIR = path.join(HOME, '.gemini');
 const AGY_DIR = path.join(GEMINI_DIR, 'antigravity');
 const AGY_STATE_PBTXT = path.join(AGY_DIR, 'antigravity_state.pbtxt');
 const AGY_CONFIG_JSON = path.join(GEMINI_DIR, 'config', 'config.json');
+const AGY_MCP_CONFIG_JSON = path.join(GEMINI_DIR, 'config', 'mcp_config.json');
+const DECISIONS_MCP_NAME = 'anti-claude-decisions';
+const DECISIONS_MCP_SCRIPT = path.join(__dirname, 'mcp', 'decisions-mcp.mjs');
 const AGENTS_MD = path.join(GEMINI_DIR, 'AGENTS.md');
 const AGY_CLI_DIR = path.join(GEMINI_DIR, 'antigravity-cli');
 const AGY_CLI_SETTINGS_JSON = path.join(AGY_CLI_DIR, 'settings.json');
@@ -2026,6 +2029,65 @@ async function cmdDoctor() {
   );
 }
 
+function installDecisionsMcp(state, { disabled = false } = {}) {
+  if (disabled) return { skipped: 'disabled_by_option' };
+  if (!fs.existsSync(DECISIONS_MCP_SCRIPT)) return { skipped: 'script_missing' };
+  const existed = fs.existsSync(AGY_MCP_CONFIG_JSON);
+  let cfg = {};
+  if (existed) {
+    const parsed = readJsonSafe(AGY_MCP_CONFIG_JSON, null);
+    if (!isPlainObject(parsed)) {
+      return { error: 'invalid_json', path: AGY_MCP_CONFIG_JSON };
+    }
+    cfg = parsed;
+  }
+  if (!isPlainObject(cfg.mcpServers)) cfg.mcpServers = {};
+  const desired = {
+    command: stableNodePath(),
+    args: [DECISIONS_MCP_SCRIPT]
+  };
+  const current = cfg.mcpServers[DECISIONS_MCP_NAME];
+  if (!state.decisionsMcp) {
+    state.decisionsMcp = {
+      existedBefore: existed,
+      hadEntryBefore: Object.prototype.hasOwnProperty.call(cfg.mcpServers, DECISIONS_MCP_NAME),
+      beforeEntry: clone(current),
+      managed: true
+    };
+  }
+  if (deepEqual(current, desired)) {
+    return { action: 'unchanged', name: DECISIONS_MCP_NAME, path: AGY_MCP_CONFIG_JSON };
+  }
+  cfg.mcpServers[DECISIONS_MCP_NAME] = desired;
+  writeJsonAtomic(AGY_MCP_CONFIG_JSON, cfg);
+  return { action: current ? 'updated' : 'registered', name: DECISIONS_MCP_NAME, path: AGY_MCP_CONFIG_JSON };
+}
+
+function restoreDecisionsMcp(state) {
+  const rec = state?.decisionsMcp;
+  if (!rec?.managed || !fs.existsSync(AGY_MCP_CONFIG_JSON)) return { action: 'not_managed' };
+  const cfg = readJsonSafe(AGY_MCP_CONFIG_JSON, null);
+  if (!isPlainObject(cfg) || !isPlainObject(cfg.mcpServers)) return { action: 'skipped_invalid_json' };
+  const current = cfg.mcpServers[DECISIONS_MCP_NAME];
+  const isOurs =
+    isPlainObject(current) &&
+    Array.isArray(current.args) &&
+    current.args.some((a) => String(a || '').endsWith('decisions-mcp.mjs'));
+  if (!isOurs) return { action: 'user_override_kept' };
+  if (rec.hadEntryBefore) {
+    cfg.mcpServers[DECISIONS_MCP_NAME] = clone(rec.beforeEntry);
+    writeJsonAtomic(AGY_MCP_CONFIG_JSON, cfg);
+    return { action: 'restored', name: DECISIONS_MCP_NAME };
+  }
+  delete cfg.mcpServers[DECISIONS_MCP_NAME];
+  if (rec.existedBefore === false && Object.keys(cfg.mcpServers).length === 0 && Object.keys(cfg).length === 1) {
+    fs.rmSync(AGY_MCP_CONFIG_JSON, { force: true });
+    return { action: 'removed_file', name: DECISIONS_MCP_NAME };
+  }
+  writeJsonAtomic(AGY_MCP_CONFIG_JSON, cfg);
+  return { action: 'removed', name: DECISIONS_MCP_NAME };
+}
+
 async function cmdInstall(flags) {
   const critical = [];
   const warnings = [];
@@ -2110,6 +2172,8 @@ async function cmdInstall(flags) {
   else if (coreDaemon.fallbackDetached) {
     warnings.push(`core daemon fell back to detached process (no launchd KeepAlive): ${coreDaemon.launchctlNote || 'launchctl failed'}`);
   }
+  const decisionsMcp = installDecisionsMcp(state, { disabled: flags.has('--no-decisions-mcp') });
+  if (decisionsMcp.error) warnings.push(`decisions MCP (${decisionsMcp.path}): ${decisionsMcp.error}`);
 
   let stepUnlock = { skipped: 'disabled_by_option' };
   if (state.options.stepUnlock) {
@@ -2153,6 +2217,7 @@ async function cmdInstall(flags) {
       userLayer: layer,
       cliLayer,
       coreDaemon,
+      decisionsMcp,
       stepUnlock,
       ruleStatus,
       autoUpdate,
@@ -2245,6 +2310,8 @@ async function cmdSyncUpgrade(flags) {
   else if (coreDaemon.fallbackDetached) {
     warnings.push(`core daemon fell back to detached process (no launchd KeepAlive): ${coreDaemon.launchctlNote || 'launchctl failed'}`);
   }
+  const decisionsMcp = installDecisionsMcp(state, { disabled: flags.has('--no-decisions-mcp') });
+  if (decisionsMcp.error) warnings.push(`decisions MCP (${decisionsMcp.path}): ${decisionsMcp.error}`);
 
   let stepUnlock = { skipped: appChanged ? 'disabled_by_option' : 'app_unchanged' };
   if (appChanged && state.options.stepUnlock) stepUnlock = await applyStepUnlock(state);
@@ -2263,7 +2330,7 @@ async function cmdSyncUpgrade(flags) {
   saveState(state);
   const summary = `sync-upgrade | agy=${fp.version} | appChanged=${appChanged} | remoteChecked=${!selfPull.skipped} | updated=${layer.updated.length + layer.merged.length} | conflicts=${layer.conflicts.length}`;
   appendSyncLog(summary);
-  return finalize({ summary, selfPull, legacyMigration, userLayer: layer, cliLayer, coreDaemon, stepUnlock, ruleStatus, verify }, { warnings });
+  return finalize({ summary, selfPull, legacyMigration, userLayer: layer, cliLayer, coreDaemon, decisionsMcp, stepUnlock, ruleStatus, verify }, { warnings });
 }
 
 async function cmdUninstall() {
@@ -2289,6 +2356,7 @@ async function cmdUninstall() {
   if (files.savedLocalEdits.length) warnings.push(`your post-install edits were saved: ${files.savedLocalEdits.join(', ')}`);
   const cli = restoreCliLayer(state, saveDir);
   if (cli.savedLocalEdits.length) warnings.push(`your post-install CLI edits were saved: ${cli.savedLocalEdits.join(', ')}`);
+  const decisionsMcp = restoreDecisionsMcp(state);
   const ruleRemoved = removeAgentsMdRule();
   const extras = cleanupUninstallExtras(state);
 
@@ -2313,7 +2381,7 @@ async function cmdUninstall() {
   fs.rmSync(LEGACY_V2_STATE_DIR, { recursive: true, force: true });
   fs.rmSync(LEGACY_SYNC_LOG_FILE, { force: true });
 
-  return finalize({ autoUpdateRemoved, daemonStopped, liveTeardown, settings, files, cli, ruleRemoved, extras }, { warnings });
+  return finalize({ autoUpdateRemoved, daemonStopped, liveTeardown, settings, files, cli, decisionsMcp, ruleRemoved, extras }, { warnings });
 }
 
 async function main(argv) {

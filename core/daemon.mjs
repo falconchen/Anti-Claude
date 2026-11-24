@@ -14,6 +14,7 @@ import { listUserFonts, validUserFontName } from './user-fonts.mjs';
 import { AutoApprovalCoordinator, normalizeApprovalSettings } from './auto-approval.mjs';
 import { TitleSyncWatcher } from './title-sync.mjs';
 import { moveConversationToProject } from './move-to-project.mjs';
+import { DecisionStore, isSafeProjectWorkspace } from './decisions.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -61,6 +62,7 @@ const CORE_AUTO_APPROVAL_CLIENT_FILE = path.join(__dirname, 'auto-approval-clien
 const CORE_TITLE_SYNC_CLIENT_FILE = path.join(__dirname, 'title-sync-client.js');
 const CORE_MOVE_TO_PROJECT_CLIENT_FILE = path.join(__dirname, 'move-to-project-client.js');
 const CORE_BRANCH_CHAT_CLIENT_FILE = path.join(__dirname, 'branch-chat-client.js');
+const CORE_DECISIONS_CLIENT_FILE = path.join(__dirname, 'decisions-client.js');
 const PKG_FILE = path.join(REPO_ROOT, 'package.json');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -107,6 +109,7 @@ const ALLOWED_UI_MODULE_KEYS = new Set([
   'autoApproval',
   'titleSync',
   'branchChat',
+  'decisionsLog',
   'claudeUxCodeFold',
   'claudeUxOverviewPanel'
 ]);
@@ -227,6 +230,7 @@ export function claimPidFile({
       pidCleanupBound = true;
       process.on('exit', () => {
         stopAllTitleSyncWatchers();
+        closeAllDecisionStores();
         removeOwnPidFile(PID_FILE);
       });
       for (const sig of ['SIGTERM', 'SIGINT']) {
@@ -234,6 +238,7 @@ export function claimPidFile({
           if (shuttingDown) return;
           shuttingDown = true;
           stopAllTitleSyncWatchers();
+          closeAllDecisionStores();
           const finish = () => {
             removeOwnPidFile(PID_FILE);
             process.exit(0);
@@ -980,6 +985,7 @@ function rebuildBundleIfNeeded() {
     statSig(CORE_TITLE_SYNC_CLIENT_FILE),
     statSig(CORE_MOVE_TO_PROJECT_CLIENT_FILE),
     statSig(CORE_BRANCH_CHAT_CLIENT_FILE),
+    statSig(CORE_DECISIONS_CLIENT_FILE),
     statSig(userConfigFile),
     statSig(UI_PREFS_FILE),
     statSig(userCssFile),
@@ -1009,7 +1015,8 @@ function rebuildBundleIfNeeded() {
       customCss: true,
       customJs: true,
       titleSync: true,
-      branchChat: true
+      branchChat: true,
+      decisionsLog: true
     },
     rawCfg?.modules || {}
   );
@@ -1030,6 +1037,7 @@ function rebuildBundleIfNeeded() {
     enabled,
     contextLimit: Number(rawCfg?.contextLimit) > 0 ? Number(rawCfg.contextLimit) : 256000,
     contextLimitOverride: Number(rawCfg?.contextLimitOverride) > 0 ? Number(rawCfg.contextLimitOverride) : 0,
+    decisionsSyncMarkdown: rawCfg?.decisionsSyncMarkdown !== false,
     modules,
     autoApproval: normalizeApprovalSettings(rawCfg.autoApproval),
     endpoints
@@ -1050,6 +1058,7 @@ function rebuildBundleIfNeeded() {
     titleSyncJs: readTextOrEmpty(CORE_TITLE_SYNC_CLIENT_FILE),
     moveToProjectJs: readTextOrEmpty(CORE_MOVE_TO_PROJECT_CLIENT_FILE),
     branchChatJs: readTextOrEmpty(CORE_BRANCH_CHAT_CLIENT_FILE),
+    decisionsJs: readTextOrEmpty(CORE_DECISIONS_CLIENT_FILE),
     dict: mergedDict
   };
 
@@ -3328,7 +3337,65 @@ async function handleProjectRpcRequest(rawPayload, callerEntry = null) {
         { conversationId: payload?.conversationId, projectId: payload?.projectId },
         { antigravityDir, projectsDir: NATIVE_PROJECTS_DIR }
       );
+      if (result?.ok && activeConfig.modules.decisionsLog !== false && DatabaseSync) {
+        try {
+          getDecisionStore(antigravityDir).syncFromTranscripts({
+            onlyConversationIds: payload?.conversationId ? [payload.conversationId] : null
+          });
+        } catch {}
+      }
       return { reqId, result };
+    }
+    if (
+      [
+        'decisionsList',
+        'decisionsGet',
+        'decisionsUpdateMeta',
+        'decisionsAddRevision',
+        'decisionsSyncNow',
+        'decisionsRevealMarkdown'
+      ].includes(action)
+    ) {
+      if (!callerEntry?.hostConfirmed || callerEntry.type !== 'page') {
+        return { reqId, result: { ok: false, error: 'unauthorized_context' } };
+      }
+      if (!DatabaseSync) return { reqId, result: { ok: false, error: 'sqlite_unavailable' } };
+      const convDir = callerEntry.endpoint?.conversationsDir || path.join(HOME, '.gemini', 'antigravity', 'conversations');
+      const antigravityDir = path.dirname(convDir);
+      const store = getDecisionStore(antigravityDir);
+      if (action === 'decisionsSyncNow') {
+        const res = store.syncFromTranscripts({ force: Boolean(payload?.force) });
+        return { reqId, result: res };
+      }
+      if (action === 'decisionsList') {
+        if (payload?.syncFirst !== false) {
+          try {
+            store.syncFromTranscripts();
+          } catch {}
+        }
+        return { reqId, result: store.listDecisions(payload || {}) };
+      }
+      if (action === 'decisionsGet') {
+        return { reqId, result: store.getDecisionDetail(payload || {}) };
+      }
+      if (action === 'decisionsUpdateMeta') {
+        return { reqId, result: store.updateDecisionMeta(payload || {}) };
+      }
+      if (action === 'decisionsAddRevision') {
+        return { reqId, result: store.addDecisionRevision(payload || {}) };
+      }
+      if (action === 'decisionsRevealMarkdown') {
+        const ws = typeof payload?.workspacePath === 'string' ? payload.workspacePath.trim() : '';
+        if (!ws || !isSafeProjectWorkspace(ws, { homeDir: HOME, antigravityDir })) {
+          return { reqId, result: { ok: false, error: 'invalid_workspace' } };
+        }
+        const synced = store.syncProjectMarkdown(ws);
+        const mdPath = path.join(path.resolve(ws), '.anti-claude', 'decisions.md');
+        if (!fs.existsSync(mdPath)) {
+          return { reqId, result: { ok: false, error: synced?.error || 'markdown_not_found' } };
+        }
+        return { reqId, result: Object.assign({ filePath: mdPath }, revealLocalPath(mdPath)) };
+      }
     }
     if (action === 'listBranchedConversations') {
       if (!callerEntry?.hostConfirmed || callerEntry.type !== 'page') return { reqId, result: { ok: false, error: 'unauthorized_context' } };
@@ -3460,6 +3527,58 @@ const skippedNonHostTargets = new Map();
 const targetThemeModes = new Map();
 const fallbackBackoffUntil = new Map();
 const titleSyncWatchers = new Map();
+const decisionStores = new Map();
+let lastDecisionsSyncAt = 0;
+
+function closeAllDecisionStores() {
+  for (const store of decisionStores.values()) {
+    try {
+      store.close();
+    } catch {}
+  }
+  decisionStores.clear();
+}
+
+function getDecisionStore(antigravityDir = path.join(HOME, '.gemini', 'antigravity')) {
+  const resolvedAgDir = path.resolve(antigravityDir);
+  const syncMarkdown = activeConfig.decisionsSyncMarkdown !== false;
+  let store = decisionStores.get(resolvedAgDir);
+  if (!store) {
+    const dbPath =
+      resolvedAgDir === path.resolve(HOME, '.gemini', 'antigravity')
+        ? path.join(STATE_DIR, 'decisions.db')
+        : path.join(resolvedAgDir, 'anti-claude', 'decisions.db');
+    store = new DecisionStore({
+      dbPath,
+      antigravityDir: resolvedAgDir,
+      projectsDir: NATIVE_PROJECTS_DIR,
+      homeDir: HOME,
+      syncMarkdown,
+      DatabaseSyncClass: DatabaseSync
+    });
+    decisionStores.set(resolvedAgDir, store);
+  } else {
+    store.syncMarkdown = syncMarkdown;
+  }
+  return store;
+}
+
+function tickDecisionsSync(force = false) {
+  if (!DatabaseSync || !activeConfig.enabled || activeConfig.modules.decisionsLog === false) return;
+  const now = Date.now();
+  if (!force && now - lastDecisionsSyncAt < 5000) return;
+  lastDecisionsSyncAt = now;
+  const dirs = new Set();
+  for (const ep of activeConfig.endpoints || []) {
+    if (ep?.conversationsDir) dirs.add(path.dirname(ep.conversationsDir));
+  }
+  if (dirs.size === 0) dirs.add(path.join(HOME, '.gemini', 'antigravity'));
+  for (const agDir of dirs) {
+    try {
+      getDecisionStore(agDir).syncFromTranscripts();
+    } catch {}
+  }
+}
 
 function stopAllTitleSyncWatchers() {
   for (const watcher of titleSyncWatchers.values()) {
@@ -4089,6 +4208,7 @@ async function sync(opts = {}) {
   try {
     const bundleChanged = rebuildBundleIfNeeded();
     if (!readOnly) reconcileTitleSyncWatchers();
+    if (!readOnly) tickDecisionsSync(syncTickCount === 1);
     if (!readOnly && !activeConfig.enabled) targetThemeModes.clear();
     const shouldHeartbeatCheck = !readOnly && (bundleChanged || syncTickCount % 6 === 1);
 

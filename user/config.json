@@ -28,6 +28,7 @@
     "autoApproval": false,
     "titleSync": true,
     "branchChat": true,
+    "decisionsLog": true,
     "claudeUxCodeFold": true,
     "claudeUxOverviewPanel": true
   },
