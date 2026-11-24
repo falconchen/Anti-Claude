@@ -7766,7 +7766,326 @@
     return null;
   }
 
-  function buildLocalizedNativeMenuPayload(items, cbMap, prefix = 'cmi') {
+  /* ---- Native Sidebar Project Pin-to-Top (Context Menu & Options `⋮` Menu) ---- */
+  const PROJECT_PIN_ICON_SVG =
+    '<svg class="shrink-0 text-secondary-foreground ag-proj-pin-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>';
+  let lastProjectOptionsTrigger = { projectId: '', label: '', ts: 0 };
+  let projectPinToastTimer = 0;
+
+  function resolveProjectHeaderContextFromElement(targetEl) {
+    const el = targetEl && targetEl.nodeType === 1 ? targetEl : targetEl && targetEl.parentElement;
+    if (!el || !el.closest) return null;
+    const row = el.closest('.group\\/header');
+    let hdrBtn = row && row.querySelector('button[data-testid="project-header"]');
+    if (!hdrBtn) hdrBtn = el.closest('button[data-testid="project-header"]');
+    if (!hdrBtn) return null;
+    const projectId = resolveProjectHeaderId(hdrBtn);
+    if (!projectId || projectId === 'outside-of-project') return null;
+    const label = (hdrBtn.getAttribute('data-project-label') || hdrBtn.textContent || '').trim() || projectId;
+    return { projectId, label, headerBtn: hdrBtn, row: row || hdrBtn.parentElement };
+  }
+
+  function collectVisibleSidebarProjectIds(startFiber) {
+    const out = [];
+    const seen = new Set();
+    const push = (id) => {
+      const s = typeof id === 'string' ? id.trim() : '';
+      if (!s || s === 'outside-of-project' || seen.has(s)) return;
+      seen.add(s);
+      out.push(s);
+    };
+    if (startFiber) {
+      for (let f = startFiber, d = 0; f && d < 24; f = f.return, d++) {
+        const items = f.memoizedProps && f.memoizedProps.items;
+        if (Array.isArray(items) && items.length > 0 && items.some((it) => it && it.type === 'header' && typeof it.id === 'string')) {
+          for (const it of items) {
+            if (it && it.type === 'header' && typeof it.id === 'string') {
+              push(it.id.startsWith('header-') ? it.id.slice(7) : it.id);
+            }
+          }
+          break;
+        }
+      }
+    }
+    const sb = document.querySelector('[data-testid="conversation-list-sidebar"]');
+    if (sb) {
+      sb.querySelectorAll('button[data-testid="project-header"]').forEach((btn) => {
+        push(resolveProjectHeaderId(btn));
+      });
+    }
+    const bindings = findSidebarBindings();
+    const storeProjects = bindings?.store?.getState?.()?.sidebarProjects?.projects;
+    if (Array.isArray(storeProjects)) {
+      for (const p of storeProjects) {
+        if (p && !p.archived && typeof p.id === 'string') push(p.id);
+      }
+    }
+    return out;
+  }
+
+  function findSidebarProjectOrderHooks() {
+    const sb = document.querySelector('[data-testid="conversation-list-sidebar"]');
+    const hdr = sb?.querySelector('button[data-testid="project-header"]') || document.querySelector('button[data-testid="project-header"]');
+    const anchors = [hdr, sb && sb.firstElementChild, sb];
+    for (const anchor of anchors) {
+      if (!anchor) continue;
+      const startFiber = activeReactFiber(anchor);
+      for (let f = startFiber, d = 0; f && d < 40; f = f.return, d++) {
+        let ms = f.memoizedState;
+        if (!ms) continue;
+        const hooks = [];
+        for (let hi = 0; ms && hi < 600; hi++, ms = ms.next) {
+          hooks.push({ mv: ms.memoizedState, hasQueue: Boolean(ms.queue) });
+        }
+        let projectsOrder = null;
+        let setProjectsOrder = null;
+        let sortBy = null;
+        let setProjectsFolderSortBy = null;
+        for (let i = 0; i < hooks.length; i++) {
+          const mv = hooks[i].mv;
+          if (
+            Array.isArray(mv) &&
+            mv.length === 2 &&
+            typeof mv[0] === 'function' &&
+            String(mv[0]).includes('[usePersistentState]')
+          ) {
+            let keyName = null;
+            let stateVal = undefined;
+            let foundState = false;
+            for (let j = i - 1; j >= Math.max(0, i - 12); j--) {
+              const pmv = hooks[j].mv;
+              if (
+                !keyName &&
+                pmv &&
+                typeof pmv === 'object' &&
+                'current' in pmv &&
+                Object.keys(pmv).length === 1 &&
+                (pmv.current === 'projectsOrder' || pmv.current === 'projectsFolderSortBy')
+              ) {
+                keyName = pmv.current;
+              }
+              if (!foundState && hooks[j].hasQueue) {
+                foundState = true;
+                stateVal = pmv;
+              }
+            }
+            if (keyName === 'projectsOrder' && !setProjectsOrder) {
+              setProjectsOrder = mv[0];
+              projectsOrder = Array.isArray(stateVal) ? stateVal.slice() : [];
+            } else if (keyName === 'projectsFolderSortBy' && !setProjectsFolderSortBy) {
+              setProjectsFolderSortBy = mv[0];
+              sortBy = typeof stateVal === 'string' ? stateVal : null;
+            }
+          }
+        }
+        if (setProjectsOrder) {
+          return {
+            projectsOrder: Array.isArray(projectsOrder) ? projectsOrder : [],
+            setProjectsOrder,
+            sortBy,
+            setProjectsFolderSortBy,
+            visibleProjectIds: collectVisibleSidebarProjectIds(startFiber)
+          };
+        }
+      }
+    }
+    return null;
+  }
+
+  function isProjectPinnedAtTop(projectId) {
+    const pid = String(projectId || '').trim();
+    if (!pid) return false;
+    const hooks = findSidebarProjectOrderHooks();
+    if (!hooks || hooks.sortBy !== 'custom') return false;
+    const firstVisible = hooks.visibleProjectIds[0] || hooks.projectsOrder[0] || '';
+    return firstVisible === pid;
+  }
+
+  function showProjectPinToast(text, isError = false) {
+    try {
+      let el = document.getElementById('ag-project-pin-toast');
+      if (!el && document.body) {
+        el = document.createElement('div');
+        el.id = 'ag-project-pin-toast';
+        el.setAttribute('data-ag-i18n-ignore', '1');
+        el.setAttribute('role', 'status');
+        document.body.appendChild(el);
+      }
+      if (!el) return;
+      el.textContent = text;
+      el.setAttribute('data-kind', isError ? 'error' : 'ok');
+      el.setAttribute('data-visible', 'true');
+      if (projectPinToastTimer) {
+        cancelLater(projectPinToastTimer);
+        projectPinToastTimer = 0;
+      }
+      projectPinToastTimer = later(() => {
+        projectPinToastTimer = 0;
+        const cur = document.getElementById('ag-project-pin-toast');
+        if (cur) cur.setAttribute('data-visible', 'false');
+      }, 2200);
+    } catch {}
+  }
+
+  function pinProjectToTop(projectId, projectLabel) {
+    const pid = String(projectId || '').trim();
+    if (!pid || pid === 'outside-of-project') return false;
+    const hooks = findSidebarProjectOrderHooks();
+    if (!hooks || typeof hooks.setProjectsOrder !== 'function') {
+      showProjectPinToast(L('无法更新项目顺序，请重试', 'Could not update project order'), true);
+      return false;
+    }
+    const wasCustom = hooks.sortBy === 'custom';
+    const baseSources = wasCustom && hooks.projectsOrder.length > 0
+      ? [hooks.projectsOrder, hooks.visibleProjectIds]
+      : [hooks.visibleProjectIds, hooks.projectsOrder];
+    const nextOrder = [pid];
+    const seen = new Set([pid, 'outside-of-project']);
+    for (const src of baseSources) {
+      if (!Array.isArray(src)) continue;
+      for (const id of src) {
+        const s = typeof id === 'string' ? id.trim() : '';
+        if (!s || seen.has(s)) continue;
+        seen.add(s);
+        nextOrder.push(s);
+      }
+    }
+    try {
+      if (!wasCustom && typeof hooks.setProjectsFolderSortBy === 'function') {
+        hooks.setProjectsFolderSortBy('custom');
+      }
+      hooks.setProjectsOrder(nextOrder);
+      const scrollEl = document.querySelector('[data-sidebar-scroll-container="true"]');
+      if (scrollEl && scrollEl.scrollTop > 40) {
+        try {
+          scrollEl.scrollTo({ top: 0, behavior: 'smooth' });
+        } catch {
+          scrollEl.scrollTop = 0;
+        }
+      }
+      const name = String(projectLabel || '').trim() || pid;
+      showProjectPinToast(
+        wasCustom
+          ? L(`已置顶项目「${name}」`, `Pinned "${name}" to top`)
+          : L(`已切换为自定义顺序并置顶「${name}」`, `Switched to Custom Order & pinned "${name}"`)
+      );
+      return true;
+    } catch {
+      showProjectPinToast(L('置顶项目失败，请重试', 'Failed to pin project'), true);
+      return false;
+    }
+  }
+
+  function isNativeProjectContextItems(items) {
+    if (!Array.isArray(items) || !items.length) return false;
+    return items.some((it) => {
+      if (!it || typeof it !== 'object') return false;
+      const id = String(it.id || '').toLowerCase();
+      const label = String(it.label || '').trim();
+      return (
+        id === 'settings' ||
+        id === 'reveal' ||
+        label === 'Copy Project Name' ||
+        label === 'Project Settings' ||
+        label === 'Delete Project'
+      );
+    });
+  }
+
+  function dismissNativeProjectOptionsMenu() {
+    try {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+    } catch {}
+    const openBtn = document.querySelector('.group\\/header button[aria-haspopup="menu"][aria-expanded="true"]');
+    if (openBtn && typeof openBtn.click === 'function') {
+      try {
+        openBtn.click();
+      } catch {}
+    }
+  }
+
+  function resolveActiveProjectOptionsContext() {
+    const openBtn = document.querySelector('.group\\/header button[aria-haspopup="menu"][aria-expanded="true"]');
+    if (openBtn) {
+      const ctx = resolveProjectHeaderContextFromElement(openBtn);
+      if (ctx) return ctx;
+    }
+    if (lastProjectOptionsTrigger.projectId && Date.now() - lastProjectOptionsTrigger.ts <= 3500) {
+      return {
+        projectId: lastProjectOptionsTrigger.projectId,
+        label: lastProjectOptionsTrigger.label
+      };
+    }
+    return null;
+  }
+
+  function syncNativeProjectOptionMenus() {
+    if (disposed || !document.body) return;
+    const anchors = document.querySelectorAll(
+      '[data-testid="group-header-copy-item"], [data-testid="group-header-settings-item"], [data-testid="group-header-reveal-item"], [data-testid="group-header-delete-item"]'
+    );
+    if (!anchors.length) return;
+    const seenMenus = new Set();
+    for (const anchorEl of anchors) {
+      const menu = anchorEl.closest('[role="menu"]');
+      if (!menu || seenMenus.has(menu) || menu.querySelector('[data-ag-project-pin-item]')) continue;
+      seenMenus.add(menu);
+      const projCtx = resolveActiveProjectOptionsContext();
+      if (!projCtx || !projCtx.projectId) continue;
+      const firstAnchor =
+        menu.querySelector('[data-testid="group-header-copy-item"]') ||
+        menu.querySelector('[data-testid="group-header-settings-item"]') ||
+        anchorEl;
+      if (!firstAnchor || !firstAnchor.parentElement) continue;
+      const alreadyTop = isProjectPinnedAtTop(projCtx.projectId);
+      const labelText = alreadyTop ? L('已在顶部', 'Already at Top') : L('置顶', 'Pin to Top');
+      const item = document.createElement('div');
+      item.setAttribute('role', 'menuitem');
+      item.setAttribute('tabindex', alreadyTop ? '-1' : '0');
+      item.setAttribute('data-ag-project-pin-item', projCtx.projectId);
+      item.setAttribute('data-ag-i18n-ignore', '1');
+      if (alreadyTop) {
+        item.setAttribute('aria-disabled', 'true');
+        item.setAttribute('data-disabled', '');
+      }
+      item.className = `${firstAnchor.className || ''} ag-proj-pin-native-item`.trim();
+      item.innerHTML = `${PROJECT_PIN_ICON_SVG}<span class="truncate">${escapeHtml(labelText)}</span>`;
+      const triggerPin = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (alreadyTop) return;
+        dismissNativeProjectOptionsMenu();
+        pinProjectToTop(projCtx.projectId, projCtx.label);
+      };
+      item.addEventListener('click', triggerPin);
+      item.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') triggerPin(ev);
+      });
+      firstAnchor.parentElement.insertBefore(item, firstAnchor);
+    }
+  }
+
+  const onProjectOptionsTriggerCapture = (ev) => {
+    if (disposed) return;
+    if (ev.type === 'keydown' && ev.key !== 'Enter' && ev.key !== ' ') return;
+    const el = ev.target && ev.target.nodeType === 1 ? ev.target : ev.target && ev.target.parentElement;
+    if (!el || !el.closest) return;
+    const target =
+      ev.type === 'contextmenu'
+        ? el.closest('.group\\/header, button[data-testid="project-header"]')
+        : el.closest('.group\\/header button[aria-haspopup="menu"]');
+    if (!target) return;
+    const projCtx = resolveProjectHeaderContextFromElement(target);
+    if (!projCtx) return;
+    lastProjectOptionsTrigger = { projectId: projCtx.projectId, label: projCtx.label, ts: Date.now() };
+    frame(() => syncNativeProjectOptionMenus());
+    later(() => syncNativeProjectOptionMenus(), 60);
+  };
+  document.addEventListener('pointerdown', onProjectOptionsTriggerCapture, true);
+  document.addEventListener('keydown', onProjectOptionsTriggerCapture, true);
+  document.addEventListener('contextmenu', onProjectOptionsTriggerCapture, true);
+
+  function buildLocalizedNativeMenuPayload(items, cbMap, prefix = 'cmi', localize = true) {
     const out = [];
     for (let idx = 0; idx < items.length; idx++) {
       const d = items[idx];
@@ -7782,16 +8101,17 @@
             : d.enabled !== undefined
               ? !d.enabled
               : false;
+      const shouldTranslate = localize && !d._agSkipTranslate;
       const entry = {
         id,
-        label: typeof d.label === 'string' ? translateNativeMenuLabel(d.label) : d.label,
+        label: typeof d.label === 'string' ? (shouldTranslate ? translateNativeMenuLabel(d.label) : d.label) : d.label,
         type: d.type && d.type !== 'item' && d.type !== 'label' ? d.type : 'normal',
         checked: d.checked,
         disabled,
         accelerator: normalizeNativeMenuAccelerator(d.accelerator)
       };
       if (Array.isArray(d.items) && d.items.length > 0) {
-        entry.submenu = buildLocalizedNativeMenuPayload(d.items, cbMap, `${id}-sub`);
+        entry.submenu = buildLocalizedNativeMenuPayload(d.items, cbMap, `${id}-sub`, localize);
       }
       out.push(entry);
     }
@@ -7799,18 +8119,20 @@
   }
 
   const onNativeContextMenuCapture = (e) => {
-    if (disposed || !FEAT.i18n || e.altKey) return;
+    if (disposed || e.altKey) return;
     if (typeof window.electronNative?.showContextMenu !== 'function') return;
     const t = e.target;
     const el = t && t.nodeType === 1 ? t : t && t.parentElement;
     if (!el || !el.closest) return;
     if (
       el.closest(
-        'input, textarea, [contenteditable="true"], .monaco-editor, .monaco-diff-editor, .xterm, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, #ag-branch-popover, #ag-branch-chat-toast, #ag-project-action-menu, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop'
+        'input, textarea, [contenteditable="true"], .monaco-editor, .monaco-diff-editor, .xterm, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, #ag-project-pin-toast, #ag-branch-popover, #ag-branch-chat-toast, #ag-project-action-menu, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop'
       )
     ) {
       return;
     }
+    const projCtx = resolveProjectHeaderContextFromElement(el);
+    if (!FEAT.i18n && !projCtx) return;
     if (el.closest('.prose, .markdown, [data-markdown-root], [data-testid="user-message-content"]')) {
       try {
         const sel = window.getSelection && window.getSelection();
@@ -7819,8 +8141,24 @@
     }
     const resolved = resolveNativeContextMenuFromTarget(el, e);
     if (!resolved) return;
+    let menuItems = resolved.items;
+    if (projCtx && isNativeProjectContextItems(menuItems)) {
+      const alreadyTop = isProjectPinnedAtTop(projCtx.projectId);
+      const pinEntry = {
+        id: 'ag-pin-project-top',
+        label: alreadyTop ? L('已在顶部', 'Already at Top') : L('置顶', 'Pin to Top'),
+        disabled: alreadyTop,
+        _agSkipTranslate: true,
+        onClick: () => {
+          pinProjectToTop(projCtx.projectId, projCtx.label);
+        }
+      };
+      menuItems = [pinEntry, ...menuItems.filter((it) => it && it.id !== 'ag-pin-project-top')];
+    } else if (!FEAT.i18n) {
+      return;
+    }
     const cbMap = new Map();
-    const payload = buildLocalizedNativeMenuPayload(resolved.items, cbMap);
+    const payload = buildLocalizedNativeMenuPayload(menuItems, cbMap, 'cmi', Boolean(FEAT.i18n));
     if (!payload.length) return;
     e.preventDefault();
     e.stopPropagation();
@@ -14963,7 +15301,7 @@
   }
 
   const OWN_SEL =
-    '.ag-claude-todo-card, .ag-claude-todo-live-dock, #ag-auto-approval-nav, #ag-auto-approval-panel, #ag-auto-approval-badge, .ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, .ag-claude-inline-editor, .ag-claude-folder-badges, #ag-claude-recent-section, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, [data-ag-branch-more], #ag-branch-popover, #ag-branch-chat-toast, #ag-project-action-menu, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-settings-stats-wrap, .ag-settings-subhdr-chev, #ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal, .ag-code-fold-toggle, .ag-code-fold-bar, #ag-claude-ov-sections';
+    '.ag-claude-todo-card, .ag-claude-todo-live-dock, #ag-auto-approval-nav, #ag-auto-approval-panel, #ag-auto-approval-badge, .ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, .ag-claude-inline-editor, .ag-claude-folder-badges, #ag-claude-recent-section, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, [data-ag-project-pin-item], #ag-project-pin-toast, [data-ag-branch-more], #ag-branch-popover, #ag-branch-chat-toast, #ag-project-action-menu, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-settings-stats-wrap, .ag-settings-subhdr-chev, #ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal, .ag-code-fold-toggle, .ag-code-fold-bar, #ag-claude-ov-sections';
   const CLASS_WATCH_SEL =
     'ul.contains-task-list, [id="antigravity.agentSidePanelInputBox"], [data-testid="tool-group-collapsible"], [data-testid="worked-for-collapsible"], [data-testid="progress-updates-collapsible"], [data-testid="ephemeral-tool-status"]';
 
@@ -15028,6 +15366,7 @@
     }
     /* Synchronously translate & reconcile Settings in the microtask BEFORE Frame 0 paints so nothing ever flashes */
     if (sawChildList) {
+      syncNativeProjectOptionMenus();
       const sbNow = document.querySelector('[data-testid="settings-sidebar"]');
       if (sbNow !== settingsSidebarRef || sbNow) {
         if (FEAT.i18n && sbNow) {
@@ -15136,6 +15475,13 @@
     document.removeEventListener('click', onModelTriggerSwallowMouseClick, true);
     document.removeEventListener('keydown', onModelPopoverKeyDown, true);
     document.removeEventListener('contextmenu', onNativeContextMenuCapture, true);
+    document.removeEventListener('pointerdown', onProjectOptionsTriggerCapture, true);
+    document.removeEventListener('keydown', onProjectOptionsTriggerCapture, true);
+    document.removeEventListener('contextmenu', onProjectOptionsTriggerCapture, true);
+    if (projectPinToastTimer) {
+      cancelLater(projectPinToastTimer);
+      projectPinToastTimer = 0;
+    }
     document.removeEventListener('click', onRevertButtonClick, true);
     document.removeEventListener('keydown', onInlineEditDocKeyDown, true);
     document.removeEventListener('mouseenter', onMetricsPillMouseEnter, true);
@@ -15209,7 +15555,7 @@
     }
     document
       .querySelectorAll(
-        '.ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, [data-ag-todo-mount], [data-ag-todo-dock], #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop'
+        '.ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, [data-ag-todo-mount], [data-ag-todo-dock], #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, [data-ag-project-pin-item], #ag-project-pin-toast'
       )
       .forEach((el) => el.remove());
     document

@@ -1800,5 +1800,7 @@
   "Unpin Workspace": "取消置顶工作区",
   "Share": "分享",
   "Workspace Name": "工作区名称",
-  "Worktree Name": "Worktree 名称"
+  "Worktree Name": "Worktree 名称",
+  "Pin to Top": "置顶",
+  "Already at Top": "已在顶部"
 }

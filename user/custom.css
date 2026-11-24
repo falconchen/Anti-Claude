@@ -7837,3 +7837,58 @@ html[data-ag-theme-mode="dark"] [data-ag-branch-gutter="1"]::before {
   margin-right: 6px;
   vertical-align: -2.5px;
 }
+
+/* ==========================================================================
+ * 14. Sidebar Project Pin-to-Top (`[data-ag-project-pin-item]`)
+ * ========================================================================== */
+[data-ag-project-pin-item].ag-proj-pin-native-item {
+  cursor: pointer;
+}
+
+[data-ag-project-pin-item].ag-proj-pin-native-item:hover:not([aria-disabled="true"]) {
+  background-color: var(--sidebar-muted, rgba(0, 0, 0, 0.06));
+}
+
+html[data-ag-theme-mode="dark"] [data-ag-project-pin-item].ag-proj-pin-native-item:hover:not([aria-disabled="true"]) {
+  background-color: var(--sidebar-muted, rgba(255, 255, 255, 0.09));
+}
+
+[data-ag-project-pin-item].ag-proj-pin-native-item[aria-disabled="true"] {
+  opacity: 0.48;
+  cursor: default;
+  pointer-events: none;
+}
+
+#ag-project-pin-toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 2147483646;
+  padding: 8px 14px;
+  border-radius: 9px;
+  font-family: var(--font-sans, system-ui, -apple-system, sans-serif);
+  font-size: 13px;
+  font-weight: 500;
+  background: #141413;
+  color: #faf9f5;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+  transition: opacity 160ms ease, transform 160ms ease;
+}
+
+#ag-project-pin-toast[data-visible="true"] {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+#ag-project-pin-toast[data-kind="error"] {
+  background: #dc2626;
+  color: #ffffff;
+}
+
+html[data-ag-theme-mode="dark"] #ag-project-pin-toast:not([data-kind="error"]) {
+  background: #faf9f5;
+  color: #141413;
+}
