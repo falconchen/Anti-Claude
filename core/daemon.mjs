@@ -15,6 +15,7 @@ import { AutoApprovalCoordinator, normalizeApprovalSettings } from './auto-appro
 import { TitleSyncWatcher } from './title-sync.mjs';
 import { moveConversationToProject } from './move-to-project.mjs';
 import { DecisionStore, isSafeProjectWorkspace } from './decisions.mjs';
+import { applyAntigravityUpdateBlock, inspectAntigravityUpdateBlock } from './update-blocker.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -111,7 +112,8 @@ const ALLOWED_UI_MODULE_KEYS = new Set([
   'branchChat',
   'decisionsLog',
   'claudeUxCodeFold',
-  'claudeUxOverviewPanel'
+  'claudeUxOverviewPanel',
+  'disableAntigravityUpdates'
 ]);
 const VALID_CJK_SCALES = new Set(['94.5', '95', '100']);
 const INLINE_TEXT_EXTS = new Set([
@@ -1016,7 +1018,8 @@ function rebuildBundleIfNeeded() {
       customJs: true,
       titleSync: true,
       branchChat: true,
-      decisionsLog: true
+      decisionsLog: true,
+      disableAntigravityUpdates: false
     },
     rawCfg?.modules || {}
   );
@@ -3406,10 +3409,69 @@ async function handleProjectRpcRequest(rawPayload, callerEntry = null) {
     if (action === 'listUserFonts') {
       return { reqId, result: await listUserFonts({ refresh: payload.refresh === true }) };
     }
+    if (action === 'getAntigravityUpdateStatus') {
+      if (!callerEntry?.hostConfirmed || callerEntry.type !== 'page') {
+        return { reqId, result: { ok: false, error: 'unauthorized_context' } };
+      }
+      rebuildBundleIfNeeded();
+      return {
+        reqId,
+        result: {
+          ok: true,
+          enabled: Boolean(activeConfig.modules.disableAntigravityUpdates === true),
+          status: inspectAntigravityUpdateBlock({ homeDir: HOME })
+        }
+      };
+    }
+    if (action === 'setAntigravityUpdateBlock') {
+      if (!callerEntry?.hostConfirmed || callerEntry.type !== 'page') {
+        return { reqId, result: { ok: false, error: 'unauthorized_context' } };
+      }
+      const desired = Boolean(payload?.enabled);
+      const blockRes = applyAntigravityUpdateBlock(desired, { homeDir: HOME });
+      if (!blockRes.ok) {
+        return {
+          reqId,
+          result: {
+            ok: false,
+            enabled: Boolean(activeConfig.modules.disableAntigravityUpdates === true),
+            error: blockRes.error || 'update_block_failed',
+            status: blockRes
+          }
+        };
+      }
+      const saved = saveUiPrefs({
+        updatedAt: Number(payload?.updatedAt) > 0 ? Number(payload.updatedAt) : Date.now(),
+        modules: { disableAntigravityUpdates: desired }
+      });
+      lastManagedUpdateBlock = desired;
+      rebuildBundleIfNeeded();
+      if (callerEntry && callerEntry.hostConfirmed) {
+        callerEntry.injectedBundleHash = cachedBundleHash;
+        await callerEntry.updateNewDocScript().catch(() => {});
+      }
+      for (const [, other] of attachedTargets.entries()) {
+        if (other !== callerEntry && other.hostConfirmed) {
+          other.updateNewDocScript().catch(() => {});
+          other.checkAndInject(true).catch(() => {});
+        }
+      }
+      return {
+        reqId,
+        result: {
+          ok: true,
+          enabled: desired,
+          updatedAt: saved.updatedAt,
+          status: blockRes
+        }
+      };
+    }
     if (action === 'saveUiPrefs') {
+      const prevDisableUpdates = Boolean(activeConfig.modules.disableAntigravityUpdates === true);
       const res = saveUiPrefs(payload);
       rebuildBundleIfNeeded();
       reconcileTitleSyncWatchers();
+      reconcileAntigravityUpdateBlock({ previousEnabled: prevDisableUpdates });
       if (callerEntry && callerEntry.hostConfirmed) {
         callerEntry.injectedBundleHash = cachedBundleHash;
         await callerEntry.updateNewDocScript().catch(() => {});
@@ -3529,6 +3591,32 @@ const fallbackBackoffUntil = new Map();
 const titleSyncWatchers = new Map();
 const decisionStores = new Map();
 let lastDecisionsSyncAt = 0;
+let lastManagedUpdateBlock = null;
+
+function reconcileAntigravityUpdateBlock({ forceApply = false, previousEnabled = null } = {}) {
+  if (RUN_ONCE) return null;
+  const desired = Boolean(activeConfig.enabled && activeConfig.modules.disableAntigravityUpdates === true);
+  if (desired) {
+    const cur = inspectAntigravityUpdateBlock({ homeDir: HOME });
+    if (!cur.supported) {
+      lastManagedUpdateBlock = false;
+      return cur;
+    }
+    if (forceApply || !cur.locked) {
+      const res = applyAntigravityUpdateBlock(true, { homeDir: HOME });
+      if (res.ok) lastManagedUpdateBlock = true;
+      return res;
+    }
+    lastManagedUpdateBlock = true;
+    return cur;
+  }
+  if (forceApply || previousEnabled === true || lastManagedUpdateBlock === true) {
+    const res = applyAntigravityUpdateBlock(false, { homeDir: HOME });
+    if (res.ok || !res.supported) lastManagedUpdateBlock = false;
+    return res;
+  }
+  return null;
+}
 
 function closeAllDecisionStores() {
   for (const store of decisionStores.values()) {
@@ -4208,6 +4296,7 @@ async function sync(opts = {}) {
   try {
     const bundleChanged = rebuildBundleIfNeeded();
     if (!readOnly) reconcileTitleSyncWatchers();
+    if (!readOnly && (bundleChanged || syncTickCount === 1)) reconcileAntigravityUpdateBlock();
     if (!readOnly) tickDecisionsSync(syncTickCount === 1);
     if (!readOnly && !activeConfig.enabled) targetThemeModes.clear();
     const shouldHeartbeatCheck = !readOnly && (bundleChanged || syncTickCount % 6 === 1);

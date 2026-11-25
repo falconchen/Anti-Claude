@@ -3619,6 +3619,37 @@ html:not([data-ag-theme-mode="dark"]) body:not(.dark) #ag-claude-ux-settings-pan
   background-color: var(--primary, #2F75C3) !important;
 }
 
+#ag-claude-ux-settings-panel .ag-claude-switch:disabled {
+  opacity: 0.55 !important;
+  cursor: wait !important;
+}
+
+#ag-claude-ux-settings-panel .ag-update-block-status {
+  margin-top: 4px !important;
+  font-size: 12px !important;
+}
+
+#ag-claude-ux-settings-panel .ag-update-block-status[data-state="active"] {
+  color: #1F7A4D !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-ux-settings-panel .ag-update-block-status[data-state="active"] {
+  color: #5EC28B !important;
+}
+
+#ag-claude-ux-settings-panel .ag-update-block-status[data-state="external"] {
+  color: #9A6700 !important;
+}
+
+:is(html[data-ag-theme-mode="dark"] body, body.dark) #ag-claude-ux-settings-panel .ag-update-block-status[data-state="external"] {
+  color: #E3B341 !important;
+}
+
+#ag-claude-ux-settings-panel .ag-update-block-status[data-state="error"],
+#ag-claude-ux-settings-panel .ag-update-block-status[data-state="unsupported"] {
+  color: var(--destructive, #C93B3B) !important;
+}
+
 #ag-claude-ux-settings-panel .ag-claude-switch > span {
   width: 16px !important;
   height: 16px !important;

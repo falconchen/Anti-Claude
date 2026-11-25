@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { applyAntigravityUpdateBlock, inspectAntigravityUpdateBlock } from '../core/update-blocker.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const INSTALL = path.join(REPO, 'install.mjs');
@@ -330,4 +331,42 @@ test('pure helpers: scheduling, 3-way merge, trailing JSON, semver', async () =>
   assert.deepEqual(m.parseTrailingJson('[daemon] hi\n{"x":1}\nnoise? no\n{\n  "ok": false\n}\n'), { ok: false });
   assert.ok(m.compareSemver('5.4.0', '5.3.9') > 0);
   assert.equal(m.compareSemver('5.3.0', '5.3.0'), 0);
+});
+
+test('doctor reports antigravityUpdateBlock status and uninstall unlocks ShipIt cache when enabled', { skip: process.platform !== 'darwin' }, () => {
+  const h = makeHome({ withPreExistingUserFiles: false });
+  try {
+    const inst = run(h, ['install']);
+    assert.equal(inst.status, 0, inst.stderr);
+
+    const locked = applyAntigravityUpdateBlock(true, { homeDir: h.home, killProcesses: false });
+    assert.equal(locked.ok, true);
+    assert.equal(locked.locked, true);
+
+    const uiPrefsPath = path.join(h.home, '.gemini', 'antigravity', 'anti-claude', 'ui-prefs.json');
+    fs.writeFileSync(
+      uiPrefsPath,
+      JSON.stringify({ schema: 1, updatedAt: Date.now(), modules: { disableAntigravityUpdates: true } }, null, 2)
+    );
+
+    const doc = run(h, ['doctor']);
+    assert.equal(doc.status, 0, doc.stderr);
+    assert.equal(doc.out.antigravityUpdateBlock.configuredDisabled, true);
+    assert.equal(doc.out.antigravityUpdateBlock.locked, true);
+
+    const un = run(h, ['uninstall']);
+    assert.equal(un.status, 0, un.stderr);
+    assert.equal(un.out.antigravityUpdateBlock.ok, true);
+    assert.equal(un.out.antigravityUpdateBlock.locked, false);
+
+    const after = inspectAntigravityUpdateBlock({ homeDir: h.home });
+    assert.equal(after.locked, false);
+    assert.equal(after.immutable, false);
+    assert.equal(after.readOnly, false);
+  } finally {
+    try {
+      applyAntigravityUpdateBlock(false, { homeDir: h.home, killProcesses: false });
+    } catch {}
+    h.cleanup();
+  }
 });

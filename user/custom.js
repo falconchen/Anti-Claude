@@ -91,6 +91,11 @@
   let userFontFamilies = [];
   let userFontsRequest = null;
   let userFontsStatus = 'idle';
+  let updateBlockStatus = null;
+  let updateBlockState = 'idle';
+  let updateBlockError = '';
+  let updateBlockBusy = false;
+  let updateBlockRequest = null;
   function effectiveModBool(key, defaultVal = true) {
     if (Object.prototype.hasOwnProperty.call(localModOverrides, key)) {
       return Boolean(localModOverrides[key]);
@@ -118,7 +123,8 @@
     overviewPanel: effectiveModBool('claudeUxOverviewPanel', true),
     titleSync: effectiveModBool('titleSync', true),
     branchChat: effectiveModBool('branchChat', true),
-    decisionsLog: effectiveModBool('decisionsLog', true)
+    decisionsLog: effectiveModBool('decisionsLog', true),
+    disableAntigravityUpdates: effectiveModBool('disableAntigravityUpdates', false)
   };
   const L = (zh, en) => (FEAT.i18n ? zh : en);
 
@@ -8484,6 +8490,21 @@
           'Archives all ask_question options & choices to SQLite + project .anti-claude/decisions.md with status tags, revision history, and AI revisit prompts'
         ]
       ]
+    },
+    {
+      id: 'system-updates',
+      headingZh: '系统与更新',
+      headingEn: 'System & Updates',
+      items: [
+        [
+          'disableAntigravityUpdates',
+          'disableAntigravityUpdates',
+          '禁止 Antigravity 自动更新',
+          'Disable Antigravity Auto-Updates',
+          '锁定 macOS ShipIt 更新缓存目录并清理已暂存更新包，阻止后台静默更新与重启覆盖（不修改应用签名，关闭开关或卸载 Anti-Claude 即自动恢复）',
+          'Locks the macOS ShipIt update cache and clears staged packages to block silent background updates (app signature stays intact; turning off or uninstalling restores updates)'
+        ]
+      ]
     }
   ];
 
@@ -8543,6 +8564,169 @@
     return userFontsRequest;
   }
 
+  function formatUpdateBlockError(code) {
+    const raw = String(code || '').trim();
+    if (raw === 'unsupported_platform') {
+      return L(
+        '当前平台暂不支持自动锁定（仅支持 macOS ShipIt 缓存锁定）。',
+        'Automatic update lock is currently supported on macOS only.'
+      );
+    }
+    if (raw === 'refuse_symlink_cache_dir') {
+      return L(
+        '检测到 ShipIt 缓存目录为符号链接，已出于安全考虑拒绝修改。',
+        'Refused to modify ShipIt cache directory because it is a symbolic link.'
+      );
+    }
+    return L(
+      `未能应用更新锁定（${raw || 'unknown_error'}），请确认 Anti-Claude 守护进程正在运行。`,
+      `Could not apply update lock (${raw || 'unknown_error'}). Make sure the Anti-Claude daemon is running.`
+    );
+  }
+
+  function updateAntigravityUpdateBlockUi(panel) {
+    const root = panel || settingsPanelEl;
+    if (!root) return;
+    const sw = root.querySelector('[data-ag-cux-switch="disableAntigravityUpdates"]');
+    if (sw) {
+      sw.setAttribute('aria-checked', String(Boolean(FEAT.disableAntigravityUpdates)));
+      sw.disabled = Boolean(updateBlockBusy);
+    }
+    const statusEl = root.querySelector('[data-ag-update-block-status]');
+    if (!statusEl) return;
+    if (updateBlockBusy) {
+      statusEl.setAttribute('data-state', 'loading');
+      statusEl.textContent = L('正在应用更新锁定状态…', 'Applying update lock state…');
+      return;
+    }
+    if (updateBlockError) {
+      statusEl.setAttribute('data-state', updateBlockError === 'unsupported_platform' ? 'unsupported' : 'error');
+      statusEl.textContent = formatUpdateBlockError(updateBlockError);
+      return;
+    }
+    if (updateBlockState === 'loading' && !updateBlockStatus) {
+      statusEl.setAttribute('data-state', 'loading');
+      statusEl.textContent = L('正在检测更新缓存锁定状态…', 'Checking update cache lock state…');
+      return;
+    }
+    if (!updateBlockStatus) {
+      statusEl.removeAttribute('data-state');
+      statusEl.textContent = '';
+      return;
+    }
+    if (updateBlockStatus.supported === false) {
+      statusEl.setAttribute('data-state', 'unsupported');
+      statusEl.textContent = L(
+        '当前系统非 macOS，暂不支持锁定 ShipIt 更新缓存。',
+        'macOS only: ShipIt cache locking is unavailable on this platform.'
+      );
+      return;
+    }
+    if (FEAT.disableAntigravityUpdates) {
+      if (updateBlockStatus.locked) {
+        statusEl.setAttribute('data-state', 'active');
+        statusEl.textContent = L(
+          '已生效：ShipIt 更新缓存目录已设为只读并锁定（uchg），阻止后台自动更新。',
+          'Active: ShipIt update cache is read-only and immutable (uchg); auto-updates are blocked.'
+        );
+      } else {
+        statusEl.setAttribute('data-state', 'external');
+        statusEl.textContent = L(
+          '配置已开启，但缓存目录当前未锁定；请重新切换开关以立即锁定。',
+          'Enabled in config, but the cache directory is not locked yet. Toggle again to re-apply.'
+        );
+      }
+      return;
+    }
+    if (updateBlockStatus.locked || updateBlockStatus.partiallyLocked) {
+      statusEl.setAttribute('data-state', 'external');
+      statusEl.textContent = L(
+        '提示：检测到 ShipIt 缓存目录已被外部手动锁定；如需由此开关统一管理可开启后再关闭。',
+        'Note: ShipIt cache is locked externally. Toggle on then off if you want Anti-Claude to unlock it.'
+      );
+      return;
+    }
+    statusEl.setAttribute('data-state', 'inactive');
+    const staged = Number(updateBlockStatus.stagedEntries) || 0;
+    statusEl.textContent = staged > 0
+      ? L(
+          `未启用：当前可正常更新（检测到 ${staged} 个已暂存更新项，开启开关将立即清理并锁定）。`,
+          `Inactive: updates run normally (${staged} staged item(s) found; enabling will clear and lock).`
+        )
+      : L(
+          '未启用：Antigravity 将按默认方式自动更新。',
+          'Inactive: Antigravity updates normally.'
+        );
+  }
+
+  async function loadAntigravityUpdateStatus(panel) {
+    if (updateBlockRequest) {
+      updateAntigravityUpdateBlockUi(panel);
+      return updateBlockRequest;
+    }
+    updateBlockState = 'loading';
+    updateAntigravityUpdateBlockUi(panel);
+    updateBlockRequest = Promise.resolve().then(async () => {
+      try {
+        if (typeof window.__agProjectCall !== 'function') throw new Error('rpc_unavailable');
+        const res = await window.__agProjectCall('getAntigravityUpdateStatus', {}, 8000);
+        if (disposed) return;
+        if (!res?.ok) throw new Error(res?.error || 'status_failed');
+        updateBlockStatus = res.status || null;
+        updateBlockState = 'ready';
+        if (!updateBlockBusy && typeof res.enabled === 'boolean' && res.enabled !== FEAT.disableAntigravityUpdates) {
+          FEAT.disableAntigravityUpdates = res.enabled;
+          localModOverrides.disableAntigravityUpdates = res.enabled;
+        }
+      } catch {
+        updateBlockState = 'error';
+      } finally {
+        updateBlockRequest = null;
+        if (!disposed) updateAntigravityUpdateBlockUi(settingsPanelEl || panel);
+      }
+    });
+    return updateBlockRequest;
+  }
+
+  async function toggleAntigravityUpdateBlock(nextBool, panel) {
+    if (updateBlockBusy) return;
+    const target = Boolean(nextBool);
+    updateBlockBusy = true;
+    updateBlockError = '';
+    updateAntigravityUpdateBlockUi(panel);
+    try {
+      if (typeof window.__agProjectCall !== 'function') {
+        throw new Error('rpc_unavailable');
+      }
+      const updatedAt = Date.now();
+      const res = await window.__agProjectCall('setAntigravityUpdateBlock', { enabled: target, updatedAt }, 12000);
+      if (disposed) return;
+      if (!res || !res.ok) {
+        if (res?.status) updateBlockStatus = res.status;
+        updateBlockError = res?.error || 'update_block_failed';
+        return;
+      }
+      FEAT.disableAntigravityUpdates = target;
+      localModOverrides.disableAntigravityUpdates = target;
+      localModOverrides._ts = Number(res.updatedAt) > 0 ? Number(res.updatedAt) : updatedAt;
+      try {
+        if (typeof localStorage === 'object' && localStorage) {
+          localStorage.setItem(MODULE_STORAGE_KEY, JSON.stringify(localModOverrides));
+        }
+      } catch {}
+      updateBlockStatus = res.status || updateBlockStatus;
+      updateBlockState = 'ready';
+      updateBlockError = '';
+      syncSettingsSwitchesUi();
+      flashSettingsSavedToast();
+    } catch (err) {
+      updateBlockError = String(err?.message || err || 'update_block_failed');
+    } finally {
+      updateBlockBusy = false;
+      if (!disposed) updateAntigravityUpdateBlockUi(settingsPanelEl || panel);
+    }
+  }
+
   function renderTypographyControls() {
     const labels = {
       family: L('字体方案', 'Font family'), size: L('正文字号', 'Body font size'),
@@ -8593,6 +8777,11 @@
                   <div style="min-width:0">
                     <div class="ag-cux-settings-title">${escapeHtml(L(titleZh, titleEn))}</div>
                     <div class="ag-cux-settings-desc">${escapeHtml(L(descZh, descEn))}</div>
+                    ${
+                      modKey === 'disableAntigravityUpdates'
+                        ? '<div class="ag-cux-settings-desc ag-update-block-status" data-ag-update-block-status role="status" aria-live="polite"></div>'
+                        : ''
+                    }
                   </div>
                   <button type="button" class="ag-claude-switch" role="switch" data-ag-cux-switch="${modKey}" data-ag-cux-feat="${featKey}" aria-label="${escapeHtml(L(titleZh, titleEn))}" aria-checked="${Boolean(FEAT[featKey])}"><span></span></button>
                 </div>`
@@ -8651,10 +8840,16 @@
     });
     panel.querySelector('[data-ag-refresh-fonts]')?.addEventListener('click', () => loadUserFontOptions(panel, true));
     loadUserFontOptions(panel);
+    updateAntigravityUpdateBlockUi(panel);
+    loadAntigravityUpdateStatus(panel);
     panel.querySelectorAll('[data-ag-cux-switch]').forEach((sw) => {
       sw.addEventListener('click', () => {
         const modKey = sw.getAttribute('data-ag-cux-switch');
         const featKey = sw.getAttribute('data-ag-cux-feat');
+        if (modKey === 'disableAntigravityUpdates') {
+          toggleAntigravityUpdateBlock(!FEAT.disableAntigravityUpdates, panel);
+          return;
+        }
         setModuleOverride(modKey, featKey, !FEAT[featKey]);
       });
     });

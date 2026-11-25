@@ -2424,3 +2424,74 @@ test('recent spacer uses native measurement synchronously without hiding rows or
   assert.equal(h.window.__t.measureRecentSpacer(host), false, 'missing native API leaves observer in control');
   h.close();
 });
+
+
+test('disableAntigravityUpdates toggle queries status, applies lock via RPC, and rolls back on failure', { skip }, async () => {
+  const h = mount('<div id="update-block-panel"></div>');
+  const calls = [];
+  let failNext = false;
+  let diskLocked = false;
+  h.window.__agProjectCall = async (action, payload) => {
+    calls.push({ action, payload });
+    if (action === 'listUserFonts') return { ok: true, families: [] };
+    if (action === 'getAntigravityUpdateStatus') {
+      return {
+        ok: true,
+        enabled: diskLocked,
+        status: { ok: true, supported: true, locked: diskLocked, partiallyLocked: false, stagedEntries: 1 }
+      };
+    }
+    if (action === 'setAntigravityUpdateBlock') {
+      if (failNext) {
+        return { ok: false, enabled: diskLocked, error: 'unsupported_platform', status: { supported: false, locked: false } };
+      }
+      diskLocked = Boolean(payload?.enabled);
+      return {
+        ok: true,
+        enabled: diskLocked,
+        updatedAt: 123456,
+        status: { ok: true, supported: true, locked: diskLocked, partiallyLocked: false, stagedEntries: 0 }
+      };
+    }
+    return { ok: true };
+  };
+
+  const panel = h.doc.getElementById('update-block-panel');
+  h.window.__t.renderSettingsPanelContent(panel);
+  await h.microtasks();
+  await h.microtasks();
+
+  const sw = panel.querySelector('[data-ag-cux-switch="disableAntigravityUpdates"]');
+  const statusEl = panel.querySelector('[data-ag-update-block-status]');
+  assert.ok(sw, 'disableAntigravityUpdates switch renders in settings panel');
+  assert.equal(sw.getAttribute('aria-checked'), 'false');
+  assert.equal(statusEl.getAttribute('data-state'), 'inactive');
+  assert.match(statusEl.textContent, /1 staged item/);
+
+  /* Enable update block */
+  sw.click();
+  await h.microtasks();
+  await h.microtasks();
+  assert.equal(calls.filter((c) => c.action === 'setAntigravityUpdateBlock').at(-1).payload.enabled, true);
+  assert.equal(sw.getAttribute('aria-checked'), 'true');
+  assert.equal(statusEl.getAttribute('data-state'), 'active');
+  assert.equal(JSON.parse(h.window.localStorage.getItem('ag_claude_ux_modules_v1')).disableAntigravityUpdates, true);
+
+  /* Failure does not flip the switch to a false state */
+  failNext = true;
+  sw.click();
+  await h.microtasks();
+  await h.microtasks();
+  assert.equal(sw.getAttribute('aria-checked'), 'true', 'failed RPC keeps previous verified toggle state');
+  assert.equal(statusEl.getAttribute('data-state'), 'unsupported');
+  assert.match(statusEl.textContent, /macOS only/i);
+
+  /* Succeeding turn-off restores inactive state */
+  failNext = false;
+  sw.click();
+  await h.microtasks();
+  await h.microtasks();
+  assert.equal(sw.getAttribute('aria-checked'), 'false');
+  assert.equal(statusEl.getAttribute('data-state'), 'inactive');
+  h.close();
+});

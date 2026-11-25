@@ -31,6 +31,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { applyAntigravityUpdateBlock, inspectAntigravityUpdateBlock } from './core/update-blocker.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -752,7 +753,7 @@ const JSON_INVALID = Symbol('json_invalid');
 
 export function validateSourceRoot(root = __dirname) {
   const problems = [];
-  for (const rel of ['install.mjs', 'core/daemon.mjs', 'core/runtime.js', 'core/auto-approval.mjs', 'core/auto-approval-client.js', 'core/title-sync.mjs', 'core/title-sync-client.js', 'core/move-to-project.mjs', 'core/move-to-project-client.js', 'core/branch-chat-client.js', 'user/custom.js', 'cli/statusline.mjs']) {
+  for (const rel of ['install.mjs', 'core/daemon.mjs', 'core/runtime.js', 'core/auto-approval.mjs', 'core/auto-approval-client.js', 'core/title-sync.mjs', 'core/title-sync-client.js', 'core/move-to-project.mjs', 'core/move-to-project-client.js', 'core/branch-chat-client.js', 'core/update-blocker.mjs', 'user/custom.js', 'cli/statusline.mjs']) {
     const abs = path.join(root, rel);
     if (!fs.existsSync(abs)) {
       problems.push(`${rel}: missing`);
@@ -1970,6 +1971,15 @@ function restoreCliLayer(state, sharedSaveDir = null) {
 /* Commands                                                                   */
 /* -------------------------------------------------------------------------- */
 
+function isAntigravityUpdateBlockConfigured() {
+  const uiPrefs = readJsonSafe(UI_PREFS_FILE, null);
+  if (typeof uiPrefs?.modules?.disableAntigravityUpdates === 'boolean') {
+    return uiPrefs.modules.disableAntigravityUpdates;
+  }
+  const userCfg = readJsonSafe(path.join(USER_DIR, 'config.json'), null);
+  return userCfg?.modules?.disableAntigravityUpdates === true;
+}
+
 async function cmdDoctor() {
   const state = readJsonSafe(STATE_FILE, null);
   const pbtxt = readTextSafe(AGY_STATE_PBTXT) || '';
@@ -2019,6 +2029,10 @@ async function cmdDoctor() {
       installState: state ? { installedAt: state.installedAt, options: state.options, files: Object.keys(state.files || {}) } : null,
       userLayerInstalled: (readTextSafe(path.join(USER_DIR, 'custom.js')) || '').includes('ag-claude-todo-card'),
       autoUpdate: agent,
+      antigravityUpdateBlock: {
+        configuredDisabled: isAntigravityUpdateBlockConfigured(),
+        ...inspectAntigravityUpdateBlock({ homeDir: HOME })
+      },
       lastSync: state?.sync || null,
       fonts: checkFontsInstalled(),
       developerStepSkinUnlocked: pbtxt.includes('PRODUCT_SKIN_DEVELOPER'),
@@ -2343,8 +2357,15 @@ async function cmdUninstall() {
   const warnings = [];
   const saveDir = path.join(AGY_DIR, `anti-claude-uninstall-saved-${new Date().toISOString().replace(/[:.]/g, '-')}`);
   const isDesktop = state.options?.desktop !== false || Object.keys(state.files || {}).length > 0;
+  const hadUpdateBlock = isDesktop && isAntigravityUpdateBlockConfigured();
   const autoUpdateRemoved = disableMacAutoUpdateAgent();
   const daemonStopped = isDesktop ? disableCoreDaemon() : { stopped: false };
+  const antigravityUpdateBlock = hadUpdateBlock
+    ? applyAntigravityUpdateBlock(false, { homeDir: HOME })
+    : { skipped: 'not_enabled' };
+  if (hadUpdateBlock && antigravityUpdateBlock && !antigravityUpdateBlock.ok) {
+    warnings.push(`antigravity update unlock: ${antigravityUpdateBlock.error || 'failed'}`);
+  }
   const liveTeardown = isDesktop ? runLiveTeardownOnce() : { skipped: 'cli_only' };
   const settings = isDesktop ? await revertStepUnlock(state) : { skipped: 'cli_only' };
   if (settings.live && !settings.live.ok && settings.live.appRunning !== false) warnings.push(`live settings revert: ${settings.live.reason}`);
@@ -2381,7 +2402,7 @@ async function cmdUninstall() {
   fs.rmSync(LEGACY_V2_STATE_DIR, { recursive: true, force: true });
   fs.rmSync(LEGACY_SYNC_LOG_FILE, { force: true });
 
-  return finalize({ autoUpdateRemoved, daemonStopped, liveTeardown, settings, files, cli, decisionsMcp, ruleRemoved, extras }, { warnings });
+  return finalize({ autoUpdateRemoved, daemonStopped, antigravityUpdateBlock, liveTeardown, settings, files, cli, decisionsMcp, ruleRemoved, extras }, { warnings });
 }
 
 async function main(argv) {
