@@ -7310,9 +7310,9 @@
    *       text nodes & title/placeholder/aria-label attributes with zero page reload.
    * ========================================================================== */
   const UX_I18N_BASE_EXCLUDE =
-    'code, pre, kbd, samp, textarea, input, style, script, noscript, [contenteditable="true"], [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, [data-testid="skill-scope-item-pill"], bdi.context-scope-mention, .monaco-editor, .monaco-diff-editor, .xterm, [class*="onyx-key"], .prose, .markdown, [class*="chat-message"], [class*="group/file-title"], [data-testid="conversation-row-sidebar"] a[href^="/c/"], [data-testid="conversation-row-sidebar"] span.truncate, [data-testid="conversation-navigator-turn"], .msg-body, #raw, #swarm-title, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, #ag-branch-popover, #ag-branch-chat-toast, [data-ag-branch-more], #ag-project-action-menu, [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]';
+    'code, pre, kbd, samp, textarea, input, style, script, noscript, [contenteditable="true"], [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, [data-testid="skill-scope-item-pill"], bdi.context-scope-mention, .monaco-editor, .monaco-diff-editor, .xterm, [class*="onyx-key"], .prose, .markdown, [class*="chat-message"], [class*="group/file-title"], [data-testid="conversation-row-sidebar"] a[href^="/c/"], [data-testid="conversation-row-sidebar"] span.truncate, [data-testid="conversation-navigator-turn"], .msg-body, #raw, #swarm-title, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, #ag-branch-popover, #ag-branch-chat-toast, [data-ag-branch-more], [data-ag-branch-toggle], [data-ag-branch-count], #ag-project-action-menu, [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]';
   const UX_I18N_ATTR_EXCLUDE =
-    'code, pre, kbd, samp, style, script, noscript, [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, [data-testid="skill-scope-item-pill"], bdi.context-scope-mention, .monaco-editor, .monaco-diff-editor, .xterm, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, #ag-branch-popover, #ag-branch-chat-toast, [data-ag-branch-more], #ag-project-action-menu, [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]';
+    'code, pre, kbd, samp, style, script, noscript, [data-markdown-root], [data-testid="user-message-content"], .agy-user-bubble, [data-testid="skill-scope-item-pill"], bdi.context-scope-mention, .monaco-editor, .monaco-diff-editor, .xterm, #ag-live-metrics-pill, #ag-live-metrics-tooltip, [data-ag-i18n-ignore="1"], #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, #ag-claude-quota-popover, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-claude-recent-section, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, #ag-branch-popover, #ag-branch-chat-toast, [data-ag-branch-more], [data-ag-branch-toggle], [data-ag-branch-count], #ag-project-action-menu, [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]';
   let uxI18nObserver = null;
   let uxI18nFlushTimer = 0;
   let uxI18nDirtyRoots = new Set();
@@ -10681,6 +10681,9 @@
       });
     }
     items.sort((a, b) => (a.pinned !== b.pinned ? (a.pinned ? -1 : 1) : b.lastSec - a.lastSec));
+    if (FEAT.branchChat && typeof window.__agBranchChat?.orderConversationList === 'function') {
+      return window.__agBranchChat.orderConversationList(items, { respectCollapsed: true });
+    }
     return items;
   }
 
@@ -11986,10 +11989,33 @@
               ? `<span class="ag-pd-chat-pin" title="${escapeHtml(L('已置顶', 'Pinned'))}">${RECENT_PIN_SVG}</span>`
               : '';
             const timeTxt = c.lastSec ? formatProjectTimeAgo(c.lastSec) : '';
-            return `<button type="button" class="ag-pd-chat-row" draggable="true" data-ag-pd-chat="${escapeHtml(c.id)}" data-ag-pd-chat-title="${escapeHtml(c.title)}">
+            const depth = Number(c.branchDepth || 0);
+            const childCount = Number(c.branchChildCount || 0);
+            const isCollapsed = Boolean(c.branchCollapsed);
+            const treeAttrs = [
+              c.branchIsGroupedChild && depth > 0 ? `data-ag-branch-child="1" data-ag-branch-depth="${depth}"` : '',
+              c.branchIsGroupedChild && c.branchIsLastChild ? 'data-ag-branch-last="1"' : '',
+              childCount > 0 ? `data-ag-branch-parent="1" data-ag-branch-collapsed="${isCollapsed ? '1' : '0'}"` : ''
+            ]
+              .filter(Boolean)
+              .join(' ');
+            const toggleLabel = isCollapsed
+              ? L(`展开 ${childCount} 个分支对话`, `Expand ${childCount} branched chats`)
+              : L(`收起 ${childCount} 个分支对话`, `Collapse ${childCount} branched chats`);
+            const toggleHtml =
+              childCount > 0
+                ? `<span role="button" tabindex="0" class="ag-branch-tree-toggle" data-ag-branch-toggle="${escapeHtml(c.id)}" data-ag-i18n-ignore="1" aria-expanded="${isCollapsed ? 'false' : 'true'}" aria-label="${escapeHtml(toggleLabel)}" title="${escapeHtml(toggleLabel)}"><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 6 3.5 4 3.5-4"/></svg></span>`
+                : '';
+            const countHtml =
+              childCount > 0 && isCollapsed
+                ? `<span role="button" tabindex="0" class="ag-branch-tree-count" data-ag-branch-count="${escapeHtml(c.id)}" data-ag-i18n-ignore="1" title="${escapeHtml(toggleLabel)}">${childCount}</span>`
+                : '';
+            return `<button type="button" class="ag-pd-chat-row" draggable="true" data-ag-pd-chat="${escapeHtml(c.id)}" data-ag-pd-chat-title="${escapeHtml(c.title)}" ${treeAttrs}>
+              ${toggleHtml}
               <div class="ag-pd-chat-main">
                 <span class="ag-pd-chat-title">${statusDot}${pinBadge}${escapeHtml(c.title)}</span>
               </div>
+              ${countHtml}
               <span class="ag-pd-chat-time">${escapeHtml(timeTxt)}</span>
             </button>`;
           })
@@ -12485,9 +12511,32 @@
 
     let pdLastDragEndTs = 0;
     el.querySelectorAll('[data-ag-pd-chat]').forEach((btn) => {
-      btn.addEventListener('click', () => {
+      btn.addEventListener('click', (e) => {
+        const toggleEl = e.target?.closest?.('[data-ag-branch-toggle], [data-ag-branch-count]');
+        if (toggleEl) {
+          e.preventDefault();
+          e.stopPropagation();
+          const pid = toggleEl.getAttribute('data-ag-branch-toggle') || toggleEl.getAttribute('data-ag-branch-count') || '';
+          if (pid && typeof window.__agBranchChat?.toggleParentCollapsed === 'function') {
+            window.__agBranchChat.toggleParentCollapsed(pid);
+            renderProjectsView();
+          }
+          return;
+        }
         if (Date.now() - pdLastDragEndTs < 260) return;
         openConversationFromProject(btn.getAttribute('data-ag-pd-chat'));
+      });
+      btn.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const toggleEl = e.target?.closest?.('[data-ag-branch-toggle], [data-ag-branch-count]');
+        if (!toggleEl) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const pid = toggleEl.getAttribute('data-ag-branch-toggle') || toggleEl.getAttribute('data-ag-branch-count') || '';
+        if (pid && typeof window.__agBranchChat?.toggleParentCollapsed === 'function') {
+          window.__agBranchChat.toggleParentCollapsed(pid);
+          renderProjectsView();
+        }
       });
       btn.addEventListener('dragstart', (e) => {
         const cid = btn.getAttribute('data-ag-pd-chat');
@@ -15675,7 +15724,7 @@
   }
 
   const OWN_SEL =
-    '.ag-claude-todo-card, .ag-claude-todo-live-dock, #ag-auto-approval-nav, #ag-auto-approval-panel, #ag-auto-approval-badge, .ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, .ag-claude-inline-editor, .ag-claude-folder-badges, #ag-claude-recent-section, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, [data-ag-project-pin-item], #ag-project-pin-toast, [data-ag-branch-more], #ag-branch-popover, #ag-branch-chat-toast, #ag-project-action-menu, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-settings-stats-wrap, .ag-settings-subhdr-chev, #ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal, .ag-code-fold-toggle, .ag-code-fold-bar, #ag-claude-ov-sections';
+    '.ag-claude-todo-card, .ag-claude-todo-live-dock, #ag-auto-approval-nav, #ag-auto-approval-panel, #ag-auto-approval-badge, .ag-collapse-ghost, .ag-orbit-dots, .ag-elapsed-timer, #ag-claude-ctx-ring, #ag-claude-quota-popover, #ag-claude-model-popover, #ag-claude-model-subpop, #ag-claude-model-tripop, .ag-claude-inline-editor, .ag-claude-folder-badges, #ag-claude-recent-section, #ag-recent-row-menu, #ag-move-project-submenu, #ag-move-project-toast, [data-ag-project-pin-item], #ag-project-pin-toast, [data-ag-branch-more], [data-ag-branch-toggle], [data-ag-branch-count], #ag-branch-popover, #ag-branch-chat-toast, #ag-project-action-menu, #ag-claude-ux-settings-nav, #ag-claude-ux-settings-panel, #ag-settings-stats-wrap, .ag-settings-subhdr-chev, #ag-claude-projects-nav-btn, #ag-claude-projects-view, #ag-claude-project-modal, .ag-code-fold-toggle, .ag-code-fold-bar, #ag-claude-ov-sections';
   const CLASS_WATCH_SEL =
     'ul.contains-task-list, [id="antigravity.agentSidePanelInputBox"], [data-testid="tool-group-collapsible"], [data-testid="worked-for-collapsible"], [data-testid="progress-updates-collapsible"], [data-testid="ephemeral-tool-status"]';
 
@@ -15812,6 +15861,11 @@
     scheduleSidebarSync();
   };
   window.addEventListener('ag-title-sync-updated', onTitleSyncUpdated);
+  const onBranchTreeUpdated = () => {
+    if (disposed) return;
+    if (projectsViewOpen) renderProjectsView();
+  };
+  window.addEventListener('ag-branch-tree-updated', onBranchTreeUpdated);
 
   function dispose() {
     if (disposed) return;
@@ -15871,6 +15925,7 @@
     window.removeEventListener('blur', onWindowSidebarEvent);
     window.removeEventListener('popstate', onWindowSidebarEvent);
     window.removeEventListener('ag-title-sync-updated', onTitleSyncUpdated);
+    window.removeEventListener('ag-branch-tree-updated', onBranchTreeUpdated);
     window.removeEventListener('focus', onQuotaVisibilityOrFocus);
     document.removeEventListener('visibilitychange', onQuotaVisibilityOrFocus);
     if (autoQuotaRefreshTimer) {

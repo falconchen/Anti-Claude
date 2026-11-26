@@ -1346,21 +1346,21 @@ function getDescendantIds(cascadeId, conversationsDir) {
   return queue.sort();
 }
 
-export function listBranchedConversations(conversationsDir) {
-  if (!DatabaseSync || !conversationsDir) return [];
+export function listBranchedConversationParents(conversationsDir) {
+  if (!DatabaseSync || !conversationsDir) return {};
   let dirState = branchedCacheByDir.get(conversationsDir);
   if (!dirState) {
     dirState = { dirMtimeMs: -1, files: new Map() };
     branchedCacheByDir.set(conversationsDir, dirState);
   }
   const st = fs.statSync(conversationsDir, { throwIfNoEntry: false });
-  if (!st || !st.isDirectory()) return [];
+  if (!st || !st.isDirectory()) return {};
 
   let entries = [];
   try {
     entries = fs.readdirSync(conversationsDir);
   } catch {
-    return [];
+    return {};
   }
 
   const seen = new Set();
@@ -1373,24 +1373,25 @@ export function listBranchedConversations(conversationsDir) {
     const info = getDbStatByPath(dbPath);
     if (!info) continue;
     const existing = dirState.files.get(uuid);
-    if (existing && existing.sig === info.sig) continue;
+    if (existing && existing.sig === info.sig && typeof existing.parentId === 'string') continue;
     try {
-      const branched = withReadOnlyDb(dbPath, 20, (db) => {
-        const rows = db.prepare('SELECT data FROM parent_references LIMIT 8').all();
+      const parentId = withReadOnlyDb(dbPath, 20, (db) => {
+        const rows = db.prepare('SELECT data FROM parent_references ORDER BY idx ASC LIMIT 8').all();
         const selfLower = uuid.toLowerCase();
         for (const r of rows) {
           if (!r?.data) continue;
           const fields = parseProto(r.data);
           const refCid = readUtf8(fields.get(6)).trim();
           if (refCid && UUID_RE.test(refCid) && refCid.toLowerCase() !== selfLower) {
-            return true;
+            return refCid.toLowerCase();
           }
         }
-        return false;
+        return '';
       });
-      dirState.files.set(uuid, { sig: info.sig, branched });
+      dirState.files.set(uuid, { sig: info.sig, branched: Boolean(parentId), parentId });
     } catch {
-      dirState.files.set(uuid, { sig: info.sig, branched: existing ? existing.branched : false });
+      const prevParent = existing && typeof existing.parentId === 'string' ? existing.parentId : '';
+      dirState.files.set(uuid, { sig: info.sig, branched: Boolean(prevParent), parentId: prevParent });
     }
   }
   for (const id of Array.from(dirState.files.keys())) {
@@ -1398,11 +1399,20 @@ export function listBranchedConversations(conversationsDir) {
   }
   dirState.dirMtimeMs = st.mtimeMs;
 
-  const out = [];
+  const ids = [];
   for (const [id, rec] of dirState.files.entries()) {
-    if (rec?.branched) out.push(id);
+    if (rec?.parentId) ids.push(id);
   }
-  return out.sort();
+  ids.sort();
+  const out = {};
+  for (const id of ids) {
+    out[id] = dirState.files.get(id).parentId;
+  }
+  return out;
+}
+
+export function listBranchedConversations(conversationsDir) {
+  return Object.keys(listBranchedConversationParents(conversationsDir));
 }
 
 function readChildMetrics(childId, conversationsDir) {
@@ -3403,8 +3413,9 @@ async function handleProjectRpcRequest(rawPayload, callerEntry = null) {
     if (action === 'listBranchedConversations') {
       if (!callerEntry?.hostConfirmed || callerEntry.type !== 'page') return { reqId, result: { ok: false, error: 'unauthorized_context' } };
       const convDir = callerEntry.endpoint?.conversationsDir || path.join(HOME, '.gemini', 'antigravity', 'conversations');
-      const ids = listBranchedConversations(convDir);
-      return { reqId, result: { ok: true, ids } };
+      const parents = listBranchedConversationParents(convDir);
+      const ids = Object.keys(parents);
+      return { reqId, result: { ok: true, ids, parents } };
     }
     if (action === 'listUserFonts') {
       return { reqId, result: await listUserFonts({ refresh: payload.refresh === true }) };

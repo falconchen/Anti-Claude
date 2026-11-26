@@ -7,7 +7,7 @@ import vm from 'node:vm';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { makeStringField } from '../core/move-to-project.mjs';
-import { listBranchedConversations } from '../core/daemon.mjs';
+import { listBranchedConversations, listBranchedConversationParents } from '../core/daemon.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CLIENT_SRC = fs.readFileSync(path.join(REPO, 'core', 'branch-chat-client.js'), 'utf8');
@@ -701,8 +701,10 @@ test('daemon listBranchedConversations identifies true forks (field #6 !== self)
     makeConvDb(plainId, null);
 
     assert.deepEqual(listBranchedConversations(convDir), [forkId]);
+    assert.deepEqual(listBranchedConversationParents(convDir), { [forkId]: sourceId });
     // Second call uses cache and returns identical result
     assert.deepEqual(listBranchedConversations(convDir), [forkId]);
+    assert.deepEqual(listBranchedConversationParents(convDir), { [forkId]: sourceId });
   } finally {
     fs.rmSync(convDir, { recursive: true, force: true });
   }
@@ -873,6 +875,267 @@ test('shows actionable localized toast messages for known backend fork errors an
     const r6 = await h.window.__agBranchChat.branchFromToolbar(tb);
     assert.equal(r6.errorCode, 'fork_failed');
     assert.equal(r6.userMessage, '分支对话失败：disk quota exceeded while cloning artifacts');
+  } finally {
+    h.close();
+  }
+});
+
+test('groups forked chats beneath their parent with latest-activity bubbling, multi-level nesting, and collapse/expand', async () => {
+  const PARENT = '11111111-1111-4111-8111-111111111101';
+  const FORK_NEW = '11111111-1111-4111-8111-111111111102';
+  const FORK_OLD = '11111111-1111-4111-8111-111111111103';
+  const GRANDCHILD = '11111111-1111-4111-8111-111111111104';
+  const OTHER_TOP = '22222222-2222-4222-8222-222222222201';
+  const OTHER_MID = '22222222-2222-4222-8222-222222222202';
+  const ORPHAN_FORK = '33333333-3333-4333-8333-333333333301';
+  const DELETED_MID = '44444444-4444-4444-8444-444444444401';
+  const REATTACHED = '44444444-4444-4444-8444-444444444402';
+
+  const h = createHarness({
+    daemonHandler: async (action) => {
+      if (action === 'listBranchedConversations') {
+        return {
+          ok: true,
+          ids: [FORK_NEW, FORK_OLD, GRANDCHILD, ORPHAN_FORK, DELETED_MID, REATTACHED],
+          parents: {
+            [FORK_NEW]: PARENT,
+            [FORK_OLD]: PARENT,
+            [GRANDCHILD]: FORK_OLD,
+            [ORPHAN_FORK]: '99999999-9999-4999-8999-999999999999',
+            [DELETED_MID]: PARENT,
+            [REATTACHED]: DELETED_MID
+          }
+        };
+      }
+      return { ok: true };
+    }
+  });
+
+  try {
+    await h.window.__agBranchChat.syncBranchedIdsFromDaemon(true);
+
+    // Raw chronological order: FORK_NEW (0), OTHER_TOP (1), GRANDCHILD (2), FORK_OLD (3), OTHER_MID (4), PARENT (5), REATTACHED (6), ORPHAN_FORK (7)
+    const input = [
+      { id: FORK_NEW, pinned: false },
+      { id: OTHER_TOP, pinned: false },
+      { id: GRANDCHILD, pinned: false },
+      { id: FORK_OLD, pinned: false },
+      { id: OTHER_MID, pinned: false },
+      { id: PARENT, pinned: false },
+      { id: REATTACHED, pinned: false },
+      { id: ORPHAN_FORK, pinned: false }
+    ];
+
+    const ordered = h.window.__agBranchChat.orderConversationList(input);
+    // PARENT bubbles to 0 (due to FORK_NEW at 0), children ordered by latest activity:
+    // FORK_NEW (best=0), FORK_OLD (best=2 via GRANDCHILD) -> GRANDCHILD (depth 2), REATTACHED (reattached to PARENT because DELETED_MID is absent, best=6)
+    assert.deepEqual(
+      Array.from(ordered, (x) => [x.id, x.branchDepth, x.branchIsLastChild, x.branchChildCount]),
+      [
+        [PARENT, 0, false, 4],
+        [FORK_NEW, 1, false, 0],
+        [FORK_OLD, 1, false, 1],
+        [GRANDCHILD, 2, true, 0],
+        [REATTACHED, 1, true, 0],
+        [OTHER_TOP, 0, false, 0],
+        [OTHER_MID, 0, false, 0],
+        [ORPHAN_FORK, 0, false, 0]
+      ]
+    );
+
+    // Collapsing PARENT hides all 4 descendants while keeping PARENT at bubbled position 0
+    h.window.__agBranchChat.toggleParentCollapsed(PARENT);
+    assert.equal(h.window.__agBranchChat.isParentCollapsed(PARENT), true);
+    const collapsed = h.window.__agBranchChat.orderConversationList(input);
+    assert.deepEqual(
+      Array.from(collapsed, (x) => [x.id, x.branchCollapsed, x.branchChildCount]),
+      [
+        [PARENT, true, 4],
+        [OTHER_TOP, false, 0],
+        [OTHER_MID, false, 0],
+        [ORPHAN_FORK, false, 0]
+      ]
+    );
+
+    // Pinned items never cross-group with unpinned items
+    const mixedPinned = [
+      { id: FORK_NEW, pinned: true },
+      { id: PARENT, pinned: false },
+      { id: FORK_OLD, pinned: false }
+    ];
+    h.window.__agBranchChat.setParentCollapsed(PARENT, false);
+    const orderedPinned = h.window.__agBranchChat.orderConversationList(mixedPinned);
+    assert.deepEqual(
+      Array.from(orderedPinned, (x) => [x.id, x.branchDepth]),
+      [
+        [FORK_NEW, 0],
+        [PARENT, 0],
+        [FORK_OLD, 1]
+      ]
+    );
+  } finally {
+    h.close();
+  }
+});
+
+test('patches sidebar TanStack virtualizer to reorder forks under parents, supports collapse toggle, and restores on disable', async () => {
+  const PARENT = 'aaaa1111-1111-4111-8111-111111111111';
+  const FORK_A = 'aaaa2222-2222-4222-8222-222222222222';
+  const FORK_B = 'aaaa3333-3333-4333-8333-333333333333';
+  const OTHER = 'bbbb1111-1111-4111-8111-111111111111';
+
+  const h = createHarness({
+    daemonHandler: async (action) => {
+      if (action === 'listBranchedConversations') {
+        return {
+          ok: true,
+          ids: [FORK_A, FORK_B],
+          parents: { [FORK_A]: PARENT, [FORK_B]: PARENT }
+        };
+      }
+      return { ok: true };
+    }
+  });
+
+  try {
+    // Build sidebar container + fake TanStack Virtualizer attached to fiber hook
+    const sb = h.doc.createElement('div');
+    sb.setAttribute('data-testid', 'conversation-list-sidebar');
+    sb.clientHeight = 80;
+    const listWrap = h.doc.createElement('div');
+    sb.appendChild(listWrap);
+    h.mainEl.appendChild(sb);
+
+    const keys = [
+      'main-section-header',
+      `header-${PROJ_ID}`,
+      FORK_A,
+      OTHER,
+      FORK_B,
+      PARENT,
+      `show-more-${PROJ_ID}`
+    ];
+    const sizes = [24, 37, 33, 33, 33, 33, 32];
+    const rawMeasurements = [];
+    let y = 0;
+    for (let i = 0; i < keys.length; i++) {
+      rawMeasurements.push({ index: i, key: keys[i], start: y, size: sizes[i], end: y + sizes[i], lane: 0 });
+      y += sizes[i];
+    }
+
+    let notifyCount = 0;
+    const scrolledOffsets = [];
+    const virt = {
+      scrollElement: sb,
+      scrollOffset: 0,
+      scrollRect: { width: 280, height: 80 },
+      options: {
+        count: keys.length,
+        overscan: 10,
+        scrollMargin: 0,
+        getItemKey: (i) => keys[i],
+        onChange: () => { notifyCount += 1; }
+      },
+      getMeasurements: () => rawMeasurements,
+      getVirtualItems: () => rawMeasurements.slice(),
+      getTotalSize: () => y,
+      getOffsetForIndex: (i) => [rawMeasurements[i].start, 'start'],
+      scrollToOffset: (off) => scrolledOffsets.push(off),
+      scrollToIndex: (i) => scrolledOffsets.push(rawMeasurements[i].start)
+    };
+
+    sb.__reactFiber$test = {
+      memoizedProps: {},
+      memoizedState: { memoizedState: { current: virt }, next: null },
+      return: h.mainEl.__reactFiber$test
+    };
+
+    // Add rendered sidebar DOM rows so decoration & toggle buttons can be verified
+    const makeRow = (cid) => {
+      const row = h.doc.createElement('div');
+      row.setAttribute('data-testid', 'conversation-row-sidebar');
+      row.setAttribute('data-cascade-id', cid);
+      row.className = 'relative w-full flex flex-row justify-between pl-[30px] pr-2 py-1.5 items-center';
+      const link = h.doc.createElement('a');
+      link.setAttribute('href', `/c/${cid}`);
+      const titleBox = h.doc.createElement('div');
+      const titleSpan = h.doc.createElement('span');
+      titleSpan.className = 'truncate';
+      titleSpan.textContent = `Title ${cid.slice(0, 6)}`;
+      titleSpan.getBoundingClientRect = () => ({ left: 48, right: 220, top: 46, bottom: 66, width: 172, height: 20 });
+      titleBox.appendChild(titleSpan);
+      const rightBox = h.doc.createElement('div');
+      row.getBoundingClientRect = () => ({ left: 0, right: 260, top: 40, bottom: 73, width: 260, height: 33 });
+      row.appendChild(link);
+      row.appendChild(titleBox);
+      row.appendChild(rightBox);
+      listWrap.appendChild(row);
+      return row;
+    };
+
+    const rowParent = makeRow(PARENT);
+    const rowForkA = makeRow(FORK_A);
+    const rowForkB = makeRow(FORK_B);
+    const rowOther = makeRow(OTHER);
+
+    await h.window.__agBranchChat.syncBranchedIdsFromDaemon(true);
+    assert.ok(notifyCount >= 1, 'virtualizer should be notified after parent sync');
+
+    // Visual order: section-header(0), project-header(1), PARENT(5), FORK_A(2), FORK_B(4), OTHER(3), show-more(6)
+    const vItems = virt.getVirtualItems();
+    assert.deepEqual(
+      Array.from(vItems, (v) => v.index),
+      [0, 1, 5, 2, 4, 3, 6]
+    );
+    assert.equal(vItems[2].start, 61, 'PARENT starts immediately below project header (24 + 37)');
+    assert.equal(vItems[3].start, 94, 'FORK_A starts immediately below PARENT (61 + 33)');
+    assert.equal(vItems[4].start, 127, 'FORK_B starts immediately below FORK_A (94 + 33)');
+    assert.equal(vItems[5].start, 160, 'OTHER shifts below the parent+forks group');
+    assert.equal(virt.getTotalSize(), y, 'total size unchanged when expanded');
+
+    // Row tree attributes & parent chevron button
+    assert.equal(rowParent.getAttribute('data-ag-branch-parent'), '1');
+    assert.equal(rowParent.getAttribute('data-ag-branch-collapsed'), '0');
+    const toggleBtn = rowParent.querySelector('[data-ag-branch-toggle]');
+    assert.ok(toggleBtn, 'parent row gets collapse toggle button');
+    assert.equal(toggleBtn.getAttribute('aria-expanded'), 'true');
+    assert.equal(rowParent.querySelector('[data-ag-branch-count]'), null, 'count chip hidden while expanded');
+
+    assert.equal(rowForkA.getAttribute('data-ag-branch-child'), '1');
+    assert.equal(rowForkA.getAttribute('data-ag-branch-depth'), '1');
+    assert.equal(rowForkA.hasAttribute('data-ag-branch-last'), false);
+    assert.equal(rowForkB.getAttribute('data-ag-branch-child'), '1');
+    assert.equal(rowForkB.getAttribute('data-ag-branch-last'), '1');
+    assert.equal(rowOther.hasAttribute('data-ag-branch-child'), false);
+
+    // Click parent chevron to collapse branches
+    toggleBtn.click();
+    h.flushRaf();
+    const vCollapsed = virt.getVirtualItems();
+    assert.deepEqual(
+      Array.from(vCollapsed, (v) => v.index),
+      [0, 1, 5, 3, 6],
+      'collapsed virtualizer omits both fork rows'
+    );
+    assert.equal(virt.getTotalSize(), y - 66, 'total size shrinks by 2 hidden rows (66px)');
+    const countChip = rowParent.querySelector('[data-ag-branch-count]');
+    assert.ok(countChip, 'collapsed parent shows branch count chip');
+    assert.equal(countChip.textContent, '2');
+
+    // Programmatic scrollToIndex on a collapsed child auto-expands parent and scrolls to its new slot
+    virt.scrollToIndex(4, { align: 'start' });
+    assert.equal(h.window.__agBranchChat.isParentCollapsed(PARENT), false);
+    assert.equal(scrolledOffsets[scrolledOffsets.length - 1], 127);
+
+    // Disabling feature restores original virtualizer order & clears all tree DOM marks
+    h.window.__agBranchChat.setEnabled(false);
+    assert.deepEqual(
+      Array.from(virt.getVirtualItems(), (v) => v.index),
+      [0, 1, 2, 3, 4, 5, 6]
+    );
+    assert.equal(rowParent.hasAttribute('data-ag-branch-parent'), false);
+    assert.equal(rowParent.querySelector('[data-ag-branch-toggle]'), null);
+    assert.equal(rowForkA.hasAttribute('data-ag-branch-child'), false);
   } finally {
     h.close();
   }

@@ -7,6 +7,10 @@
   const FORK_TARGET_CURRENT_WORKSPACE = 1;
   const AGENT_WORKING_H6_RE = /^(?:Agent\s+working|Agent\s*正在执行|Agent\s*正在工作|正在工作)$/i;
   const BRANCHED_IDS_STORAGE_KEY = 'ag_branch_chat_ids_v1';
+  const BRANCHED_PARENTS_STORAGE_KEY = 'ag_branch_chat_parents_v1';
+  const COLLAPSED_PARENTS_STORAGE_KEY = 'ag_branch_chat_collapsed_v1';
+  const MAX_VISUAL_DEPTH = 3;
+  const VIRT_PATCH_TOKEN = Symbol('agBranchVirtPatch');
 
   const MORE_ICON_SVG =
     '<svg class="ag-branch-ico h-4 w-4" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.75"/><circle cx="12" cy="12" r="1.75"/><circle cx="19" cy="12" r="1.75"/></svg>';
@@ -14,6 +18,8 @@
     '<svg class="ag-branch-menu-ico" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h6.5"/><path d="M10.5 12 19 5"/><path d="M14.5 5H19v4.5"/><path d="M10.5 12 19 19"/><path d="M14.5 19H19v-4.5"/></svg>';
   const SPINNER_ICON_SVG =
     '<svg class="ag-branch-spinner h-4 w-4" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke-opacity="0.22"/><path d="M12 3a9 9 0 0 1 9 9"/></svg>';
+  const CHEVRON_DOWN_SVG =
+    '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 6 3.5 4 3.5-4"/></svg>';
 
   let enabled = ctx.modules?.branchChat !== false;
   let disposed = false;
@@ -31,17 +37,43 @@
   let dclHandler = null;
   let lastBranchedFetchAt = 0;
   let branchedFetchInFlight = false;
+  let treeVersion = 1;
+  let patchedVirt = null;
+  let lastSidebarMetaByCid = new Map();
   const branchedIds = new Set();
+  const parentByChild = new Map();
+  const collapsedParents = new Set();
   const stats = { branchedCount: 0, fallbackMovedCount: 0, lastBranchedId: '', lastError: '' };
 
   function loadStoredBranchedIds() {
     try {
-      const raw = typeof localStorage === 'object' && localStorage ? localStorage.getItem(BRANCHED_IDS_STORAGE_KEY) : null;
+      if (typeof localStorage !== 'object' || !localStorage) return;
+      const raw = localStorage.getItem(BRANCHED_IDS_STORAGE_KEY);
       const arr = raw ? JSON.parse(raw) : null;
       if (Array.isArray(arr)) {
         for (const id of arr) {
           const s = String(id || '').trim().toLowerCase();
           if (UUID_RE.test(s)) branchedIds.add(s);
+        }
+      }
+      const rawParents = localStorage.getItem(BRANCHED_PARENTS_STORAGE_KEY);
+      const pObj = rawParents ? JSON.parse(rawParents) : null;
+      if (pObj && typeof pObj === 'object' && !Array.isArray(pObj)) {
+        for (const [k, v] of Object.entries(pObj)) {
+          const child = String(k || '').trim().toLowerCase();
+          const parent = String(v || '').trim().toLowerCase();
+          if (UUID_RE.test(child) && UUID_RE.test(parent) && child !== parent) {
+            branchedIds.add(child);
+            parentByChild.set(child, parent);
+          }
+        }
+      }
+      const rawCol = localStorage.getItem(COLLAPSED_PARENTS_STORAGE_KEY);
+      const colArr = rawCol ? JSON.parse(rawCol) : null;
+      if (Array.isArray(colArr)) {
+        for (const id of colArr) {
+          const s = String(id || '').trim().toLowerCase();
+          if (UUID_RE.test(s)) collapsedParents.add(s);
         }
       }
     } catch {}
@@ -51,17 +83,63 @@
     try {
       if (typeof localStorage === 'object' && localStorage) {
         localStorage.setItem(BRANCHED_IDS_STORAGE_KEY, JSON.stringify(Array.from(branchedIds).slice(-500)));
+        const entries = Array.from(parentByChild.entries()).slice(-500);
+        localStorage.setItem(BRANCHED_PARENTS_STORAGE_KEY, JSON.stringify(Object.fromEntries(entries)));
       }
     } catch {}
   }
 
-  function markBranchedId(cid) {
+  function persistCollapsedParents() {
+    try {
+      if (typeof localStorage === 'object' && localStorage) {
+        localStorage.setItem(COLLAPSED_PARENTS_STORAGE_KEY, JSON.stringify(Array.from(collapsedParents).slice(-200)));
+      }
+    } catch {}
+  }
+
+  function emitTreeUpdated() {
+    try {
+      if (typeof CustomEvent === 'function' && typeof window.dispatchEvent === 'function') {
+        window.dispatchEvent(new CustomEvent('ag-branch-tree-updated', { detail: { version: treeVersion } }));
+      }
+    } catch {}
+  }
+
+  function markBranchedId(cid, parentCid = '') {
     const norm = String(cid || '').trim().toLowerCase();
     if (!UUID_RE.test(norm)) return false;
-    if (branchedIds.has(norm)) return false;
-    branchedIds.add(norm);
-    persistStoredBranchedIds();
-    return true;
+    let changed = false;
+    if (!branchedIds.has(norm)) {
+      branchedIds.add(norm);
+      changed = true;
+    }
+    const normParent = String(parentCid || '').trim().toLowerCase();
+    if (UUID_RE.test(normParent) && normParent !== norm && parentByChild.get(norm) !== normParent) {
+      parentByChild.set(norm, normParent);
+      changed = true;
+    }
+    if (changed) {
+      treeVersion += 1;
+      persistStoredBranchedIds();
+      emitTreeUpdated();
+    }
+    return changed;
+  }
+
+  function expandAncestorsOf(cid) {
+    let cur = String(cid || '').trim().toLowerCase();
+    const seen = new Set();
+    let changed = false;
+    while (cur && !seen.has(cur)) {
+      seen.add(cur);
+      if (collapsedParents.delete(cur)) changed = true;
+      cur = parentByChild.get(cur) || '';
+    }
+    if (changed) {
+      treeVersion += 1;
+      persistCollapsedParents();
+    }
+    return changed;
   }
 
   function isBranched(cid, titleHint = '') {
@@ -69,6 +147,185 @@
     if (norm && branchedIds.has(norm)) return true;
     if (titleHint && /\(fork\)\s*$/i.test(String(titleHint))) return true;
     return false;
+  }
+
+  function getParentId(cid) {
+    const norm = String(cid || '').trim().toLowerCase();
+    return norm ? parentByChild.get(norm) || '' : '';
+  }
+
+  function isParentCollapsed(cid) {
+    const norm = String(cid || '').trim().toLowerCase();
+    return Boolean(norm && collapsedParents.has(norm));
+  }
+
+  function groupConversationRun(ids, { respectCollapsed = true } = {}) {
+    const len = Array.isArray(ids) ? ids.length : 0;
+    if (len === 0) return { entries: [], changed: false, reordered: false };
+
+    const normIds = new Array(len);
+    const indexByCid = new Map();
+    for (let i = 0; i < len; i++) {
+      const c = String(ids[i] || '').trim().toLowerCase();
+      normIds[i] = c;
+      if (c && !indexByCid.has(c)) indexByCid.set(c, i);
+    }
+
+    const childrenOf = new Map();
+    const roots = [];
+    let hasAnyRelation = false;
+
+    for (let i = 0; i < len; i++) {
+      const cid = normIds[i];
+      let parentPos = -1;
+      if (cid) {
+        let cur = parentByChild.get(cid) || '';
+        const seen = new Set([cid]);
+        while (cur && !seen.has(cur)) {
+          seen.add(cur);
+          if (indexByCid.has(cur)) {
+            parentPos = indexByCid.get(cur);
+            break;
+          }
+          cur = parentByChild.get(cur) || '';
+        }
+      }
+      if (parentPos >= 0 && parentPos !== i) {
+        hasAnyRelation = true;
+        let list = childrenOf.get(parentPos);
+        if (!list) {
+          list = [];
+          childrenOf.set(parentPos, list);
+        }
+        list.push(i);
+      } else {
+        roots.push(i);
+      }
+    }
+
+    if (!hasAnyRelation) {
+      const entries = new Array(len);
+      for (let i = 0; i < len; i++) {
+        entries[i] = {
+          origPos: i,
+          cid: normIds[i],
+          depth: 0,
+          rawDepth: 0,
+          parentCid: '',
+          directChildCount: 0,
+          totalDescendantCount: 0,
+          collapsed: false,
+          isLastChild: false,
+          isGroupedChild: false
+        };
+      }
+      return { entries, changed: false, reordered: false };
+    }
+
+    const bestPosCache = new Map();
+    const descCountCache = new Map();
+    const computeMetrics = (pos, stack = new Set()) => {
+      if (bestPosCache.has(pos)) return { best: bestPosCache.get(pos), desc: descCountCache.get(pos) };
+      if (stack.has(pos)) return { best: pos, desc: 0 };
+      stack.add(pos);
+      let best = pos;
+      let desc = 0;
+      const kids = childrenOf.get(pos);
+      if (kids) {
+        for (const k of kids) {
+          const m = computeMetrics(k, stack);
+          if (m.best < best) best = m.best;
+          desc += 1 + m.desc;
+        }
+      }
+      stack.delete(pos);
+      bestPosCache.set(pos, best);
+      descCountCache.set(pos, desc);
+      return { best, desc };
+    };
+
+    for (let i = 0; i < len; i++) computeMetrics(i);
+    const cmpByBest = (a, b) => {
+      const ba = bestPosCache.get(a) ?? a;
+      const bb = bestPosCache.get(b) ?? b;
+      return ba !== bb ? ba - bb : a - b;
+    };
+    roots.sort(cmpByBest);
+    for (const list of childrenOf.values()) list.sort(cmpByBest);
+
+    const entries = [];
+    const emitted = new Set();
+    const visit = (pos, depth, parentCid, isLastChild) => {
+      if (emitted.has(pos)) return;
+      emitted.add(pos);
+      const cid = normIds[pos];
+      const kids = childrenOf.get(pos) || [];
+      const totalDesc = descCountCache.get(pos) || 0;
+      const collapsed = Boolean(respectCollapsed && totalDesc > 0 && cid && collapsedParents.has(cid));
+      entries.push({
+        origPos: pos,
+        cid,
+        depth: Math.min(depth, MAX_VISUAL_DEPTH),
+        rawDepth: depth,
+        parentCid,
+        directChildCount: kids.length,
+        totalDescendantCount: totalDesc,
+        collapsed,
+        isLastChild,
+        isGroupedChild: depth > 0
+      });
+      if (kids.length > 0 && !collapsed) {
+        for (let k = 0; k < kids.length; k++) {
+          visit(kids[k], depth + 1, cid, k === kids.length - 1);
+        }
+      }
+    };
+
+    for (const r of roots) visit(r, 0, '', false);
+
+    let reordered = entries.length !== len;
+    if (!reordered) {
+      for (let i = 0; i < len; i++) {
+        if (entries[i].origPos !== i) {
+          reordered = true;
+          break;
+        }
+      }
+    }
+    return { entries, changed: true, reordered };
+  }
+
+  function orderConversationList(items, { respectCollapsed = true } = {}) {
+    if (!Array.isArray(items) || items.length === 0) return [];
+    if (!enabled || disposed || parentByChild.size === 0) return items;
+
+    const out = [];
+    let i = 0;
+    while (i < items.length) {
+      const pinnedFlag = Boolean(items[i]?.pinned);
+      let j = i + 1;
+      while (j < items.length && Boolean(items[j]?.pinned) === pinnedFlag) j++;
+      const slice = items.slice(i, j);
+      const grouped = groupConversationRun(
+        slice.map((it) => it?.id || it?.cascadeId || ''),
+        { respectCollapsed }
+      );
+      for (const e of grouped.entries) {
+        const src = slice[e.origPos];
+        out.push(
+          Object.assign({}, src, {
+            branchDepth: e.depth,
+            branchParentId: e.parentCid,
+            branchChildCount: e.totalDescendantCount,
+            branchCollapsed: e.collapsed,
+            branchIsLastChild: e.isLastChild,
+            branchIsGroupedChild: e.isGroupedChild
+          })
+        );
+      }
+      i = j;
+    }
+    return out;
   }
 
   loadStoredBranchedIds();
@@ -726,7 +983,8 @@
       }
 
       const returnedPid = String(res?.newProjectId || '').trim();
-      markBranchedId(newCascadeId);
+      markBranchedId(newCascadeId, cid);
+      expandAncestorsOf(cid);
       const projSync = await ensureSameProject(newCascadeId, sourceProjectId, returnedPid, { store, actions });
       const targetProjectId = projSync.projectId || (returnedPid && !RESERVED_PROJECTS.has(returnedPid) ? returnedPid : '');
 
@@ -742,6 +1000,7 @@
       stats.branchedCount += 1;
       stats.lastBranchedId = newCascadeId;
       stats.lastError = '';
+      notifyVirtualizerChange();
       decorateBranchedTitles();
       showToast(L('已分支到新聊天', 'Branched into new chat'), 'ok');
 
@@ -853,6 +1112,395 @@
     iconTarget.group.appendChild(btn);
   }
 
+  function isSectionHeaderKey(key) {
+    const s = String(key || '');
+    return s.startsWith('section-') || s === 'main-section-header';
+  }
+
+  function isPinnedInStore(cid, store) {
+    if (!cid || !store) return false;
+    try {
+      const state = store.getState?.();
+      const pinnedIdx = state?.trajectorySummaries?.indexes?.pinned;
+      if (pinnedIdx) {
+        if (Array.isArray(pinnedIdx) && pinnedIdx.includes(cid)) return true;
+        if (pinnedIdx instanceof Set && pinnedIdx.has(cid)) return true;
+        if (typeof pinnedIdx === 'object' && Object.prototype.hasOwnProperty.call(pinnedIdx, cid) && pinnedIdx[cid]) {
+          return true;
+        }
+      }
+      const sum = state?.trajectorySummaries?.summaries?.[cid];
+      if (sum?.annotations?.pinned === true) return true;
+    } catch {}
+    return false;
+  }
+
+  function findSidebarVirtualizer() {
+    const sb = document.querySelector('[data-testid="conversation-list-sidebar"]');
+    if (!sb) return null;
+    const seen = new Set();
+    const starts = [sb.firstElementChild, sb];
+    for (const node of starts) {
+      if (!node) continue;
+      let fiber = activeFiber(node);
+      for (let d = 0; fiber && d < 18; d++, fiber = fiber.return) {
+        if (seen.has(fiber)) break;
+        seen.add(fiber);
+        for (const branch of [fiber, fiber.alternate]) {
+          let hook = branch?.memoizedState;
+          for (let hi = 0; hook && hi < 64; hi++, hook = hook.next) {
+            for (const cand of [hook.memoizedState, hook.memoizedState?.current]) {
+              if (
+                cand &&
+                typeof cand === 'object' &&
+                cand.scrollElement === sb &&
+                typeof cand.getVirtualItems === 'function' &&
+                typeof cand.getTotalSize === 'function' &&
+                typeof cand.getMeasurements === 'function'
+              ) {
+                return cand;
+              }
+            }
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  function computeVirtualPlan(virt) {
+    const count = Number(virt?.options?.count || 0);
+    const getItemKey = virt?.options?.getItemKey;
+    if (!enabled || disposed || count <= 0 || typeof getItemKey !== 'function' || parentByChild.size === 0) {
+      lastSidebarMetaByCid = new Map();
+      return null;
+    }
+
+    const { store } = findBindings(virt.scrollElement || null);
+    const keys = new Array(count);
+    const isUuid = new Array(count);
+    const pinnedArr = new Array(count);
+    let sigParts = `${treeVersion}|${count}`;
+
+    for (let i = 0; i < count; i++) {
+      let k = '';
+      try {
+        k = String(getItemKey(i) ?? '');
+      } catch {}
+      keys[i] = k;
+      const u = UUID_RE.test(k);
+      isUuid[i] = u;
+      const p = u ? isPinnedInStore(k, store) : false;
+      pinnedArr[i] = p;
+      sigParts += `|${k}${p ? ':P' : ''}`;
+    }
+
+    const patchState = virt[VIRT_PATCH_TOKEN];
+    if (patchState && patchState.cachedPlan && patchState.cachedPlan.sig === sigParts) {
+      lastSidebarMetaByCid = patchState.cachedPlan.metaByCid;
+      return patchState.cachedPlan;
+    }
+
+    const displayOrder = [];
+    const origToSlot = new Map();
+    const metaByCid = new Map();
+    let reordered = false;
+
+    let i = 0;
+    while (i < count) {
+      if (!isUuid[i]) {
+        origToSlot.set(i, displayOrder.length);
+        displayOrder.push(i);
+        i += 1;
+        continue;
+      }
+      const pFlag = pinnedArr[i];
+      let j = i + 1;
+      while (j < count && isUuid[j] && pinnedArr[j] === pFlag) j += 1;
+
+      const runSlice = keys.slice(i, j);
+      const grouped = groupConversationRun(runSlice, { respectCollapsed: true });
+      if (grouped.reordered) reordered = true;
+
+      for (const e of grouped.entries) {
+        const origIdx = i + e.origPos;
+        origToSlot.set(origIdx, displayOrder.length);
+        displayOrder.push(origIdx);
+        if (e.cid && (e.isGroupedChild || e.totalDescendantCount > 0)) {
+          metaByCid.set(e.cid, e);
+        }
+      }
+      i = j;
+    }
+
+    const plan = {
+      sig: sigParts,
+      count,
+      keys,
+      displayOrder,
+      origToSlot,
+      metaByCid,
+      reordered
+    };
+    if (patchState) {
+      patchState.cachedPlan = plan;
+      patchState.cachedLayout = null;
+    }
+    lastSidebarMetaByCid = metaByCid;
+    return plan;
+  }
+
+  function computeVirtualLayout(virt, plan, origGetMeasurements) {
+    const raw = origGetMeasurements.call(virt);
+    const scrollMargin = Number(virt?.options?.scrollMargin || 0);
+    const patchState = virt[VIRT_PATCH_TOKEN];
+    if (
+      patchState &&
+      patchState.cachedLayout &&
+      patchState.cachedLayout.plan === plan &&
+      patchState.cachedLayout.raw === raw &&
+      patchState.cachedLayout.scrollMargin === scrollMargin
+    ) {
+      return patchState.cachedLayout;
+    }
+
+    const baseStart = raw && raw.length > 0 && Number.isFinite(raw[0].start) ? raw[0].start : scrollMargin;
+    const slots = new Array(plan.displayOrder.length);
+    let cursor = baseStart;
+
+    for (let s = 0; s < plan.displayOrder.length; s++) {
+      const origIdx = plan.displayOrder[s];
+      const m = raw?.[origIdx];
+      const size = m && Number.isFinite(m.size) ? m.size : 33;
+      const start = cursor;
+      const end = start + size;
+      slots[s] = {
+        index: origIdx,
+        key: m ? m.key : plan.keys[origIdx] ?? origIdx,
+        start,
+        size,
+        end,
+        lane: m ? m.lane ?? 0 : 0
+      };
+      cursor = end;
+    }
+
+    const totalSize = slots.length > 0 ? Math.max(0, slots[slots.length - 1].end - scrollMargin) : 0;
+    const layout = { plan, raw, scrollMargin, slots, totalSize };
+    if (patchState) patchState.cachedLayout = layout;
+    return layout;
+  }
+
+  function computeOffsetForSlot(virt, layout, slotIdx, align = 'auto') {
+    const slot = layout.slots[slotIdx];
+    if (!slot) return undefined;
+    const scrollOffset = Number(virt.getScrollOffset?.() ?? virt.scrollOffset ?? 0);
+    const viewport = Number(virt.scrollRect?.height ?? virt.scrollElement?.clientHeight ?? 800);
+    let resolved = align || 'auto';
+    if (resolved === 'auto') {
+      if (slot.end >= scrollOffset + viewport) resolved = 'end';
+      else if (slot.start <= scrollOffset) resolved = 'start';
+      else return [scrollOffset, 'auto'];
+    }
+    let offset = slot.start;
+    if (resolved === 'center') offset = slot.start - viewport / 2 + slot.size / 2;
+    else if (resolved === 'end') offset = slot.end - viewport;
+    const maxOff = Math.max(0, layout.totalSize - viewport);
+    return [Math.max(0, Math.min(maxOff, offset)), resolved];
+  }
+
+  function unpatchVirtualizer(virt = patchedVirt) {
+    if (!virt || !virt[VIRT_PATCH_TOKEN]) {
+      if (virt === patchedVirt) patchedVirt = null;
+      return;
+    }
+    const orig = virt[VIRT_PATCH_TOKEN].orig;
+    try {
+      virt.getVirtualItems = orig.getVirtualItems;
+      virt.getTotalSize = orig.getTotalSize;
+      if (orig.getOffsetForIndex) virt.getOffsetForIndex = orig.getOffsetForIndex;
+      if (orig.scrollToIndex) virt.scrollToIndex = orig.scrollToIndex;
+    } catch {}
+    try {
+      delete virt[VIRT_PATCH_TOKEN];
+    } catch {}
+    if (virt === patchedVirt) patchedVirt = null;
+    try {
+      virt.options?.onChange?.(virt, false);
+    } catch {}
+  }
+
+  function notifyVirtualizerChange() {
+    const virt = ensureVirtualizerPatched();
+    if (!virt) return;
+    const patchState = virt[VIRT_PATCH_TOKEN];
+    if (patchState) {
+      patchState.cachedPlan = null;
+      patchState.cachedLayout = null;
+    }
+    try {
+      virt.options?.onChange?.(virt, false);
+    } catch {}
+  }
+
+  function ensureVirtualizerPatched() {
+    if (disposed || !enabled) return null;
+    const virt = findSidebarVirtualizer();
+    if (!virt) return null;
+    if (patchedVirt && patchedVirt !== virt) {
+      unpatchVirtualizer(patchedVirt);
+    }
+    if (virt[VIRT_PATCH_TOKEN]) {
+      patchedVirt = virt;
+      computeVirtualPlan(virt);
+      return virt;
+    }
+
+    const orig = {
+      getVirtualItems: virt.getVirtualItems,
+      getTotalSize: virt.getTotalSize,
+      getMeasurements: virt.getMeasurements,
+      getOffsetForIndex: typeof virt.getOffsetForIndex === 'function' ? virt.getOffsetForIndex : null,
+      scrollToIndex: typeof virt.scrollToIndex === 'function' ? virt.scrollToIndex : null
+    };
+
+    virt[VIRT_PATCH_TOKEN] = {
+      orig,
+      cachedPlan: null,
+      cachedLayout: null
+    };
+
+    virt.getVirtualItems = function agBranchGetVirtualItems() {
+      const plan = computeVirtualPlan(virt);
+      if (!plan || !plan.reordered) return orig.getVirtualItems.call(virt);
+      const layout = computeVirtualLayout(virt, plan, orig.getMeasurements);
+      const slots = layout.slots;
+      if (!slots.length) return [];
+
+      const scrollOffset = Number(virt.getScrollOffset?.() ?? virt.scrollOffset ?? 0);
+      const viewport = Number(virt.scrollRect?.height ?? virt.scrollElement?.clientHeight ?? 800);
+      const overscan = Math.max(4, Number(virt.options?.overscan ?? 10));
+
+      let startSlot = 0;
+      while (startSlot < slots.length - 1 && slots[startSlot].end < scrollOffset) startSlot += 1;
+      let endSlot = startSlot;
+      const viewBottom = scrollOffset + viewport;
+      while (endSlot < slots.length - 1 && slots[endSlot].start <= viewBottom) endSlot += 1;
+
+      const from = Math.max(0, startSlot - overscan);
+      const to = Math.min(slots.length - 1, endSlot + overscan);
+
+      /* Preserve active sticky section-header above viewport just like z$c rangeExtractor */
+      let stickySlot = -1;
+      for (let s = startSlot; s >= 0; s--) {
+        if (isSectionHeaderKey(slots[s].key)) {
+          stickySlot = s;
+          break;
+        }
+      }
+
+      const out = [];
+      if (stickySlot >= 0 && stickySlot < from) out.push(slots[stickySlot]);
+      for (let s = from; s <= to; s++) out.push(slots[s]);
+      return out;
+    };
+
+    virt.getTotalSize = function agBranchGetTotalSize() {
+      const plan = computeVirtualPlan(virt);
+      if (!plan || !plan.reordered) return orig.getTotalSize.call(virt);
+      const layout = computeVirtualLayout(virt, plan, orig.getMeasurements);
+      return layout.totalSize;
+    };
+
+    if (orig.getOffsetForIndex) {
+      virt.getOffsetForIndex = function agBranchGetOffsetForIndex(index, align = 'auto') {
+        const plan = computeVirtualPlan(virt);
+        if (!plan || !plan.reordered) return orig.getOffsetForIndex.call(virt, index, align);
+        const slotIdx = plan.origToSlot.get(index);
+        if (slotIdx === undefined) return orig.getOffsetForIndex.call(virt, index, align);
+        const layout = computeVirtualLayout(virt, plan, orig.getMeasurements);
+        return computeOffsetForSlot(virt, layout, slotIdx, align);
+      };
+    }
+
+    if (orig.scrollToIndex) {
+      virt.scrollToIndex = function agBranchScrollToIndex(index, opts) {
+        let plan = computeVirtualPlan(virt);
+        if (!plan || !plan.reordered) return orig.scrollToIndex.call(virt, index, opts);
+        let slotIdx = plan.origToSlot.get(index);
+        if (slotIdx === undefined) {
+          const targetKey = plan.keys[index];
+          if (targetKey && expandAncestorsOf(targetKey)) {
+            plan = computeVirtualPlan(virt);
+            slotIdx = plan?.origToSlot?.get(index);
+            notifyVirtualizerChange();
+          }
+        }
+        if (slotIdx === undefined || typeof virt.scrollToOffset !== 'function') {
+          return orig.scrollToIndex.call(virt, index, opts);
+        }
+        const layout = computeVirtualLayout(virt, plan, orig.getMeasurements);
+        const res = computeOffsetForSlot(virt, layout, slotIdx, opts?.align || 'auto');
+        if (res) {
+          virt.scrollToOffset(res[0], Object.assign({}, opts, { adjustments: 0 }));
+        }
+      };
+    }
+
+    patchedVirt = virt;
+    const initialPlan = computeVirtualPlan(virt);
+    if (initialPlan && initialPlan.reordered) {
+      try {
+        virt.options?.onChange?.(virt, false);
+      } catch {}
+    }
+    return virt;
+  }
+
+  function setParentCollapsed(parentCid, nextCollapsed) {
+    const norm = String(parentCid || '').trim().toLowerCase();
+    if (!UUID_RE.test(norm)) return false;
+    const want = Boolean(nextCollapsed);
+    const had = collapsedParents.has(norm);
+    if (want === had) return false;
+    if (want) collapsedParents.add(norm);
+    else collapsedParents.delete(norm);
+    treeVersion += 1;
+    persistCollapsedParents();
+    notifyVirtualizerChange();
+    emitTreeUpdated();
+    scheduleScan();
+    return true;
+  }
+
+  function toggleParentCollapsed(parentCid) {
+    const norm = String(parentCid || '').trim().toLowerCase();
+    if (!UUID_RE.test(norm)) return false;
+    return setParentCollapsed(norm, !collapsedParents.has(norm));
+  }
+
+  function formatToggleLabel(count, collapsed) {
+    return collapsed
+      ? L(`展开 ${count} 个分支对话`, `Expand ${count} branched chats`)
+      : L(`收起 ${count} 个分支对话`, `Collapse ${count} branched chats`);
+  }
+
+  function removeTreeRowDecorations(row) {
+    if (!row) return;
+    const attrs = [
+      'data-ag-branch-flat',
+      'data-ag-branch-child',
+      'data-ag-branch-depth',
+      'data-ag-branch-last',
+      'data-ag-branch-parent',
+      'data-ag-branch-collapsed'
+    ];
+    for (const a of attrs) {
+      if (row.hasAttribute?.(a)) row.removeAttribute(a);
+    }
+    row.querySelectorAll?.('[data-ag-branch-toggle], [data-ag-branch-count]').forEach((n) => n.remove());
+  }
+
   function clearAllBranchedTitleMarks() {
     document.querySelectorAll('[data-ag-branch-title]').forEach((el) => el.removeAttribute('data-ag-branch-title'));
     document.querySelectorAll('[data-ag-branch-gutter]').forEach((el) => {
@@ -863,6 +1511,130 @@
       } catch {}
     });
     document.querySelectorAll('[data-ag-branched-row]').forEach((el) => el.removeAttribute('data-ag-branched-row'));
+    document
+      .querySelectorAll('[data-ag-branch-parent], [data-ag-branch-child], [data-ag-branch-flat]')
+      .forEach((el) => removeTreeRowDecorations(el));
+    document.querySelectorAll('[data-ag-branch-toggle], [data-ag-branch-count]').forEach((n) => n.remove());
+    lastSidebarMetaByCid = new Map();
+  }
+
+  function syncSidebarTreeRow(row, cid, meta) {
+    if (!row) return;
+    const norm = String(cid || '').trim().toLowerCase();
+    const isFlat = !String(row.className || '').includes('pl-[30px]');
+
+    if (!meta) {
+      removeTreeRowDecorations(row);
+      return;
+    }
+
+    if (isFlat) {
+      if (row.getAttribute('data-ag-branch-flat') !== '1') row.setAttribute('data-ag-branch-flat', '1');
+    } else if (row.hasAttribute('data-ag-branch-flat')) {
+      row.removeAttribute('data-ag-branch-flat');
+    }
+
+    if (meta.isGroupedChild && meta.depth > 0) {
+      if (row.getAttribute('data-ag-branch-child') !== '1') row.setAttribute('data-ag-branch-child', '1');
+      const dStr = String(meta.depth);
+      if (row.getAttribute('data-ag-branch-depth') !== dStr) row.setAttribute('data-ag-branch-depth', dStr);
+      if (meta.isLastChild) {
+        if (row.getAttribute('data-ag-branch-last') !== '1') row.setAttribute('data-ag-branch-last', '1');
+      } else if (row.hasAttribute('data-ag-branch-last')) {
+        row.removeAttribute('data-ag-branch-last');
+      }
+    } else {
+      if (row.hasAttribute('data-ag-branch-child')) row.removeAttribute('data-ag-branch-child');
+      if (row.hasAttribute('data-ag-branch-depth')) row.removeAttribute('data-ag-branch-depth');
+      if (row.hasAttribute('data-ag-branch-last')) row.removeAttribute('data-ag-branch-last');
+    }
+
+    if (meta.totalDescendantCount > 0) {
+      if (row.getAttribute('data-ag-branch-parent') !== '1') row.setAttribute('data-ag-branch-parent', '1');
+      const colStr = meta.collapsed ? '1' : '0';
+      if (row.getAttribute('data-ag-branch-collapsed') !== colStr) row.setAttribute('data-ag-branch-collapsed', colStr);
+
+      const label = formatToggleLabel(meta.totalDescendantCount, meta.collapsed);
+      const toggleLeftPx = (isFlat ? 5 : 9) + meta.depth * 16;
+      const toggleLeftVal = `${toggleLeftPx}px`;
+
+      let btn = row.querySelector('[data-ag-branch-toggle]');
+      if (!btn) {
+        btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'ag-branch-tree-toggle';
+        btn.setAttribute('data-ag-i18n-ignore', '1');
+        btn.innerHTML = CHEVRON_DOWN_SVG;
+        const stopEv = (ev) => {
+          ev.stopPropagation();
+        };
+        btn.addEventListener('pointerdown', stopEv);
+        btn.addEventListener('mousedown', stopEv);
+        btn.addEventListener('click', (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const targetId = btn.getAttribute('data-ag-branch-toggle') || '';
+          if (targetId) toggleParentCollapsed(targetId);
+        });
+        row.appendChild(btn);
+      }
+      if (btn.getAttribute('data-ag-branch-toggle') !== norm) btn.setAttribute('data-ag-branch-toggle', norm);
+      const expStr = meta.collapsed ? 'false' : 'true';
+      if (btn.getAttribute('aria-expanded') !== expStr) btn.setAttribute('aria-expanded', expStr);
+      if (btn.getAttribute('aria-label') !== label) {
+        btn.setAttribute('aria-label', label);
+        btn.setAttribute('title', label);
+      }
+      if (btn.style && typeof btn.style.setProperty === 'function') {
+        if (btn.style.getPropertyValue?.('--ag-branch-toggle-left') !== toggleLeftVal) {
+          btn.style.setProperty('--ag-branch-toggle-left', toggleLeftVal);
+        }
+      } else if (btn.style) {
+        btn.style['--ag-branch-toggle-left'] = toggleLeftVal;
+      }
+
+      let chip = row.querySelector('[data-ag-branch-count]');
+      if (meta.collapsed) {
+        if (!chip) {
+          chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'ag-branch-tree-count';
+          chip.setAttribute('data-ag-i18n-ignore', '1');
+          const stopEv = (ev) => {
+            ev.stopPropagation();
+          };
+          chip.addEventListener('pointerdown', stopEv);
+          chip.addEventListener('mousedown', stopEv);
+          chip.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const targetId = chip.getAttribute('data-ag-branch-count') || '';
+            if (targetId) setParentCollapsed(targetId, false);
+          });
+          /* Place before the right-side timestamp container when possible */
+          const kids = row.children;
+          const rightSide = kids && kids.length >= 3 ? kids[2] : null;
+          if (rightSide && typeof row.insertBefore === 'function') {
+            row.insertBefore(chip, rightSide);
+          } else {
+            row.appendChild(chip);
+          }
+        }
+        const countTxt = String(meta.totalDescendantCount);
+        if (chip.getAttribute('data-ag-branch-count') !== norm) chip.setAttribute('data-ag-branch-count', norm);
+        if (chip.textContent !== countTxt) chip.textContent = countTxt;
+        if (chip.getAttribute('title') !== label) {
+          chip.setAttribute('title', label);
+          chip.setAttribute('aria-label', label);
+        }
+      } else if (chip) {
+        chip.remove();
+      }
+    } else {
+      if (row.hasAttribute('data-ag-branch-parent')) row.removeAttribute('data-ag-branch-parent');
+      if (row.hasAttribute('data-ag-branch-collapsed')) row.removeAttribute('data-ag-branch-collapsed');
+      row.querySelectorAll('[data-ag-branch-toggle], [data-ag-branch-count]').forEach((n) => n.remove());
+    }
   }
 
   function computeGutterIconLeft(containerEl, titleEl) {
@@ -947,10 +1719,16 @@
       return;
     }
 
+    ensureVirtualizerPatched();
+
     /* 1. Native sidebar rows (Projects, Outside of Project, Pinned) */
     const nativeRows = document.querySelectorAll('[data-testid="conversation-row-sidebar"][data-cascade-id]');
     for (const row of nativeRows) {
       const cid = row.getAttribute('data-cascade-id') || '';
+      const norm = cid.trim().toLowerCase();
+      const meta = lastSidebarMetaByCid.get(norm) || null;
+      /* Apply tree indentation & parent toggle BEFORE measuring gutter icon position */
+      syncSidebarTreeRow(row, norm, meta);
       const titleEl = row.querySelector('a[href^="/c/"] span.truncate') || row.querySelector('span.truncate');
       const hint = titleEl?.textContent || '';
       applyBranchTitleMark(row, titleEl, isBranched(cid, hint));
@@ -1010,9 +1788,30 @@
           changed = true;
         }
       }
-      if (changed) persistStoredBranchedIds();
+      if (res.parents && typeof res.parents === 'object' && !Array.isArray(res.parents)) {
+        for (const [rawChild, rawParent] of Object.entries(res.parents)) {
+          const child = String(rawChild || '').trim().toLowerCase();
+          const parent = String(rawParent || '').trim().toLowerCase();
+          if (UUID_RE.test(child) && UUID_RE.test(parent) && child !== parent) {
+            if (!branchedIds.has(child)) {
+              branchedIds.add(child);
+              changed = true;
+            }
+            if (parentByChild.get(child) !== parent) {
+              parentByChild.set(child, parent);
+              changed = true;
+            }
+          }
+        }
+      }
+      if (changed) {
+        treeVersion += 1;
+        persistStoredBranchedIds();
+        notifyVirtualizerChange();
+        emitTreeUpdated();
+      }
       decorateBranchedTitles();
-      return { ok: true, count: branchedIds.size, changed };
+      return { ok: true, count: branchedIds.size, parentLinks: parentByChild.size, changed };
     } catch {
       return { ok: false };
     } finally {
@@ -1043,17 +1842,23 @@
       const span = activePopover.querySelector('.ag-branch-menu-label');
       if (span) span.textContent = L('分支到新聊天', 'Branch in new chat');
     }
+    decorateBranchedTitles();
   }
 
   function setEnabled(next) {
     enabled = Boolean(next);
+    treeVersion += 1;
     if (!enabled) {
       closePopover();
       document.querySelectorAll('[data-ag-branch-more]').forEach((n) => n.remove());
+      unpatchVirtualizer();
       clearAllBranchedTitleMarks();
+      emitTreeUpdated();
       return;
     }
     syncBranchedIdsFromDaemon(true);
+    notifyVirtualizerChange();
+    emitTreeUpdated();
     scheduleScan();
   }
 
@@ -1155,6 +1960,7 @@
     window.removeEventListener('focus', onWindowFocusOrNav);
     window.removeEventListener('popstate', onWindowFocusOrNav);
     document.querySelectorAll('[data-ag-branch-more]').forEach((n) => n.remove());
+    unpatchVirtualizer();
     clearAllBranchedTitleMarks();
     document.getElementById('ag-branch-chat-toast')?.remove();
     cachedService = null;
@@ -1171,12 +1977,29 @@
     decorateBranchedTitles,
     syncBranchedIdsFromDaemon,
     isBranched,
+    getParentId,
+    getParentMap: () => Object.fromEntries(parentByChild.entries()),
     getBranchedIds: () => Array.from(branchedIds),
+    groupConversationRun,
+    orderConversationList,
+    isParentCollapsed,
+    setParentCollapsed,
+    toggleParentCollapsed,
+    ensureVirtualizerPatched,
     setEnabled,
     refreshLanguage,
     closePopover,
     dispose,
-    getStatus: () => ({ enabled, disposed, forking, branchedTotal: branchedIds.size, ...stats })
+    getStatus: () => ({
+      enabled,
+      disposed,
+      forking,
+      branchedTotal: branchedIds.size,
+      parentLinks: parentByChild.size,
+      collapsedParents: collapsedParents.size,
+      virtualizerPatched: Boolean(patchedVirt),
+      ...stats
+    })
   };
 
   window.__agBranchChat = api;
